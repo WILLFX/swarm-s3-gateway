@@ -1,0 +1,36 @@
+name: Rust
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  test-gateway-identity-handshake:
+    runs-on: ubuntu-latest
+
+    env:
+      S3GW_MASTER_SERVICE_KEY_HEX: ${{ secrets.S3GW_MASTER_SERVICE_KEY_HEX }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          protoc --version
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify master service key is present
+        run: |
+          test -n "$S3GW_MASTER_SERVICE_KEY_HEX"
+
+      - name: Run identity handshake integration test
+        run: cargo test -p gateway --test identity_handshake -- --nocapture
