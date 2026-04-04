@@ -43,6 +43,9 @@ impl RegistryBackedSigV4Validator {
 
         // Async chain auth query (non-blocking)
         let entry = self.registry.fetch_entry(access_key_hash).await?;
+        if !entry.enabled {
+        bail!("credential disabled");
+        }
 
         let secret = self
             .unwrapper
