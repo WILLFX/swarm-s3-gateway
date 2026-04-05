@@ -22,3 +22,5 @@ hex.workspace = true
 sha2.workspace = true
 zeroize.workspace = true
 tracing.workspace = true
+hmac = "0.12"
+parity-scale-codec = { version = "3", features = ["derive"] }
