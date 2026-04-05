@@ -19,4 +19,4 @@ pub struct ChainRegistryEntry {
 pub struct AwsPrincipal {
     pub access_key_id: String,
     pub owner: SubstrateAddress32,
-} common crate shared types
+}
