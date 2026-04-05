@@ -1,4 +1,4 @@
-/use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 pub type AccessKeyHash = [u8; 32];
 pub type SubstrateAddress32 = [u8; 32];
