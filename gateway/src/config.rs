@@ -1,1 +1,2 @@
-﻿pub struct Config;
+﻿#[derive(Clone, Debug, Default)]
+pub struct Config;
