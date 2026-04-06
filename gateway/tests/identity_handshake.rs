@@ -1,24 +1,20 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use axum::http::{HeaderMap, HeaderValue, Method, Request, Uri};
-use bytes::Bytes;
-use common::types::{AccessKeyHash, AwsPrincipal, ChainRegistryEntry, SubstrateAddress32};
-use gateway::auth::sigv4::RegistryBackedSigV4Validator;
-use gateway::auth::unwrap::EnvKeyUnwrapper;
-use gateway::traits::{RegistryClient, SecretUnwrapper};
-use hmac::{Hmac, Mac};
-use sha2::{Digest, Sha256};
-use std::sync::Arc;
-use zeroize::Zeroizing;
-
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Nonce,
 };
+use axum::http::{HeaderMap, HeaderValue, Method, Request, Uri};
+use bytes::Bytes;
+use common::types::{AccessKeyHash, ChainRegistryEntry, SubstrateAddress32};
+use gateway::auth::sigv4::RegistryBackedSigV4Validator;
+use gateway::traits::{RegistryClient, SecretUnwrapper};
+use hmac::{Hmac, Mac};
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 type HmacSha256 = Hmac<Sha256>;
 
-#[derive(Clone)]
 struct MockRegistryClient {
     expected_hash: AccessKeyHash,
     entry: ChainRegistryEntry,
@@ -34,48 +30,43 @@ impl RegistryClient for MockRegistryClient {
     }
 }
 
-fn load_master_key_from_env() -> Result<Zeroizing<[u8; 32]>> {
-    let hex_key = std::env::var("S3GW_MASTER_SERVICE_KEY_HEX")
-        .context("S3GW_MASTER_SERVICE_KEY_HEX is not set")?;
-
-    let bytes = hex::decode(hex_key.trim())
-        .context("invalid hex in S3GW_MASTER_SERVICE_KEY_HEX")?;
-
-    if bytes.len() != 32 {
-        return Err(anyhow!(
-            "S3GW_MASTER_SERVICE_KEY_HEX must decode to exactly 32 bytes"
-        ));
-    }
-
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    Ok(Zeroizing::new(arr))
+struct FixedKeyUnwrapper {
+    master_key: [u8; 32],
 }
 
-fn hash_access_key_id(access_key_id: &str) -> AccessKeyHash {
-    let digest = Sha256::digest(access_key_id.as_bytes());
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&digest);
-    out
+#[async_trait]
+impl SecretUnwrapper for FixedKeyUnwrapper {
+    async fn unwrap_sigv4_secret(
+        &self,
+        _key_version: u32,
+        nonce: &[u8],
+        encrypted_sigv4_secret: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>> {
+        let cipher = Aes256Gcm::new_from_slice(&self.master_key)
+            .map_err(|e| anyhow!("failed to init AES-GCM: {e:?}"))?;
+
+        let plaintext = cipher
+            .decrypt(
+                Nonce::from_slice(nonce),
+                Payload {
+                    msg: encrypted_sigv4_secret,
+                    aad,
+                },
+            )
+            .map_err(|e| anyhow!("failed to unwrap test secret: {e:?}"))?;
+
+        Ok(plaintext)
+    }
 }
 
 fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
-    let mut mac = HmacSha256::new_from_slice(key)?;
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(key)
+        .map_err(|e| anyhow!("failed to initialize HMAC: {e}"))?;
     mac.update(data);
     Ok(mac.finalize().into_bytes().to_vec())
 }
@@ -151,7 +142,8 @@ fn build_canonical_request(
         let value = headers
             .get(header_name)
             .ok_or_else(|| anyhow!("missing signed header: {header_name}"))?
-            .to_str()?
+            .to_str()
+            .map_err(|e| anyhow!("invalid signed header value: {e}"))?
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
@@ -176,20 +168,32 @@ fn build_canonical_request(
     ))
 }
 
+fn hash_access_key_id(access_key_id: &str) -> AccessKeyHash {
+    let digest = Sha256::digest(access_key_id.as_bytes());
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
 fn encrypt_sigv4_secret(
     master_key: &[u8; 32],
     nonce: &[u8; 12],
     aad: &[u8],
     plaintext_secret: &[u8],
 ) -> Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(master_key)?;
-    let ciphertext = cipher.encrypt(
-        Nonce::from_slice(nonce),
-        Payload {
-            msg: plaintext_secret,
-            aad,
-        },
-    )?;
+    let cipher = Aes256Gcm::new_from_slice(master_key)
+        .map_err(|e| anyhow!("failed to init AES-GCM: {e:?}"))?;
+
+    let ciphertext = cipher
+        .encrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: plaintext_secret,
+                aad,
+            },
+        )
+        .map_err(|e| anyhow!("failed to encrypt test secret: {e:?}"))?;
+
     Ok(ciphertext)
 }
 
@@ -265,36 +269,15 @@ fn build_signed_request(
     Ok(req)
 }
 
-fn make_validator(entry: ChainRegistryEntry) -> Result<RegistryBackedSigV4Validator> {
-    let master_key = load_master_key_from_env()?;
-    let access_key_id = "AKIA_TEST_ACCESS_KEY_123456";
-    let access_key_hash = hash_access_key_id(access_key_id);
-
-    let registry = Arc::new(MockRegistryClient {
-        expected_hash: access_key_hash,
-        entry,
-    });
-
-    let unwrapper: Arc<dyn SecretUnwrapper> =
-        Arc::new(EnvKeyUnwrapper::new(master_key));
-
-    Ok(RegistryBackedSigV4Validator {
-        registry,
-        unwrapper,
-        expected_service: "s3".to_string(),
-        expected_region: Some("us-east-1".to_string()),
-        allow_unsigned_payload: false,
-    })
-}
-
 #[tokio::test]
 async fn happy_path_registry_fetch_unwrap_and_sigv4_validate() -> Result<()> {
     let access_key_id = "AKIA_TEST_ACCESS_KEY_123456";
     let plaintext_sigv4_secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+
     let owner: SubstrateAddress32 = [7u8; 32];
     let access_key_hash = hash_access_key_id(access_key_id);
 
-    let master_key = load_master_key_from_env()?;
+    let master_key = [42u8; 32];
     let nonce = [9u8; 12];
 
     let encrypted_sigv4_secret = encrypt_sigv4_secret(
@@ -304,7 +287,7 @@ async fn happy_path_registry_fetch_unwrap_and_sigv4_validate() -> Result<()> {
         plaintext_sigv4_secret.as_bytes(),
     )?;
 
-    let entry = ChainRegistryEntry {
+    let registry_entry = ChainRegistryEntry {
         owner,
         encrypted_sigv4_secret,
         nonce: nonce.to_vec(),
@@ -312,7 +295,20 @@ async fn happy_path_registry_fetch_unwrap_and_sigv4_validate() -> Result<()> {
         enabled: true,
     };
 
-    let validator = make_validator(entry)?;
+    let registry = Arc::new(MockRegistryClient {
+        expected_hash: access_key_hash,
+        entry: registry_entry,
+    });
+
+    let unwrapper: Arc<dyn SecretUnwrapper> = Arc::new(FixedKeyUnwrapper { master_key });
+
+    let validator = RegistryBackedSigV4Validator {
+        registry,
+        unwrapper,
+        expected_service: "s3".to_string(),
+        expected_region: Some("us-east-1".to_string()),
+        allow_unsigned_payload: false,
+    };
 
     let body = Bytes::from_static(b"hello swarm");
     let req = build_signed_request(
@@ -334,14 +330,15 @@ async fn happy_path_registry_fetch_unwrap_and_sigv4_validate() -> Result<()> {
 }
 
 #[tokio::test]
-async fn negative_path_revocation_disabled_on_chain() -> Result<()> {
+async fn revoked_credential_fails_even_with_valid_signature() -> Result<()> {
     let access_key_id = "AKIA_TEST_ACCESS_KEY_123456";
     let plaintext_sigv4_secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
-    let owner: SubstrateAddress32 = [8u8; 32];
+
+    let owner: SubstrateAddress32 = [7u8; 32];
     let access_key_hash = hash_access_key_id(access_key_id);
 
-    let master_key = load_master_key_from_env()?;
-    let nonce = [10u8; 12];
+    let master_key = [42u8; 32];
+    let nonce = [9u8; 12];
 
     let encrypted_sigv4_secret = encrypt_sigv4_secret(
         &master_key,
@@ -350,7 +347,7 @@ async fn negative_path_revocation_disabled_on_chain() -> Result<()> {
         plaintext_sigv4_secret.as_bytes(),
     )?;
 
-    let entry = ChainRegistryEntry {
+    let registry_entry = ChainRegistryEntry {
         owner,
         encrypted_sigv4_secret,
         nonce: nonce.to_vec(),
@@ -358,12 +355,25 @@ async fn negative_path_revocation_disabled_on_chain() -> Result<()> {
         enabled: false,
     };
 
-    let validator = make_validator(entry)?;
+    let registry = Arc::new(MockRegistryClient {
+        expected_hash: access_key_hash,
+        entry: registry_entry,
+    });
 
-    let body = Bytes::from_static(b"revoked object");
+    let unwrapper: Arc<dyn SecretUnwrapper> = Arc::new(FixedKeyUnwrapper { master_key });
+
+    let validator = RegistryBackedSigV4Validator {
+        registry,
+        unwrapper,
+        expected_service: "s3".to_string(),
+        expected_region: Some("us-east-1".to_string()),
+        allow_unsigned_payload: false,
+    };
+
+    let body = Bytes::from_static(b"hello swarm");
     let req = build_signed_request(
         Method::PUT,
-        "https://example.local/my-bucket/revoked.txt",
+        "https://example.local/my-bucket/test.txt",
         "example.local",
         "20250101T120000Z",
         access_key_id,
@@ -373,33 +383,33 @@ async fn negative_path_revocation_disabled_on_chain() -> Result<()> {
 
     let err = validator.validate(&req).await.unwrap_err();
     assert!(
-        err.to_string().contains("disabled"),
-        "unexpected error: {err}"
+        err.to_string().contains("credential disabled"),
+        "unexpected error: {err:#}"
     );
 
     Ok(())
 }
 
 #[tokio::test]
-async fn negative_path_rotation_signature_for_v1_but_chain_at_v2() -> Result<()> {
+async fn rotated_key_rejects_request_signed_with_old_secret() -> Result<()> {
     let access_key_id = "AKIA_TEST_ACCESS_KEY_123456";
-    let v1_secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
-    let v2_secret = "NEWROTATEDSECRETKEYEXAMPLE0123456789ABCDEF";
-    let owner: SubstrateAddress32 = [9u8; 32];
+    let old_sigv4_secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+    let new_sigv4_secret = "ROTATEDKEY1234567890EXAMPLEKEYVALUE12345";
+
+    let owner: SubstrateAddress32 = [7u8; 32];
     let access_key_hash = hash_access_key_id(access_key_id);
 
-    let master_key = load_master_key_from_env()?;
-    let nonce = [11u8; 12];
+    let master_key = [42u8; 32];
+    let nonce = [9u8; 12];
 
-    // Chain has moved to key_version = 2 and stores the rotated secret.
     let encrypted_sigv4_secret = encrypt_sigv4_secret(
         &master_key,
         &nonce,
         &access_key_hash,
-        v2_secret.as_bytes(),
+        new_sigv4_secret.as_bytes(),
     )?;
 
-    let entry = ChainRegistryEntry {
+    let registry_entry = ChainRegistryEntry {
         owner,
         encrypted_sigv4_secret,
         nonce: nonce.to_vec(),
@@ -407,24 +417,36 @@ async fn negative_path_rotation_signature_for_v1_but_chain_at_v2() -> Result<()>
         enabled: true,
     };
 
-    let validator = make_validator(entry)?;
+    let registry = Arc::new(MockRegistryClient {
+        expected_hash: access_key_hash,
+        entry: registry_entry,
+    });
 
-    // Request is still signed with the old v1 secret.
-    let body = Bytes::from_static(b"rotated object");
+    let unwrapper: Arc<dyn SecretUnwrapper> = Arc::new(FixedKeyUnwrapper { master_key });
+
+    let validator = RegistryBackedSigV4Validator {
+        registry,
+        unwrapper,
+        expected_service: "s3".to_string(),
+        expected_region: Some("us-east-1".to_string()),
+        allow_unsigned_payload: false,
+    };
+
+    let body = Bytes::from_static(b"hello swarm");
     let req = build_signed_request(
         Method::PUT,
-        "https://example.local/my-bucket/rotated.txt",
+        "https://example.local/my-bucket/test.txt",
         "example.local",
         "20250101T120000Z",
         access_key_id,
-        v1_secret,
+        old_sigv4_secret,
         body,
     )?;
 
     let err = validator.validate(&req).await.unwrap_err();
     assert!(
         err.to_string().contains("signature mismatch"),
-        "unexpected error: {err}"
+        "unexpected error: {err:#}"
     );
 
     Ok(())
