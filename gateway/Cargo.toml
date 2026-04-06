@@ -22,5 +22,18 @@ hex.workspace = true
 sha2.workspace = true
 zeroize.workspace = true
 tracing.workspace = true
+
 hmac = "0.12"
 parity-scale-codec = { version = "3", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+axum.workspace = true
+bytes.workspace = true
+anyhow.workspace = true
+hex.workspace = true
+sha2.workspace = true
+hmac = "0.12"
+aes-gcm.workspace = true
+zeroize.workspace = true
+async-trait.workspace = true
