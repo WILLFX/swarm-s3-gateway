@@ -1,6 +1,5 @@
 use crate::traits::{RegistryClient, SecretUnwrapper};
 use anyhow::{anyhow, bail, Context, Result};
-use async_trait::async_trait;
 use axum::http::{HeaderMap, Method, Request};
 use bytes::Bytes;
 use common::types::{AccessKeyHash, AwsPrincipal};
@@ -434,9 +433,6 @@ mod tests {
 
     #[tokio::test]
     async fn happy_path_registry_fetch_unwrap_and_sigv4_validate() -> Result<()> {
-        // ------------------------------------------------------------------
-        // 1. Setup: known plaintext secret + known master key
-        // ------------------------------------------------------------------
         let access_key_id = "AKIA_TEST_ACCESS_KEY_123456";
         let plaintext_sigv4_secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
 
@@ -461,17 +457,11 @@ mod tests {
             enabled: true,
         };
 
-        // ------------------------------------------------------------------
-        // 2. Fetch: mock registry client
-        // ------------------------------------------------------------------
         let registry = Arc::new(MockRegistryClient {
             expected_hash: access_key_hash,
             entry: registry_entry,
         });
 
-        // ------------------------------------------------------------------
-        // 3. Unwrap: use EnvKeyUnwrapper with test master key
-        // ------------------------------------------------------------------
         let unwrapper: Arc<dyn SecretUnwrapper> =
             Arc::new(EnvKeyUnwrapper::new(Zeroizing::new(master_key)));
 
@@ -483,9 +473,6 @@ mod tests {
             allow_unsigned_payload: false,
         };
 
-        // ------------------------------------------------------------------
-        // 4. Validate: build a dummy request with a valid SigV4 signature
-        // ------------------------------------------------------------------
         let body = Bytes::from_static(b"hello swarm");
         let req = build_signed_request(
             Method::PUT,
@@ -499,9 +486,6 @@ mod tests {
 
         let principal = validator.validate(&req).await?;
 
-        // ------------------------------------------------------------------
-        // 5. Requirement: principal resolves and owner matches
-        // ------------------------------------------------------------------
         assert_eq!(principal.access_key_id, access_key_id);
         assert_eq!(principal.owner, owner);
 
