@@ -27,5 +27,7 @@ thiserror = "2"
 anyhow = "1"
 hex = "0.4"
 sha2 = "0.10"
+sha3 = "0.10" # Added to fix the inheritance error
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 tracing = "0.1"
+
