@@ -1,15 +1,13 @@
-// Secret unwrapping implementation will live here.
 use crate::traits::SecretUnwrapper;
 use aes_gcm::{
-    aead::{Aead, KeyInit},
+    aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Nonce,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
 use zeroize::Zeroizing;
 
-/// Handles in-memory decryption of S3 secrets using the Master Service Key.
 pub struct EnvKeyUnwrapper {
-    /// Zeroizing ensures the key is wiped from RAM when this struct is dropped.
     master_key: Zeroizing<[u8; 32]>,
 }
 
@@ -19,23 +17,30 @@ impl EnvKeyUnwrapper {
     }
 }
 
+#[async_trait]
 impl SecretUnwrapper for EnvKeyUnwrapper {
-    fn unwrap_secret(&self, encrypted_secret: &[u8]) -> Result<Vec<u8>> {
-        // We expect the encrypted_secret to be: [12-byte Nonce] + [Encrypted Data]
-        if encrypted_secret.len() < 12 {
-            return Err(anyhow!("encrypted secret is too short to contain a nonce"));
-        }
+    async fn unwrap_sigv4_secret(
+        &self,
+        _key_version: u32,
+        nonce_bytes: &[u8],
+        ciphertext: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>> {
+        let cipher = Aes256Gcm::new_from_slice(&*self.master_key)
+            .map_err(|_| anyhow!("Invalid master service key length"))?;
 
-        let (nonce_bytes, ciphertext) = encrypted_secret.split_at(12);
         let nonce = Nonce::from_slice(nonce_bytes);
         
-        let cipher = Aes256Gcm::new_from_slice(&*self.master_key)
-            .map_err(|_| anyhow!("invalid master service key length"))?;
+        let payload = Payload {
+            msg: ciphertext,
+            aad: aad,
+        };
 
         let decrypted = cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|e| anyhow!("failed to decrypt S3 secret: {}", e))?;
+            .decrypt(nonce, payload)
+            .map_err(|e| anyhow!("Failed to decrypt S3 secret: {}", e))?;
 
         Ok(decrypted)
     }
 }
+
