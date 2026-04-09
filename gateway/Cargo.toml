@@ -7,24 +7,28 @@ license.workspace = true
 [dependencies]
 common = { path = "../common" }
 
+# Workspace-inherited dependencies
 subxt.workspace = true
 axum.workspace = true
 aes-gcm.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-
 async-trait.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 hex.workspace = true
 sha2.workspace = true
+sha3.workspace = true
 zeroize.workspace = true
 tracing.workspace = true
 
+# Local additions for Bee and Auth
 hmac = "0.12"
 parity-scale-codec = { version = "3", features = ["derive"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+secp256k1 = { version = "0.29", features = ["recovery", "global-context"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
