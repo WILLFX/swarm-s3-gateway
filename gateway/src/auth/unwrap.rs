@@ -29,6 +29,7 @@ impl SecretUnwrapper for EnvKeyUnwrapper {
         let cipher = Aes256Gcm::new_from_slice(&*self.master_key)
             .map_err(|_| anyhow!("Invalid master service key length"))?;
 
+        // S3 secrets use 12-byte nonces for AES-GCM
         let nonce = Nonce::from_slice(nonce_bytes);
         
         let payload = Payload {
@@ -43,4 +44,5 @@ impl SecretUnwrapper for EnvKeyUnwrapper {
         Ok(decrypted)
     }
 }
+
 
