@@ -2,7 +2,7 @@ name: Rust
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   pull_request:
 
 jobs:
@@ -32,6 +32,7 @@ jobs:
         run: |
           test -n "$S3GW_MASTER_SERVICE_KEY_HEX"
 
-      - name: Run identity handshake integration test
-        run: cargo test -p gateway
-             cargo test -p chain-registry-pallet
+      - name: Run gateway and pallet tests
+        run: |
+          cargo test -p gateway
+          cargo test -p chain-registry-pallet
