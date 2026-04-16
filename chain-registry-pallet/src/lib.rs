@@ -14,7 +14,7 @@ pub mod pallet {
     };
     use frame_system::{ensure_signed, pallet_prelude::*};
     use scale_info::TypeInfo;
-    use sp_runtime::traits::Convert;
+    use frame_support::sp_runtime::traits::Convert;
 
     #[derive(Clone, Encode, Decode, Eq, PartialEq, RuntimeDebug, MaxEncodedLen, TypeInfo)]
     #[scale_info(skip_type_params(MaxEncryptedSecretLen))]
