@@ -33,4 +33,5 @@ jobs:
           test -n "$S3GW_MASTER_SERVICE_KEY_HEX"
 
       - name: Run identity handshake integration test
-        run: cargo test -p gateway --test identity_handshake -- --nocapture
+        run: cargo test -p gateway
+             cargo test -p chain-registry-pallet
