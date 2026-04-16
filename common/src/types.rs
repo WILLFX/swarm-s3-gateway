@@ -1,3 +1,4 @@
+use alloc::{string::String, vec::Vec};
 use serde::{Deserialize, Serialize};
 
 pub type AccessKeyHash = [u8; 32];
