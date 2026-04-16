@@ -457,7 +457,7 @@ fn encrypt_sigv4_secret(
         let registry_entry = ChainRegistryEntry {
             owner,
             encrypted_sigv4_secret,
-            nonce: nonce.to_vec(),
+            nonce: nonce,
             key_version: 1,
             enabled: true,
         };
