@@ -244,8 +244,11 @@ pub mod pallet {
 mod tests {
     use super::*;
     use crate as chain_registry_pallet;
-    use frame_support::{assert_noop, assert_ok, construct_runtime, derive_impl};
-    use sp_runtime::{traits::Convert, BuildStorage};
+    use common::types::{AccessKeyHash, SubstrateAddress32};
+    use frame_support::{
+        assert_noop, assert_ok, construct_runtime, derive_impl,
+        sp_runtime::{traits::Convert, BuildStorage},
+    };
 
     type Block = frame_system::mocking::MockBlock<Test>;
 
@@ -261,7 +264,7 @@ mod tests {
         type Block = Block;
     }
 
-    struct AccountIdToSubstrateAddress;
+    pub struct AccountIdToSubstrateAddress;
 
     impl Convert<u64, SubstrateAddress32> for AccountIdToSubstrateAddress {
         fn convert(account: u64) -> SubstrateAddress32 {
