@@ -5,9 +5,14 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-bytes.workspace = true
-hex.workspace = true
-sha2.workspace = true
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+sha2 = { workspace = true, default-features = false }
+thiserror = { workspace = true, optional = true }
+
+[features]
+default = ["std"]
+std = [
+  "serde/std",
+  "sha2/std",
+  "dep:thiserror",
+]
