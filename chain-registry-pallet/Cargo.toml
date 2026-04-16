@@ -5,21 +5,25 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-parity-scale-codec = { version = "3", default-features = false, features = ["derive"] }
+codec = { package = "parity-scale-codec", version = "3", default-features = false, features = ["derive", "max-encoded-len"] }
 scale-info = { version = "2", default-features = false, features = ["derive"] }
 
-# Substrate FRAME crates should be pinned to the exact runtime/toolchain version
-# used by your target chain. Keep them aligned with that chain's SDK release.
+common = { path = "../common", default-features = false }
+
+# Keep these aligned with your target chain SDK release.
 frame-support = { version = "39", default-features = false }
 frame-system = { version = "39", default-features = false }
+sp-runtime = { version = "44", default-features = false }
 sp-std = { version = "14", default-features = false }
 
 [features]
 default = ["std"]
 std = [
-  "parity-scale-codec/std",
+  "codec/std",
   "scale-info/std",
+  "common/std",
   "frame-support/std",
   "frame-system/std",
+  "sp-runtime/std",
   "sp-std/std",
 ]
