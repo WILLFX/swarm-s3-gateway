@@ -10,7 +10,7 @@ pub type Etag = [u8; 32];
 pub struct ChainRegistryEntry {
     pub owner: SubstrateAddress32,
     pub encrypted_sigv4_secret: Vec<u8>,
-    pub nonce: Vec<u8>,
+    pub nonce: [u8; 12],
     pub key_version: u32,
     pub enabled: bool,
 }
