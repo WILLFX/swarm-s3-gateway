@@ -342,22 +342,27 @@ mod tests {
         hex::encode(Sha256::digest(data))
     }
 
-    fn encrypt_sigv4_secret(
-        master_key: &[u8; 32],
-        nonce: &[u8; 12],
-        aad: &[u8],
-        plaintext_secret: &[u8],
-    ) -> Result<Vec<u8>> {
-        let cipher = Aes256Gcm::new_from_slice(master_key)?;
-        let ciphertext = cipher.encrypt(
+fn encrypt_sigv4_secret(
+    master_key: &[u8; 32],
+    nonce: &[u8; 12],
+    aad: &[u8],
+    plaintext_secret: &[u8],
+) -> Result<Vec<u8>> {
+    let cipher = Aes256Gcm::new_from_slice(master_key)
+        .map_err(|e| anyhow!("failed to init AES-GCM: {e:?}"))?;
+
+    let ciphertext = cipher
+        .encrypt(
             Nonce::from_slice(nonce),
             Payload {
                 msg: plaintext_secret,
                 aad,
             },
-        )?;
-        Ok(ciphertext)
-    }
+        )
+        .map_err(|e| anyhow!("failed to encrypt test secret: {e:?}"))?;
+
+    Ok(ciphertext)
+}
 
     fn build_signed_request(
         method: Method,
