@@ -290,7 +290,7 @@ async fn happy_path_registry_fetch_unwrap_and_sigv4_validate() -> Result<()> {
     let registry_entry = ChainRegistryEntry {
         owner,
         encrypted_sigv4_secret,
-        nonce: nonce.to_vec(),
+        nonce: nonce,
         key_version: 1,
         enabled: true,
     };
@@ -350,7 +350,7 @@ async fn revoked_credential_fails_even_with_valid_signature() -> Result<()> {
     let registry_entry = ChainRegistryEntry {
         owner,
         encrypted_sigv4_secret,
-        nonce: nonce.to_vec(),
+        nonce: nonce,
         key_version: 1,
         enabled: false,
     };
@@ -412,7 +412,7 @@ async fn rotated_key_rejects_request_signed_with_old_secret() -> Result<()> {
     let registry_entry = ChainRegistryEntry {
         owner,
         encrypted_sigv4_secret,
-        nonce: nonce.to_vec(),
+        nonce: nonce,
         key_version: 2,
         enabled: true,
     };
