@@ -15,6 +15,7 @@ frame-support = { version = "39", default-features = false }
 frame-system = { version = "39", default-features = false }
 sp-runtime = { version = "44", default-features = false }
 sp-std = { version = "14", default-features = false }
+sp-io = { version = "43", default-features = false, features = ["std"] }
 
 [features]
 default = ["std"]
