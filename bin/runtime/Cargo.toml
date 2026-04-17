@@ -100,6 +100,5 @@ try-runtime = [
   "pallet-sudo/try-runtime",
   "pallet-timestamp/try-runtime",
   "pallet-transaction-payment/try-runtime",
-  "chain-registry-pallet/try-runtime",
   "sp-runtime/try-runtime",
 ]
