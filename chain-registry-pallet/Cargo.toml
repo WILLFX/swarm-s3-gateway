@@ -5,18 +5,17 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-codec = { package = "parity-scale-codec", version = "3", default-features = false, features = ["derive", "max-encoded-len"] }
-scale-info = { version = "2", default-features = false, features = ["derive"] }
+codec = { workspace = true, features = ["derive", "max-encoded-len"] }
+scale-info = { workspace = true, features = ["derive"] }
 
-common = { path = "../common", default-features = false }
+common = { workspace = true }
 
-# Keep these aligned with your target chain SDK release.
-frame-support = { version = "39", default-features = false }
-frame-system = { version = "39", default-features = false }
-sp-std = { version = "14", default-features = false }
+frame-support = { workspace = true }
+frame-system = { workspace = true }
+sp-std = { workspace = true }
 
 [dev-dependencies]
-sp-io = { version = "43", default-features = false, features = ["std"] }
+sp-io = { workspace = true, features = ["std"] }
 
 [features]
 default = ["std"]
