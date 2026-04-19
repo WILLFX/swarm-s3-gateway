@@ -19,7 +19,7 @@ common = { path = "./common", default-features = false }
 chain-registry-pallet = { path = "./chain-registry-pallet", default-features = false }
 s3-registry-runtime = { path = "./bin/runtime", default-features = false }
 sp-std = { version = "14.0.0", default-features = false }
-sc-network-types = { version = "0.15.5", default-features = true }
+sc-network-types = { version = "0.15.4", default-features = true }
 
 # Existing gateway/app deps
 subxt = { version = "0.50.0" }
