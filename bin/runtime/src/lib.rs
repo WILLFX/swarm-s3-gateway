@@ -20,7 +20,8 @@ use frame_support::{
 };
 use frame_system::limits::{BlockLength, BlockWeights};
 use pallet_transaction_payment::{ConstFeeMultiplier, FungibleAdapter, Multiplier};
-use sp_consensus_aura::sr25519::AuthorityId as AuraId;
+pub type AuraId = sp_consensus_aura::sr25519::AuthorityId;
+pub type GrandpaId = sp_consensus_grandpa::AuthorityId;
 use sp_runtime::{
     generic,
     traits::{BlakeTwo256, IdentifyAccount, Verify},
@@ -292,7 +293,9 @@ mod runtime {
         RuntimeError,
         RuntimeOrigin,
         RuntimeFreezeReason,
-        RuntimeHoldReason
+        RuntimeHoldReason,
+        RuntimeGenesisConfig
+
     )]
     pub struct Runtime;
 
