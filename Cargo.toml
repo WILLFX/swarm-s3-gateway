@@ -111,8 +111,10 @@ inherits = "release"
 lto = true
 
 [patch.crates-io]
-cid = { git = "https://github.com/multiformats/rust-cid", rev = "33682942475470505a4f6d4d16d0046522f7902d" }
-multihash = { git = "https://github.com/multiformats/rust-multihash", rev = "4a1804df97b7b13a7c6f0e4cf8d80c65796b44ca" }
+cid = { git = "https://github.com", branch = "master" }
+multihash = { git = "https://github.com", branch = "master" }
+
+
 
 
 
