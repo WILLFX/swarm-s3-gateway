@@ -111,8 +111,7 @@ inherits = "release"
 lto = true
 
 [patch.crates-io]
-cid = { git = "https://github.com", branch = "master" }
-multihash = { git = "https://github.com", branch = "master" }
+core2 = { git = "https://github.com/bbqsrc/core2", rev = "545e84bcb0f235b12e21351e0c69767958efe2a7" }
 
 
 
