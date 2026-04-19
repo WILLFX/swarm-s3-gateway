@@ -1,11 +1,59 @@
 [package]
-name = "s3-registry-node"
+name = "s3-node"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+build = "build.rs"
+publish = false
 
 [[bin]]
-name = "s3-registry-node"
+name = "s3-node"
 path = "src/main.rs"
 
 [dependencies]
+clap = { workspace = true, features = ["derive"], default-features = true }
+futures = { workspace = true, features = ["thread-pool"], default-features = true }
+jsonrpsee = { workspace = true, features = ["server"], default-features = true }
+serde_json = { workspace = true, default-features = true }
+
+frame-system = { workspace = true, default-features = true }
+pallet-transaction-payment = { workspace = true, default-features = true }
+pallet-transaction-payment-rpc = { workspace = true, default-features = true }
+
+sc-basic-authorship = { workspace = true, default-features = true }
+sc-cli = { workspace = true, default-features = true }
+sc-client-api = { workspace = true, default-features = true }
+sc-consensus = { workspace = true, default-features = true }
+sc-consensus-aura = { workspace = true, default-features = true }
+sc-consensus-grandpa = { workspace = true, default-features = true }
+sc-executor = { workspace = true, default-features = true }
+sc-network = { workspace = true, default-features = true }
+sc-offchain = { workspace = true, default-features = true }
+sc-service = { workspace = true, default-features = true }
+sc-telemetry = { workspace = true, default-features = true }
+sc-transaction-pool = { workspace = true, default-features = true }
+sc-transaction-pool-api = { workspace = true, default-features = true }
+
+sp-api = { workspace = true, default-features = true }
+sp-block-builder = { workspace = true, default-features = true }
+sp-blockchain = { workspace = true, default-features = true }
+sp-consensus-aura = { workspace = true, default-features = true }
+sp-core = { workspace = true, default-features = true }
+sp-io = { workspace = true, default-features = true }
+sp-keyring = { workspace = true, default-features = true }
+sp-runtime = { workspace = true, default-features = true }
+sp-timestamp = { workspace = true, default-features = true }
+
+substrate-frame-rpc-system = { workspace = true, default-features = true }
+substrate-build-script-utils = { workspace = true, default-features = true }
+
+s3-registry-runtime = { workspace = true, features = ["std"] }
+
+[build-dependencies]
+substrate-build-script-utils = { workspace = true, default-features = true }
+
+[features]
+default = ["std"]
+std = ["s3-registry-runtime/std"]
+runtime-benchmarks = ["s3-registry-runtime/runtime-benchmarks"]
+try-runtime = ["s3-registry-runtime/try-runtime"]
