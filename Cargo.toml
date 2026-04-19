@@ -110,3 +110,8 @@ codegen-units = 1
 inherits = "release"
 lto = true
 
+[patch.crates-io]
+cid = { git = "https://github.com", rev = "3368294" }
+multihash = { git = "https://github.com", rev = "4a1804d" }
+
+
