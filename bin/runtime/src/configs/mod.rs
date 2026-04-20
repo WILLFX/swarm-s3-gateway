@@ -15,9 +15,9 @@ use sp_runtime::{traits::{Convert, One}, Perbill};
 use sp_version::RuntimeVersion;
 
 use super::{
-    AccountId, Aura, Balance, Balances, Block, BlockNumber, Hash, Nonce, Runtime, RuntimeCall,
-    RuntimeEvent, RuntimeFreezeReason, RuntimeHoldReason, System, Timestamp,
-    EXISTENTIAL_DEPOSIT, SLOT_DURATION, VERSION, UNIT, MILLI_UNIT,
+    AccountId, Aura, Balance, Balances, Block, BlockNumber, Hash, Nonce, PalletInfo, Runtime,
+    RuntimeCall, RuntimeEvent, RuntimeFreezeReason, RuntimeHoldReason, RuntimeOrigin, RuntimeTask,
+    System, Timestamp, EXISTENTIAL_DEPOSIT, SLOT_DURATION, VERSION, UNIT, MILLI_UNIT,
 };
 
 const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
