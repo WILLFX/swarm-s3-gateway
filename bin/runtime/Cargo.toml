@@ -11,6 +11,7 @@ crate-type = ["rlib"]
 [dependencies]
 codec = { workspace = true, features = ["derive"] }
 scale-info = { workspace = true, features = ["derive"] }
+sp-offchain = { workspace = true }
 
 common = { workspace = true }
 chain-registry-pallet = { workspace = true }
