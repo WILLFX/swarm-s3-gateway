@@ -6,9 +6,9 @@ include!(concat!(env!("OUT_DIR"), "/wasm_binary.rs"));
 extern crate alloc;
 
 use alloc::borrow::Cow;
-use frame_support::{derive_impl, parameter_types};
-use sp_runtime::impl_opaque_keys;
-    sp_runtime::traits::Convert,
+use frame_support::{
+    derive_impl,
+    parameter_types,
     traits::{
         ConstBool, ConstU128, ConstU32, ConstU64, ConstU8, Nothing, Randomness,
         VariantCountOf,
@@ -18,6 +18,8 @@ use sp_runtime::impl_opaque_keys;
         IdentityFee, Weight,
     },
 };
+use sp_runtime::impl_opaque_keys;
+use sp_runtime::traits::Convert;
 use frame_system::limits::{BlockLength, BlockWeights};
 use pallet_transaction_payment::{ConstFeeMultiplier, FungibleAdapter, Multiplier};
 pub type AuraId = sp_consensus_aura::sr25519::AuthorityId;
