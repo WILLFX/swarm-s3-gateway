@@ -12,6 +12,7 @@ common = { workspace = true }
 
 frame-support = { workspace = true }
 frame-system = { workspace = true }
+sp-runtime = { workspace = true }
 sp-std = { workspace = true }
 
 [dev-dependencies]
@@ -25,5 +26,6 @@ std = [
   "common/std",
   "frame-support/std",
   "frame-system/std",
+  "sp-runtime/std",
   "sp-std/std",
 ]
