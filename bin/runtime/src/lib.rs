@@ -26,7 +26,7 @@ pub use pallet_balances::Call as BalancesCall;
 pub use pallet_timestamp::Call as TimestampCall;
 #[cfg(any(feature = "std", test))]
 pub use sp_runtime::BuildStorage;
-pub use sp_inherents::InherentDataExt;
+
 
 pub mod opaque {
     use super::*;
