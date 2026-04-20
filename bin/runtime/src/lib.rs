@@ -6,8 +6,8 @@ include!(concat!(env!("OUT_DIR"), "/wasm_binary.rs"));
 extern crate alloc;
 
 use alloc::borrow::Cow;
-use frame_support::{
-    derive_impl, impl_opaque_keys, parameter_types,
+use frame_support::{derive_impl, parameter_types};
+use sp_runtime::impl_opaque_keys;
     sp_runtime::traits::Convert,
     traits::{
         ConstBool, ConstU128, ConstU32, ConstU64, ConstU8, Nothing, Randomness,
