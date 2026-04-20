@@ -31,7 +31,6 @@ use sp_runtime::{
 use sp_version::NativeVersion;
 use sp_version::RuntimeVersion;
 
-pub const RUNTIME_API_VERSIONS: sp_version::ApisVec = sp_version::create_apis_vec!([]);
 
 pub const MILLI_SECS_PER_BLOCK: u64 = 6000;
 pub const SLOT_DURATION: u64 = MILLI_SECS_PER_BLOCK;
@@ -294,7 +293,6 @@ mod runtime {
         RuntimeOrigin,
         RuntimeFreezeReason,
         RuntimeHoldReason,
-        RuntimeGenesisConfig
 
     )]
     pub struct Runtime;
