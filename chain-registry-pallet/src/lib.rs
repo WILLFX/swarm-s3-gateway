@@ -7,11 +7,12 @@ pub mod pallet {
     use codec::{Decode, Encode, MaxEncodedLen};
     use common::types::{AccessKeyHash, SubstrateAddress32};
     use frame_support::{
-        dispatch::DispatchResult,
-        pallet_prelude::*,
-        traits::EnsureOrigin,
-        BoundedVec,
-    };
+    dispatch::DispatchResult,
+    pallet_prelude::*,
+    traits::EnsureOrigin,
+    BoundedVec,
+    RuntimeDebug,
+};
     use frame_system::{ensure_signed, pallet_prelude::*};
     use scale_info::TypeInfo;
     use frame_support::sp_runtime::traits::Convert;
