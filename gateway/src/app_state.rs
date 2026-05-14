@@ -1,6 +1,6 @@
 use crate::auth::sigv4::RegistryBackedSigV4Validator;
 use crate::auth::unwrap::EnvKeyUnwrapper;
-use crate::bee::client::BeeClient;
+use crate::bee::client::{BeeClient, BeeStorage};
 use crate::chain::{anchor_client::ContractAnchorClient, registry::ChainRegistryClient};
 use crate::traits::{AnchorClient, RegistryClient, SecretUnwrapper};
 use anyhow::{Context, Result, bail};
@@ -25,7 +25,7 @@ pub struct AppState {
     pub sigv4_validator: Arc<RegistryBackedSigV4Validator>,
     pub registry_client: Arc<dyn RegistryClient>,
     pub secret_unwrapper: Arc<dyn SecretUnwrapper>,
-    pub bee_client: Arc<BeeClient>,
+    pub bee_client: Arc<dyn BeeStorage>,
     pub anchor_client: Arc<dyn AnchorClient>,
     pub master_service_key: [u8; 32],
     pub identity_contract_address: Option<SubstrateAddress32>,
@@ -38,7 +38,7 @@ impl fmt::Debug for AppState {
             .field("sigv4_validator", &"Arc<RegistryBackedSigV4Validator>")
             .field("registry_client", &"Arc<dyn RegistryClient>")
             .field("secret_unwrapper", &"Arc<dyn SecretUnwrapper>")
-            .field("bee_client", &"Arc<BeeClient>")
+            .field("bee_client", &"Arc<dyn BeeStorage>")
             .field("anchor_client", &"Arc<dyn AnchorClient>")
             .field("master_service_key", &"<redacted>")
             .field(
@@ -67,7 +67,7 @@ pub async fn build_production_state() -> Result<AppState> {
 
     let bee_api_url = required_env("S3GW_BEE_API_URL")?;
 
-    let bee_client = Arc::new(
+    let bee_client: Arc<dyn BeeStorage> = Arc::new(
         BeeClient::from_env(&bee_api_url)
             .with_context(|| format!("failed to build Bee client for {bee_api_url}"))?,
     );

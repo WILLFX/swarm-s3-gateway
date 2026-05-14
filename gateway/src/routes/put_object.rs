@@ -12,7 +12,7 @@ use crate::{
     },
     s3_response::{
         S3ErrorKind, S3ErrorResponse, bee_error_response, bee_unavailable_response,
-        chain_error_response, put_object_response,
+        chain_error_response, omit_swarm_ref_for_private_response, put_object_response,
     },
 };
 use anyhow::{Error as AnyhowError, Result};
@@ -329,7 +329,7 @@ async fn handle_private_put_object(
         return chain_error_response(err);
     }
 
-    put_object_response(&encrypted_put.reference)
+    omit_swarm_ref_for_private_response(put_object_response(&encrypted_put.reference), true)
 }
 
 fn private_object_payload_aad(
