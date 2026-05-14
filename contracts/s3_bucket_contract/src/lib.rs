@@ -539,7 +539,7 @@ mod s3_bucket_contract {
 
             let bad_sig = [0u8; 64];
             assert_eq!(
-                c.create_bucket(owner, hash(1), true, bad_sig),
+                c.create_bucket(owner, hash(1), true, bad_sig, Vec::new()),
                 Err(Error::InvalidSignature)
             );
         }
@@ -560,7 +560,10 @@ mod s3_bucket_contract {
             let payload = create_payload(&c, hash(1), true, nonce);
             let sig = pair.sign(&payload);
 
-            assert_eq!(c.create_bucket(owner, hash(1), true, sig.0), Ok(()));
+            assert_eq!(
+                c.create_bucket(owner, hash(1), true, sig.0, Vec::new()),
+                Ok(())
+            );
 
             let got = c.get_bucket(hash(1));
             assert!(got.is_some());
@@ -585,14 +588,17 @@ mod s3_bucket_contract {
 
             let create_nonce = c.get_owner_nonce(owner_bytes);
             let create_sig = pair.sign(&create_payload(&c, hash(1), false, create_nonce));
-            assert_eq!(c.create_bucket(owner, hash(1), false, create_sig.0), Ok(()));
+            assert_eq!(
+                c.create_bucket(owner, hash(1), false, create_sig.0, Vec::new()),
+                Ok(())
+            );
 
             let delete_nonce = c.get_owner_nonce(owner_bytes);
             let delete_sig = pair.sign(&delete_payload(&c, hash(1), delete_nonce));
-            assert_eq!(c.delete_bucket(hash(1), delete_sig.0), Ok(()));
+            assert_eq!(c.delete_bucket(hash(1), delete_sig.0, Vec::new()), Ok(()));
 
             assert_eq!(
-                c.delete_bucket(hash(1), delete_sig.0),
+                c.delete_bucket(hash(1), delete_sig.0, Vec::new()),
                 Err(Error::BucketNotFound)
             );
         }
@@ -610,13 +616,16 @@ mod s3_bucket_contract {
             set_caller(owner);
             let create_nonce = c.get_owner_nonce(owner_bytes);
             let create_sig = pair.sign(&create_payload(&c, hash(1), false, create_nonce));
-            assert_eq!(c.create_bucket(owner, hash(1), false, create_sig.0), Ok(()));
+            assert_eq!(
+                c.create_bucket(owner, hash(1), false, create_sig.0, Vec::new()),
+                Ok(())
+            );
 
             let delete_nonce = c.get_owner_nonce(owner_bytes);
             let delete_sig = pair.sign(&delete_payload(&c, hash(1), delete_nonce));
 
             set_caller(governance);
-            assert_eq!(c.delete_bucket(hash(1), delete_sig.0), Ok(()));
+            assert_eq!(c.delete_bucket(hash(1), delete_sig.0, Vec::new()), Ok(()));
         }
 
         #[ink::test]
@@ -632,7 +641,10 @@ mod s3_bucket_contract {
             set_caller(owner);
             let create_nonce = c.get_owner_nonce(owner_bytes);
             let create_sig = pair.sign(&create_payload(&c, hash(1), false, create_nonce));
-            assert_eq!(c.create_bucket(owner, hash(1), false, create_sig.0), Ok(()));
+            assert_eq!(
+                c.create_bucket(owner, hash(1), false, create_sig.0, Vec::new()),
+                Ok(())
+            );
 
             let nonce = c.get_owner_nonce(owner_bytes);
             let sig = pair.sign(&increment_payload(&c, hash(1), nonce));
@@ -677,6 +689,115 @@ mod s3_bucket_contract {
                 S3BucketContract::evaluate_delegation(&scoped, 50, OP_CREATE_BUCKET),
                 Err(Error::InsufficientScope)
             );
+        }
+
+        #[ink::test]
+        fn object_delegation_scope_separates_put_and_delete() {
+            let put_only = DelegationEntry {
+                delegate: account_bytes(2),
+                allowed_operations: OP_PUT_OBJECT,
+                expires_at: 100,
+            };
+
+            assert_eq!(
+                S3BucketContract::evaluate_delegation(&put_only, 50, OP_PUT_OBJECT),
+                Ok(())
+            );
+            assert_eq!(
+                S3BucketContract::evaluate_delegation(&put_only, 50, OP_DELETE_OBJECT),
+                Err(Error::InsufficientScope)
+            );
+
+            let delete_only = DelegationEntry {
+                delegate: account_bytes(2),
+                allowed_operations: OP_DELETE_OBJECT,
+                expires_at: 100,
+            };
+
+            assert_eq!(
+                S3BucketContract::evaluate_delegation(&delete_only, 50, OP_DELETE_OBJECT),
+                Ok(())
+            );
+            assert_eq!(
+                S3BucketContract::evaluate_delegation(&delete_only, 50, OP_PUT_OBJECT),
+                Err(Error::InsufficientScope)
+            );
+
+            let put_and_delete = DelegationEntry {
+                delegate: account_bytes(2),
+                allowed_operations: OP_PUT_OBJECT | OP_DELETE_OBJECT,
+                expires_at: 100,
+            };
+
+            assert_eq!(
+                S3BucketContract::evaluate_delegation(&put_and_delete, 50, OP_PUT_OBJECT),
+                Ok(())
+            );
+            assert_eq!(
+                S3BucketContract::evaluate_delegation(&put_and_delete, 50, OP_DELETE_OBJECT),
+                Ok(())
+            );
+        }
+
+        #[ink::test]
+        fn expired_object_delegation_is_rejected_even_with_required_scope() {
+            let expired = DelegationEntry {
+                delegate: account_bytes(2),
+                allowed_operations: OP_PUT_OBJECT | OP_DELETE_OBJECT,
+                expires_at: 10,
+            };
+
+            assert_eq!(
+                S3BucketContract::evaluate_delegation(&expired, 50, OP_PUT_OBJECT),
+                Err(Error::DelegationExpired)
+            );
+            assert_eq!(
+                S3BucketContract::evaluate_delegation(&expired, 50, OP_DELETE_OBJECT),
+                Err(Error::DelegationExpired)
+            );
+        }
+
+        #[ink::test]
+        fn owner_can_update_manifest_root_for_put_and_delete_paths() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner = account_from_pair(&pair);
+            let owner_bytes = account_bytes_from_pair(&pair);
+
+            set_caller(owner);
+
+            let create_nonce = c.get_owner_nonce(owner_bytes);
+            let create_sig = pair.sign(&create_payload(&c, hash(1), false, create_nonce));
+
+            assert_eq!(
+                c.create_bucket(owner, hash(1), false, create_sig.0, Vec::new()),
+                Ok(())
+            );
+
+            let put_root = vec![1u8; 32];
+            assert_eq!(
+                c.update_bucket_manifest_root_for_put(hash(1), put_root.clone()),
+                Ok(())
+            );
+
+            let after_put = c
+                .get_bucket(hash(1))
+                .expect("bucket must exist after put-root");
+            assert_eq!(after_put.bucket_manifest_root, put_root);
+
+            let delete_root = vec![2u8; 32];
+            assert_eq!(
+                c.update_bucket_manifest_root_for_delete(hash(1), delete_root.clone()),
+                Ok(())
+            );
+
+            let after_delete = c
+                .get_bucket(hash(1))
+                .expect("bucket must exist after delete-root update");
+            assert_eq!(after_delete.bucket_manifest_root, delete_root);
         }
 
         #[ink::test]
