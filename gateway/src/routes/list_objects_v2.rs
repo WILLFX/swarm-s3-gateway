@@ -9,7 +9,9 @@ use serde::Deserialize;
 use crate::{
     app_state::AppState,
     crypto::bucket_name_hash,
-    manifest::{BucketManifest, ObjectManifest, read_private_bucket_manifest_v2},
+    manifest::{
+        BucketManifest, ObjectManifest, PrivateBucketManifestV2, read_private_bucket_manifest_v2,
+    },
     s3_response::{
         ListObjectsV2Entry, S3ErrorKind, S3ErrorResponse, chain_error_response,
         list_objects_v2_response,
@@ -128,6 +130,16 @@ async fn load_private_objects_from_anchored_bucket(
         None => return Ok(Vec::new()),
     };
 
+    Ok(list_entries_from_private_bucket_manifest(
+        &bucket_manifest,
+        prefix,
+    ))
+}
+
+fn list_entries_from_private_bucket_manifest(
+    bucket_manifest: &PrivateBucketManifestV2,
+    prefix: &str,
+) -> Vec<ListObjectsV2Entry> {
     let mut objects = Vec::new();
 
     for entry in bucket_manifest.objects.values() {
@@ -144,7 +156,7 @@ async fn load_private_objects_from_anchored_bucket(
         });
     }
 
-    Ok(objects)
+    objects
 }
 
 async fn load_objects_from_anchored_bucket(
@@ -214,4 +226,76 @@ async fn read_object_manifest_by_reference(
         .context("anchored object manifest not found in Swarm")?;
 
     serde_json::from_slice(&manifest_bytes).context("failed to decode object manifest JSON")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::PrivateBucketObjectEntry;
+    use std::collections::BTreeMap;
+
+    fn private_entry(
+        object_key: &str,
+        object_manifest_reference: &str,
+        size: u64,
+    ) -> PrivateBucketObjectEntry {
+        PrivateBucketObjectEntry {
+            object_key: object_key.to_string(),
+            object_key_id: [3u8; 32],
+            object_manifest_reference: object_manifest_reference.to_string(),
+            encryption_version: 1,
+            size,
+            etag: format!("etag-{object_key}"),
+            content_type: "text/plain".to_string(),
+            last_modified: "2026-05-14T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn private_list_objects_uses_bucket_manifest_entry_metadata_only() {
+        let mut objects = BTreeMap::new();
+
+        objects.insert(
+            "entry-a".to_string(),
+            private_entry(
+                "secret.txt",
+                "object-manifest-reference-that-must-not-be-read",
+                38,
+            ),
+        );
+
+        let manifest = PrivateBucketManifestV2 { objects };
+
+        let listed = list_entries_from_private_bucket_manifest(&manifest, "");
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].key, "secret.txt");
+        assert_eq!(listed[0].size, 38);
+        assert_eq!(listed[0].etag, "etag-secret.txt");
+        // This test intentionally never dereferences object_manifest_reference.
+        // Private listing must be satisfied from PrivateBucketManifestV2 entry metadata only.
+    }
+
+    #[test]
+    fn private_list_objects_applies_prefix_without_reading_object_manifests() {
+        let mut objects = BTreeMap::new();
+
+        objects.insert(
+            "entry-a".to_string(),
+            private_entry("docs/a.txt", "manifest-a-that-must-not-be-read", 10),
+        );
+
+        objects.insert(
+            "entry-b".to_string(),
+            private_entry("images/b.txt", "manifest-b-that-must-not-be-read", 20),
+        );
+
+        let manifest = PrivateBucketManifestV2 { objects };
+
+        let listed = list_entries_from_private_bucket_manifest(&manifest, "docs/");
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].key, "docs/a.txt");
+        assert_eq!(listed[0].size, 10);
+    }
 }
