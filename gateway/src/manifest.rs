@@ -107,10 +107,19 @@ pub async fn read_owner_catalog_manifest(
         .await?
         .context("owner catalog root not found in Swarm")?;
 
+    decode_owner_catalog_manifest_bytes(master_key, owner, &root_ref, &encrypted_bytes)
+}
+
+fn decode_owner_catalog_manifest_bytes(
+    master_key: &[u8; 32],
+    owner: &SubstrateAddress32,
+    root_ref: &str,
+    encrypted_bytes: &[u8],
+) -> Result<RootCatalogManifest> {
     let key = derive_owner_catalog_encryption_key(master_key, owner);
     let aad = owner_catalog_aad(owner);
 
-    let plaintext = match decrypt_blob(&key, &aad, &encrypted_bytes) {
+    let plaintext = match decrypt_blob(&key, &aad, encrypted_bytes) {
         Ok(plaintext) => plaintext,
         Err(err) => {
             tracing::warn!(
@@ -583,5 +592,59 @@ pub fn build_private_object_manifest(
         etag,
         content_type,
         last_modified,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owner_catalog_decrypt_failure_falls_back_to_empty_catalog() {
+        let master_key = [7u8; 32];
+        let owner = [9u8; 32];
+
+        let legacy_plaintext_or_invalid_bytes = br#"{"buckets":{"old-bucket":"plaintext-ref"}}"#;
+
+        let catalog = decode_owner_catalog_manifest_bytes(
+            &master_key,
+            &owner,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            legacy_plaintext_or_invalid_bytes,
+        )
+        .unwrap();
+
+        assert!(
+            catalog.buckets.is_empty(),
+            "legacy/plaintext owner catalog bytes must be treated as empty on decrypt failure"
+        );
+    }
+
+    #[test]
+    fn encrypted_owner_catalog_decodes_successfully() {
+        let master_key = [7u8; 32];
+        let owner = [9u8; 32];
+
+        let mut expected = RootCatalogManifest::default();
+        expected.buckets.insert(
+            "private-bucket".to_string(),
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+        );
+
+        let plaintext = serde_json::to_vec(&expected).unwrap();
+
+        let key = derive_owner_catalog_encryption_key(&master_key, &owner);
+        let aad = owner_catalog_aad(&owner);
+        let encrypted = encrypt_blob_random(&key, &aad, &plaintext).unwrap();
+
+        let decoded = decode_owner_catalog_manifest_bytes(
+            &master_key,
+            &owner,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            &encrypted,
+        )
+        .unwrap();
+
+        assert_eq!(decoded, expected);
     }
 }
