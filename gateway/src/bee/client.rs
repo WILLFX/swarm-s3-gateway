@@ -1,7 +1,8 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
+use async_trait::async_trait;
 use bytes::Bytes;
 use reqwest::{Client, StatusCode};
-use secp256k1::{ecdsa::RecoverableSignature, Message, PublicKey, Secp256k1, SecretKey};
+use secp256k1::{Message, PublicKey, Secp256k1, SecretKey, ecdsa::RecoverableSignature};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sha3::Keccak256;
@@ -32,6 +33,22 @@ pub struct FeedPointerResult {
     pub swarm_reference: String,
     pub manifest_reference: String,
     pub soc_reference: String,
+}
+
+#[async_trait]
+pub trait BeeStorage: Send + Sync {
+    async fn get_bytes(&self, reference: &str) -> Result<Option<Bytes>>;
+
+    async fn put_bytes(&self, data: Bytes) -> Result<BeePutBytesResult>;
+
+    async fn get_pointer_bytes(&self, topic: [u8; 32]) -> Result<Option<Vec<u8>>>;
+
+    async fn put_object_and_update_pointer(
+        &self,
+        bucket: &str,
+        key: &str,
+        data: Bytes,
+    ) -> Result<FeedPointerResult>;
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,8 +141,8 @@ impl BeeClient {
                 if let Some(reference) = self.dev_pointer_map.read().await.get(&topic_hex).cloned()
                 {
                     warn!(
-                    "S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK is enabled — SOC pointer read skipped, using in-memory dev mapping. Do not use in production."
-                );
+                        "S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK is enabled — SOC pointer read skipped, using in-memory dev mapping. Do not use in production."
+                    );
                     return Ok(Some(
                         hex::decode(reference)
                             .context("failed to decode dev fallback swarm reference")?,
@@ -145,8 +162,8 @@ impl BeeClient {
                 if let Some(reference) = self.dev_pointer_map.read().await.get(&topic_hex).cloned()
                 {
                     warn!(
-                    "S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK is enabled — SOC pointer read skipped, using in-memory dev mapping. Do not use in production."
-                );
+                        "S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK is enabled — SOC pointer read skipped, using in-memory dev mapping. Do not use in production."
+                    );
                     return Ok(Some(
                         hex::decode(reference)
                             .context("failed to decode dev fallback swarm reference")?,
@@ -385,6 +402,30 @@ impl BeeClient {
         }
 
         Ok(Some(body))
+    }
+}
+
+#[async_trait]
+impl BeeStorage for BeeClient {
+    async fn get_bytes(&self, reference: &str) -> Result<Option<Bytes>> {
+        BeeClient::get_bytes(self, reference).await
+    }
+
+    async fn put_bytes(&self, data: Bytes) -> Result<BeePutBytesResult> {
+        BeeClient::put_bytes(self, data).await
+    }
+
+    async fn get_pointer_bytes(&self, topic: [u8; 32]) -> Result<Option<Vec<u8>>> {
+        BeeClient::get_pointer_bytes(self, topic).await
+    }
+
+    async fn put_object_and_update_pointer(
+        &self,
+        bucket: &str,
+        key: &str,
+        data: Bytes,
+    ) -> Result<FeedPointerResult> {
+        BeeClient::put_object_and_update_pointer(self, bucket, key, data).await
     }
 }
 

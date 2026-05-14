@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::{
-    bee::client::BeeClient,
+    bee::client::{BeeClient, BeeStorage},
     crypto::{
         decrypt_blob, decrypt_bytes, derive_manifest_encryption_key,
         derive_manifest_encryption_nonce, derive_owner_catalog_encryption_key,
@@ -84,7 +84,7 @@ pub struct ManifestRecord<T> {
 }
 
 pub async fn read_owner_catalog_manifest(
-    bee: &BeeClient,
+    bee: &dyn BeeStorage,
     master_key: &[u8; 32],
     owner: &SubstrateAddress32,
     owner_catalog_root: &[u8],
@@ -137,7 +137,7 @@ fn decode_owner_catalog_manifest_bytes(
 }
 
 pub async fn write_owner_catalog_manifest(
-    bee: &BeeClient,
+    bee: &dyn BeeStorage,
     master_key: &[u8; 32],
     owner: &SubstrateAddress32,
     catalog: &RootCatalogManifest,
@@ -171,7 +171,7 @@ fn owner_catalog_aad(owner: &SubstrateAddress32) -> Vec<u8> {
 }
 
 pub async fn write_private_bucket_manifest_v2(
-    bee: &BeeClient,
+    bee: &dyn BeeStorage,
     master_key: &[u8; 32],
     owner: &SubstrateAddress32,
     bucket: &str,
@@ -199,7 +199,7 @@ pub async fn write_private_bucket_manifest_v2(
 }
 
 pub async fn read_private_bucket_manifest_v2(
-    bee: &BeeClient,
+    bee: &dyn BeeStorage,
     master_key: &[u8; 32],
     owner: &SubstrateAddress32,
     bucket: &str,
@@ -244,7 +244,7 @@ pub async fn read_private_bucket_manifest_v2(
 }
 
 pub async fn write_private_object_manifest_v2(
-    bee: &BeeClient,
+    bee: &dyn BeeStorage,
     master_key: &[u8; 32],
     owner: &SubstrateAddress32,
     bucket: &str,
@@ -279,7 +279,7 @@ pub async fn write_private_object_manifest_v2(
 }
 
 pub async fn read_private_object_manifest_v2(
-    bee: &BeeClient,
+    bee: &dyn BeeStorage,
     master_key: &[u8; 32],
     owner: &SubstrateAddress32,
     bucket: &str,
@@ -361,7 +361,7 @@ fn private_object_manifest_aad(
 }
 
 pub async fn write_object_manifest(
-    bee: &BeeClient,
+    bee: &dyn BeeStorage,
     _bucket: &str,
     _key: &str,
     manifest: &ObjectManifest,
@@ -381,7 +381,7 @@ pub async fn write_object_manifest(
 }
 
 pub async fn read_object_manifest(
-    bee: &BeeClient,
+    bee: &dyn BeeStorage,
     bucket: &str,
     key: &str,
 ) -> Result<Option<ManifestRecord<ObjectManifest>>> {
@@ -425,7 +425,7 @@ pub async fn read_object_manifest(
 }
 
 pub async fn write_private_object_manifest(
-    bee: &BeeClient,
+    bee: &dyn BeeStorage,
     master_key: &[u8; 32],
     bucket: &str,
     key: &str,
@@ -454,7 +454,7 @@ pub async fn write_private_object_manifest(
 }
 
 pub async fn read_private_object_manifest(
-    bee: &BeeClient,
+    bee: &dyn BeeStorage,
     master_key: &[u8; 32],
     bucket: &str,
     key: &str,
@@ -507,7 +507,7 @@ pub async fn read_private_object_manifest(
 }
 
 pub async fn write_bucket_manifest(
-    bee: &BeeClient,
+    bee: &dyn BeeStorage,
     _bucket: &str,
     manifest: &BucketManifest,
 ) -> Result<ManifestRecord<BucketManifest>> {
@@ -526,7 +526,7 @@ pub async fn write_bucket_manifest(
 }
 
 pub async fn read_bucket_manifest(
-    bee: &BeeClient,
+    bee: &dyn BeeStorage,
     bucket: &str,
 ) -> Result<Option<ManifestRecord<BucketManifest>>> {
     let topic = BeeClient::derive_topic(BUCKET_MANIFEST_NAMESPACE, bucket);
