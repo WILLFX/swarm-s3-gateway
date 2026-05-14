@@ -10,7 +10,10 @@ use crate::{
     crypto::bucket_name_hash,
     manifest::{BucketManifest, ObjectManifest},
     routes::private_object_read::resolve_private_object_from_bucket,
-    s3_response::{S3ErrorKind, S3ErrorResponse, chain_error_response, head_object_response},
+    s3_response::{
+        S3ErrorKind, S3ErrorResponse, chain_error_response, head_object_response,
+        omit_swarm_ref_for_private_response,
+    },
 };
 
 pub async fn handle(
@@ -57,12 +60,15 @@ pub async fn handle(
             }
         };
 
-    head_object_response(
-        &metadata.swarm_reference,
-        &metadata.content_type,
-        metadata.size,
-        &metadata.etag,
-        &metadata.last_modified,
+    omit_swarm_ref_for_private_response(
+        head_object_response(
+            &metadata.swarm_reference,
+            &metadata.content_type,
+            metadata.size,
+            &metadata.etag,
+            &metadata.last_modified,
+        ),
+        metadata.is_private,
     )
 }
 
@@ -98,12 +104,15 @@ async fn handle_private_head_object(
 
     let metadata = resolved.metadata();
 
-    head_object_response(
-        &metadata.swarm_reference,
-        &metadata.content_type,
-        metadata.size,
-        &metadata.etag,
-        &metadata.last_modified,
+    omit_swarm_ref_for_private_response(
+        head_object_response(
+            &metadata.swarm_reference,
+            &metadata.content_type,
+            metadata.size,
+            &metadata.etag,
+            &metadata.last_modified,
+        ),
+        metadata.is_private,
     )
 }
 

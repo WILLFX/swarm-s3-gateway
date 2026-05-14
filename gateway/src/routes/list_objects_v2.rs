@@ -14,7 +14,7 @@ use crate::{
     },
     s3_response::{
         ListObjectsV2Entry, S3ErrorKind, S3ErrorResponse, chain_error_response,
-        list_objects_v2_response,
+        list_objects_v2_response, omit_swarm_ref_for_private_response,
     },
 };
 
@@ -92,16 +92,19 @@ pub async fn handle(
     objects.sort_by(|a, b| a.key.cmp(&b.key));
     objects.truncate(max_keys);
 
-    list_objects_v2_response(
-        &bucket,
-        if prefix.is_empty() {
-            None
-        } else {
-            Some(prefix.as_str())
-        },
-        max_keys,
-        query.continuation_token.as_deref(),
-        &objects,
+    omit_swarm_ref_for_private_response(
+        list_objects_v2_response(
+            &bucket,
+            if prefix.is_empty() {
+                None
+            } else {
+                Some(prefix.as_str())
+            },
+            max_keys,
+            query.continuation_token.as_deref(),
+            &objects,
+        ),
+        chain_bucket.is_private,
     )
 }
 
