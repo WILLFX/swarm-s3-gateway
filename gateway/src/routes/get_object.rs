@@ -14,7 +14,7 @@ use crate::{
     routes::private_object_read::{private_object_payload_aad, resolve_private_object_from_bucket},
     s3_response::{
         S3ErrorKind, S3ErrorResponse, bee_error_response, bee_unavailable_response,
-        chain_error_response, get_object_response,
+        chain_error_response, get_object_response, omit_swarm_ref_for_private_response,
     },
 };
 
@@ -73,10 +73,13 @@ pub async fn handle(
         Err(err) => return bee_error_response(err),
     };
 
-    get_object_response(
-        &metadata.swarm_reference,
-        &metadata.content_type,
-        Bytes::from(object_bytes),
+    omit_swarm_ref_for_private_response(
+        get_object_response(
+            &metadata.swarm_reference,
+            &metadata.content_type,
+            Bytes::from(object_bytes),
+        ),
+        metadata.is_private,
     )
 }
 

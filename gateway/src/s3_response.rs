@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use aws_smithy_xml::encode::XmlWriter;
 use axum::{
-    http::{header, HeaderValue, StatusCode},
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
@@ -370,4 +370,61 @@ fn write_text_element(
     let mut el = scope.start_el(tag).finish();
     el.data(value);
     el.finish();
+}
+
+pub fn omit_swarm_ref_for_private_response(mut response: Response, is_private: bool) -> Response {
+    if is_private {
+        response.headers_mut().remove("x-amz-meta-swarm-ref");
+    }
+
+    response
+}
+
+#[cfg(test)]
+mod private_response_header_tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Response, StatusCode},
+    };
+
+    #[test]
+    fn private_response_omits_swarm_ref_header() {
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(
+                "x-amz-meta-swarm-ref",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .body(Body::empty())
+            .unwrap();
+
+        let response = omit_swarm_ref_for_private_response(response, true);
+
+        assert!(response.headers().get("x-amz-meta-swarm-ref").is_none());
+    }
+
+    #[test]
+    fn public_response_keeps_swarm_ref_header() {
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(
+                "x-amz-meta-swarm-ref",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .body(Body::empty())
+            .unwrap();
+
+        let response = omit_swarm_ref_for_private_response(response, false);
+
+        assert_eq!(
+            response
+                .headers()
+                .get("x-amz-meta-swarm-ref")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+    }
 }
