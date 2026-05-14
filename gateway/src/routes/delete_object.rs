@@ -10,6 +10,7 @@ use crate::{
     crypto::bucket_name_hash,
     manifest::{BucketManifest, read_private_bucket_manifest_v2, write_private_bucket_manifest_v2},
     s3_response::{S3ErrorKind, S3ErrorResponse, chain_error_response, no_content_response},
+    traits::AnchorClient,
 };
 
 pub async fn handle(
@@ -85,13 +86,12 @@ pub async fn handle(
         }
     };
 
-    if let Err(err) = state
-        .anchor_client
-        .update_bucket_manifest_root_for_delete_anchor(
-            bucket_id,
-            new_bucket_record.manifest_reference,
-        )
-        .await
+    if let Err(err) = anchor_delete_object_manifest_root(
+        state.anchor_client.as_ref(),
+        bucket_id,
+        new_bucket_record.manifest_reference,
+    )
+    .await
     {
         return chain_error_response(err);
     }
@@ -171,18 +171,27 @@ async fn handle_private_delete_object(
         }
     };
 
-    if let Err(err) = state
-        .anchor_client
-        .update_bucket_manifest_root_for_delete_anchor(
-            bucket_id,
-            new_bucket_record.manifest_reference,
-        )
-        .await
+    if let Err(err) = anchor_delete_object_manifest_root(
+        state.anchor_client.as_ref(),
+        bucket_id,
+        new_bucket_record.manifest_reference,
+    )
+    .await
     {
         return chain_error_response(err);
     }
 
     no_content_response()
+}
+
+async fn anchor_delete_object_manifest_root(
+    anchor_client: &dyn AnchorClient,
+    bucket_id: [u8; 32],
+    bucket_manifest_root: String,
+) -> anyhow::Result<String> {
+    anchor_client
+        .update_bucket_manifest_root_for_delete_anchor(bucket_id, bucket_manifest_root)
+        .await
 }
 
 async fn read_bucket_manifest_from_root(
@@ -212,4 +221,89 @@ async fn read_bucket_manifest_from_root(
         serde_json::from_slice(&manifest_bytes).context("failed to decode bucket manifest JSON")?;
 
     Ok(Some(manifest))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use common::types::SubstrateAddress32;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct RecordingAnchorClient {
+        put_calls: AtomicUsize,
+        delete_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AnchorClient for RecordingAnchorClient {
+        async fn create_bucket_anchor(
+            &self,
+            _owner: SubstrateAddress32,
+            _bucket_id: [u8; 32],
+            _is_private: bool,
+            _owner_signature: [u8; 64],
+            _owner_catalog_root: String,
+        ) -> anyhow::Result<String> {
+            Ok("create".to_string())
+        }
+
+        async fn delete_bucket_anchor(
+            &self,
+            _bucket_id: [u8; 32],
+            _owner_signature: [u8; 64],
+            _owner_catalog_root: String,
+        ) -> anyhow::Result<String> {
+            Ok("delete-bucket".to_string())
+        }
+
+        async fn update_bucket_manifest_root_for_put_anchor(
+            &self,
+            _bucket_id: [u8; 32],
+            _bucket_manifest_root: String,
+        ) -> anyhow::Result<String> {
+            self.put_calls.fetch_add(1, Ordering::SeqCst);
+            Ok("put-root".to_string())
+        }
+
+        async fn update_bucket_manifest_root_for_delete_anchor(
+            &self,
+            _bucket_id: [u8; 32],
+            _bucket_manifest_root: String,
+        ) -> anyhow::Result<String> {
+            self.delete_calls.fetch_add(1, Ordering::SeqCst);
+            Ok("delete-root".to_string())
+        }
+
+        async fn submit_anchor_object(
+            &self,
+            _owner: SubstrateAddress32,
+            _bucket_id: [u8; 32],
+            _object_key_id: [u8; 32],
+            _swarm_ref: String,
+            _bucket_manifest_root: String,
+            _size: u64,
+            _etag: [u8; 32],
+        ) -> anyhow::Result<String> {
+            Ok("submit-object".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_object_manifest_root_uses_delete_anchor_not_put_anchor() {
+        let client = RecordingAnchorClient::default();
+
+        let tx = anchor_delete_object_manifest_root(
+            &client,
+            [1u8; 32],
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(tx, "delete-root");
+        assert_eq!(client.delete_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(client.put_calls.load(Ordering::SeqCst), 0);
+    }
 }
