@@ -153,10 +153,13 @@ async fn handle_private_get_object(
         }
     };
 
-    get_object_response(
-        &resolved.object_manifest.encrypted_swarm_reference,
-        &resolved.object_manifest.content_type,
-        Bytes::from(plaintext),
+    omit_swarm_ref_for_private_response(
+        get_object_response(
+            &resolved.object_manifest.encrypted_swarm_reference,
+            &resolved.object_manifest.content_type,
+            Bytes::from(plaintext),
+        ),
+        true,
     )
 }
 
