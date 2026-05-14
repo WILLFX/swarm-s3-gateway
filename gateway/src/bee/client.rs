@@ -1,11 +1,13 @@
-﻿use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
 use reqwest::{Client, StatusCode};
 use secp256k1::{ecdsa::RecoverableSignature, Message, PublicKey, Secp256k1, SecretKey};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sha3::Keccak256;
-use std::{env, time::Duration};
+use std::{collections::HashMap, env, sync::Arc, time::Duration};
+use tokio::sync::RwLock;
+use tracing::warn;
 
 #[derive(Clone, Debug)]
 pub struct BeeClient {
@@ -14,6 +16,8 @@ pub struct BeeClient {
     postage_batch_id: String,
     feed_owner_hex: String,
     feed_secret_key: SecretKey,
+    allow_dev_bytes_fallback: bool,
+    dev_pointer_map: Arc<RwLock<HashMap<String, String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +29,7 @@ pub struct BeePutBytesResult {
 pub struct FeedPointerResult {
     pub owner: String,
     pub topic_hex: String,
+    pub swarm_reference: String,
     pub manifest_reference: String,
     pub soc_reference: String,
 }
@@ -52,6 +57,9 @@ impl BeeClient {
         let gas_tank_seed = env::var("S3GW_GAS_TANK_SEED")
             .context("missing required environment variable: S3GW_GAS_TANK_SEED")?;
 
+        let allow_dev_bytes_fallback =
+            read_bool_env("S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK")?.unwrap_or(false);
+
         let feed_secret_key = derive_feed_secret_key_from_seed(&gas_tank_seed)?;
         let feed_owner_hex = ethereum_address_from_secret_key(&feed_secret_key);
 
@@ -66,6 +74,8 @@ impl BeeClient {
             postage_batch_id,
             feed_owner_hex,
             feed_secret_key,
+            allow_dev_bytes_fallback,
+            dev_pointer_map: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -87,6 +97,72 @@ impl BeeClient {
 
     pub fn derive_topic_hex(bucket: &str, key: &str) -> String {
         hex::encode(Self::derive_topic(bucket, key))
+    }
+
+    pub async fn get_pointer_bytes(&self, topic: [u8; 32]) -> Result<Option<Vec<u8>>> {
+        let topic_hex = hex::encode(topic);
+        let url = format!(
+            "{}/soc/{}/{}",
+            self.base_url, self.feed_owner_hex, topic_hex
+        );
+
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .context("Bee /soc pointer read request failed")?;
+
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .context("failed to read Bee /soc response body")?;
+
+        if status == StatusCode::NOT_FOUND {
+            if self.allow_dev_bytes_fallback {
+                if let Some(reference) = self.dev_pointer_map.read().await.get(&topic_hex).cloned()
+                {
+                    warn!(
+                    "S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK is enabled — SOC pointer read skipped, using in-memory dev mapping. Do not use in production."
+                );
+                    return Ok(Some(
+                        hex::decode(reference)
+                            .context("failed to decode dev fallback swarm reference")?,
+                    ));
+                }
+            }
+            return Ok(None);
+        }
+
+        if !status.is_success() {
+            let text = String::from_utf8_lossy(&body).to_string();
+
+            if self.allow_dev_bytes_fallback
+                && status == StatusCode::NOT_IMPLEMENTED
+                && text.to_ascii_lowercase().contains("dev mode")
+            {
+                if let Some(reference) = self.dev_pointer_map.read().await.get(&topic_hex).cloned()
+                {
+                    warn!(
+                    "S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK is enabled — SOC pointer read skipped, using in-memory dev mapping. Do not use in production."
+                );
+                    return Ok(Some(
+                        hex::decode(reference)
+                            .context("failed to decode dev fallback swarm reference")?,
+                    ));
+                }
+                return Ok(None);
+            }
+
+            bail!(
+                "Bee /soc pointer read failed with status {}: {}",
+                status,
+                text
+            );
+        }
+
+        Ok(Some(extract_pointer_payload(body.as_ref())?))
     }
 
     /// Raw bytes upload using Bee `/bytes`.
@@ -144,7 +220,11 @@ impl BeeClient {
             .context("failed to read Bee feed manifest response body")?;
 
         if !status.is_success() {
-            bail!("Bee feed manifest creation failed with status {}: {}", status, text);
+            bail!(
+                "Bee feed manifest creation failed with status {}: {}",
+                status,
+                text
+            );
         }
 
         let parsed: BeeReferenceResponse = serde_json::from_str(&text)
@@ -181,11 +261,25 @@ impl BeeClient {
         let put = self.put_bytes(data).await?;
         let manifest_reference = self.ensure_feed_manifest(bucket, key).await?;
         let topic_hex = Self::derive_topic_hex(bucket, key);
-        let soc_reference = self.publish_soc_pointer(&topic_hex, &put.reference).await?;
+        let soc_reference = match self.publish_soc_pointer(&topic_hex, &put.reference).await {
+            Ok(soc_reference) => soc_reference,
+            Err(err) if self.allow_dev_bytes_fallback && is_dev_mode_soc_not_supported(&err) => {
+                self.dev_pointer_map
+                    .write()
+                    .await
+                    .insert(topic_hex.clone(), put.reference.clone());
+                warn!(
+                    "S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK is enabled — SOC pointer update skipped, using raw bytes reference. Do not use in production."
+                );
+                put.reference.clone()
+            }
+            Err(err) => return Err(err),
+        };
 
         Ok(FeedPointerResult {
             owner: self.feed_owner_hex.clone(),
             topic_hex,
+            swarm_reference: put.reference,
             manifest_reference,
             soc_reference,
         })
@@ -251,7 +345,11 @@ impl BeeClient {
             .context("failed to read Bee /soc response body")?;
 
         if !status.is_success() {
-            bail!("Bee /soc pointer update failed with status {}: {}", status, text);
+            bail!(
+                "Bee /soc pointer update failed with status {}: {}",
+                status,
+                text
+            );
         }
 
         let parsed: BeeReferenceResponse =
@@ -260,37 +358,33 @@ impl BeeClient {
         Ok(parsed.reference)
     }
 
-    pub async fn get_pointer_bytes(&self, bucket: &str, key: &str) -> Result<Option<Bytes>> {
-        let topic_hex = Self::derive_topic_hex(bucket, key);
-        let url = format!(
-            "{}/soc/{}/{}",
-            self.base_url, self.feed_owner_hex, topic_hex
-        );
+    pub async fn get_bytes(&self, reference: &str) -> Result<Option<Bytes>> {
+        let url = format!("{}/bytes/{}", self.base_url, reference);
 
         let response = self
             .http
             .get(url)
             .send()
             .await
-            .context("Bee /soc read request failed")?;
+            .context("Bee /bytes read request failed")?;
 
-        match response.status() {
-            StatusCode::OK => {
-                let data = response
-                    .bytes()
-                    .await
-                    .context("failed to read Bee /soc body")?;
-                Ok(Some(data))
-            }
-            StatusCode::NOT_FOUND => Ok(None),
-            status => {
-                let text = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "<unreadable body>".to_string());
-                bail!("Bee /soc read failed with status {}: {}", status, text)
-            }
+        let status = response.status();
+
+        if status == StatusCode::NOT_FOUND {
+            return Ok(None);
         }
+
+        let body = response
+            .bytes()
+            .await
+            .context("failed to read Bee /bytes response body")?;
+
+        if !status.is_success() {
+            let text = String::from_utf8_lossy(&body).to_string();
+            bail!("Bee /bytes read failed with status {}: {}", status, text);
+        }
+
+        Ok(Some(body))
     }
 }
 
@@ -311,8 +405,7 @@ fn validate_batch_id(batch_id: &str) -> Result<()> {
 
 fn decode_32(hex_value: &str, field_name: &str) -> Result<[u8; 32]> {
     let raw = hex_value.trim().trim_start_matches("0x");
-    let bytes = hex::decode(raw)
-        .with_context(|| format!("{field_name} must be valid hex"))?;
+    let bytes = hex::decode(raw).with_context(|| format!("{field_name} must be valid hex"))?;
 
     let arr: [u8; 32] = bytes
         .try_into()
@@ -358,7 +451,8 @@ fn sign_digest_hex(secret_key: &SecretKey, digest: &[u8]) -> Result<String> {
         bail!("digest must be 32 bytes");
     }
 
-    let message = Message::from_slice(digest).context("failed to construct secp256k1 message")?;
+    let message =
+        Message::from_digest_slice(digest).context("failed to construct secp256k1 message")?;
     let secp = Secp256k1::new();
     let signature: RecoverableSignature = secp.sign_ecdsa_recoverable(&message, secret_key);
     let (recovery_id, compact) = signature.serialize_compact();
@@ -368,4 +462,46 @@ fn sign_digest_hex(secret_key: &SecretKey, digest: &[u8]) -> Result<String> {
     out.push(recovery_id.to_i32() as u8);
 
     Ok(hex::encode(out))
+}
+
+fn read_bool_env(name: &str) -> Result<Option<bool>> {
+    match env::var(name) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(Some(true)),
+            "0" | "false" | "no" | "off" => Ok(Some(false)),
+            other => bail!("invalid boolean value for {name}: {other}"),
+        },
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => {
+            bail!("environment variable {name} is not valid UTF-8")
+        }
+    }
+}
+
+fn is_dev_mode_soc_not_supported(err: &anyhow::Error) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("bee /soc pointer update failed")
+        && msg.contains("501")
+        && msg.contains("not implemented")
+        && msg.contains("dev mode")
+}
+
+fn extract_pointer_payload(data: &[u8]) -> Result<Vec<u8>> {
+    if data.len() == 32 {
+        return Ok(data.to_vec());
+    }
+
+    if data.len() < 8 {
+        bail!("Bee pointer payload too short");
+    }
+
+    let mut span_bytes = [0u8; 8];
+    span_bytes.copy_from_slice(&data[..8]);
+    let span = u64::from_le_bytes(span_bytes) as usize;
+
+    if data.len() < 8 + span {
+        bail!("Bee pointer payload shorter than declared span");
+    }
+
+    Ok(data[8..8 + span].to_vec())
 }

@@ -7,4 +7,4 @@ pub enum GatewayError {
 
     #[error("internal: {0}")]
     Internal(String),
-}// common crate error definitions
+} // common crate error definitions

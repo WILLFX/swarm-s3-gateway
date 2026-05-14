@@ -14,6 +14,7 @@ scale-info = { workspace = true, features = ["derive", "serde"] }
 
 common = { path = "../../common", default-features = false }
 chain-registry-pallet = { path = "../../chain-registry-pallet", default-features = false }
+pallet-s3-contracts = { path = "../../pallet-s3-contracts", default-features = false }
 
 frame-benchmarking = { workspace = true, optional = true }
 frame-executive.workspace = true
@@ -61,6 +62,7 @@ std = [
   "scale-info/std",
   "common/std",
   "chain-registry-pallet/std",
+  "pallet-s3-contracts/std",
   "frame-benchmarking?/std",
   "frame-executive/std",
   "frame-metadata-hash-extension/std",

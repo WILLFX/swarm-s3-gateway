@@ -17,6 +17,15 @@ pub struct ChainRegistryEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainBucketRecord {
+    pub owner: SubstrateAddress32,
+    pub is_private: bool,
+    pub encryption_version: u32,
+    pub creation_date: u64,
+    pub bucket_manifest_root: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AwsPrincipal {
     pub access_key_id: String,
     pub owner: SubstrateAddress32,

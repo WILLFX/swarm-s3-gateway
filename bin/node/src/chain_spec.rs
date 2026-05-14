@@ -1,6 +1,6 @@
+use s3_registry_runtime::{AccountId, AuraId, GrandpaId, Signature, WASM_BINARY};
 use sc_service::ChainType;
 use serde_json::json;
-use s3_registry_runtime::{AccountId, AuraId, GrandpaId, Signature, WASM_BINARY};
 use sp_core::{sr25519, Pair, Public};
 use sp_runtime::traits::{IdentifyAccount, Verify};
 
@@ -53,15 +53,13 @@ fn dev_genesis_patch() -> serde_json::Value {
 }
 
 pub fn development_chain_spec() -> Result<ChainSpec, String> {
-    Ok(
-        ChainSpec::builder(
-            WASM_BINARY.ok_or_else(|| "Development wasm not available".to_string())?,
-            None,
-        )
-        .with_name("Development")
-        .with_id("dev")
-        .with_chain_type(ChainType::Development)
-        .with_genesis_config_patch(dev_genesis_patch())
-        .build(),
+    Ok(ChainSpec::builder(
+        WASM_BINARY.ok_or_else(|| "Development wasm not available".to_string())?,
+        None,
     )
+    .with_name("Development")
+    .with_id("dev")
+    .with_chain_type(ChainType::Development)
+    .with_genesis_config_patch(dev_genesis_patch())
+    .build())
 }

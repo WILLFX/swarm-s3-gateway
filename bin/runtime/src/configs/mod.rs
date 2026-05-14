@@ -33,6 +33,7 @@ parameter_types! {
         BlockLength::max_with_normal_ratio(5 * 1024 * 1024, NORMAL_DISPATCH_RATIO);
     pub const SS58Prefix: u8 = 42;
     pub const MaxEncryptedSecretLen: u32 = 1024;
+    pub GasTankSponsorAccount: AccountId = AccountId::new([0u8; 32]);
 }
 
 #[derive_impl(frame_system::config_preludes::SolochainDefaultConfig)]
@@ -127,7 +128,14 @@ impl chain_registry_pallet::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type GovernanceOrigin = frame_system::EnsureRoot<AccountId>;
     type AccountIdToSubstrateAddress = AccountIdToSubstrateAddress;
+    type SponsorAccount = GasTankSponsorAccount;
+    type UnixTime = Timestamp;
     type MaxEncryptedSecretLen = MaxEncryptedSecretLen;
+}
+
+impl pallet_s3_contracts::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type GovernanceOrigin = frame_system::EnsureRoot<AccountId>;
 }
 
 const fn deposit(items: u32, bytes: u32) -> Balance {

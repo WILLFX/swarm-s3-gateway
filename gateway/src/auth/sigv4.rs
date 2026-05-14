@@ -1,5 +1,5 @@
 use crate::traits::{RegistryClient, SecretUnwrapper};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use axum::http::{HeaderMap, Method, Request};
 use bytes::Bytes;
 use common::types::{AccessKeyHash, AwsPrincipal};
@@ -262,13 +262,9 @@ fn percent_encode(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for b in input.as_bytes() {
         match *b {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~' => out.push(*b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
             _ => out.push_str(&format!("%{:02X}", b)),
         }
     }
@@ -312,10 +308,10 @@ mod tests {
     use crate::auth::unwrap::EnvKeyUnwrapper;
     use crate::traits::{RegistryClient, SecretUnwrapper};
     use aes_gcm::{
-        aead::{Aead, KeyInit, Payload},
         Aes256Gcm, Nonce,
+        aead::{Aead, KeyInit, Payload},
     };
-    use anyhow::{anyhow, Result};
+    use anyhow::{Result, anyhow};
     use async_trait::async_trait;
     use axum::http::{HeaderValue, Method, Request, Uri};
     use bytes::Bytes;
@@ -336,33 +332,44 @@ mod tests {
             }
             Ok(self.entry.clone())
         }
+
+        async fn fetch_bucket(
+            &self,
+            _bucket_name_hash: [u8; 32],
+        ) -> Result<Option<common::types::ChainBucketRecord>> {
+            Ok(None)
+        }
+
+        async fn fetch_owner_catalog_root(&self, _owner: [u8; 32]) -> anyhow::Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
     }
 
     fn sha256_hex(data: &[u8]) -> String {
         hex::encode(Sha256::digest(data))
     }
 
-fn encrypt_sigv4_secret(
-    master_key: &[u8; 32],
-    nonce: &[u8; 12],
-    aad: &[u8],
-    plaintext_secret: &[u8],
-) -> Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(master_key)
-        .map_err(|e| anyhow!("failed to init AES-GCM: {e:?}"))?;
+    fn encrypt_sigv4_secret(
+        master_key: &[u8; 32],
+        nonce: &[u8; 12],
+        aad: &[u8],
+        plaintext_secret: &[u8],
+    ) -> Result<Vec<u8>> {
+        let cipher = Aes256Gcm::new_from_slice(master_key)
+            .map_err(|e| anyhow!("failed to init AES-GCM: {e:?}"))?;
 
-    let ciphertext = cipher
-        .encrypt(
-            Nonce::from_slice(nonce),
-            Payload {
-                msg: plaintext_secret,
-                aad,
-            },
-        )
-        .map_err(|e| anyhow!("failed to encrypt test secret: {e:?}"))?;
+        let ciphertext = cipher
+            .encrypt(
+                Nonce::from_slice(nonce),
+                Payload {
+                    msg: plaintext_secret,
+                    aad,
+                },
+            )
+            .map_err(|e| anyhow!("failed to encrypt test secret: {e:?}"))?;
 
-    Ok(ciphertext)
-}
+        Ok(ciphertext)
+    }
 
     fn build_signed_request(
         method: Method,
@@ -428,10 +435,8 @@ fn encrypt_sigv4_secret(
             signature
         );
 
-        req.headers_mut().insert(
-            "authorization",
-            HeaderValue::from_str(&authorization)?,
-        );
+        req.headers_mut()
+            .insert("authorization", HeaderValue::from_str(&authorization)?);
 
         Ok(req)
     }

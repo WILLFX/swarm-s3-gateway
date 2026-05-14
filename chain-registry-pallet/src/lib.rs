@@ -6,19 +6,18 @@ pub use pallet::*;
 pub mod pallet {
     use codec::{Decode, Encode, MaxEncodedLen};
     use common::types::{AccessKeyHash, SubstrateAddress32};
+    use frame_support::sp_runtime::traits::Convert;
     use frame_support::{
-    dispatch::DispatchResult,
-    pallet_prelude::*,
-    traits::EnsureOrigin,
-    BoundedVec,
-    RuntimeDebug,
-};
+        dispatch::DispatchResult,
+        pallet_prelude::*,
+        traits::{EnsureOrigin, UnixTime},
+        BoundedVec,
+    };
     use frame_system::{ensure_signed, pallet_prelude::*};
     use scale_info::TypeInfo;
-    use frame_support::sp_runtime::traits::Convert;
     use sp_std::vec::Vec;
 
-    #[derive(Clone, Encode, Decode, Eq, PartialEq, RuntimeDebug, MaxEncodedLen, TypeInfo)]
+    #[derive(Clone, Encode, Decode, Eq, PartialEq, Debug, MaxEncodedLen, TypeInfo)]
     #[scale_info(skip_type_params(MaxEncryptedSecretLen))]
     pub struct IdentityEntry<MaxEncryptedSecretLen: Get<u32>> {
         pub owner: SubstrateAddress32,
@@ -28,14 +27,25 @@ pub mod pallet {
         pub enabled: bool,
     }
 
+    #[derive(Clone, Encode, Decode, Eq, PartialEq, Debug, MaxEncodedLen, TypeInfo)]
+    pub struct BucketRecord {
+        pub owner: SubstrateAddress32,
+        pub is_private: bool,
+        pub encryption_version: u32,
+        pub creation_date: u64,
+    }
+
     #[pallet::config]
     pub trait Config: frame_system::Config {
-        type RuntimeEvent: From<Event<Self>>
-            + IsType<<Self as frame_system::Config>::RuntimeEvent>;
+        type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
 
         type GovernanceOrigin: EnsureOrigin<Self::RuntimeOrigin>;
 
         type AccountIdToSubstrateAddress: Convert<Self::AccountId, SubstrateAddress32>;
+
+        type SponsorAccount: Get<Self::AccountId>;
+
+        type UnixTime: UnixTime;
 
         #[pallet::constant]
         type MaxEncryptedSecretLen: Get<u32>;
@@ -53,6 +63,11 @@ pub mod pallet {
         IdentityEntry<T::MaxEncryptedSecretLen>,
         OptionQuery,
     >;
+
+    #[pallet::storage]
+    #[pallet::getter(fn bucket_map)]
+    pub type BucketMap<T: Config> =
+        StorageMap<_, Blake2_128Concat, [u8; 32], BucketRecord, OptionQuery>;
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -76,6 +91,19 @@ pub mod pallet {
             access_key_hash: AccessKeyHash,
             owner: SubstrateAddress32,
         },
+        BucketCreated {
+            hash: [u8; 32],
+            owner: SubstrateAddress32,
+            is_private: bool,
+        },
+        BucketDeleted {
+            hash: [u8; 32],
+            owner: SubstrateAddress32,
+        },
+        EncryptionVersionIncremented {
+            hash: [u8; 32],
+            new_version: u32,
+        },
     }
 
     #[pallet::error]
@@ -86,6 +114,10 @@ pub mod pallet {
         NotAuthorized,
         EncryptedSecretTooLong,
         KeyVersionOverflow,
+        BucketAlreadyExists,
+        BucketNotFound,
+        NotBucketOwner,
+        EncryptionVersionOverflow,
     }
 
     #[pallet::call]
@@ -215,6 +247,83 @@ pub mod pallet {
 
             Ok(())
         }
+
+        #[pallet::call_index(4)]
+        #[pallet::weight(Weight::from_parts(10_000, 0) + T::DbWeight::get().reads_writes(1, 1))]
+        pub fn create_bucket(
+            origin: OriginFor<T>,
+            owner: SubstrateAddress32,
+            bucket_name_hash: [u8; 32],
+            is_private: bool,
+        ) -> DispatchResult {
+            Self::ensure_owner_or_sponsor_or_governance(origin, owner)?;
+
+            ensure!(
+                !BucketMap::<T>::contains_key(bucket_name_hash),
+                Error::<T>::BucketAlreadyExists
+            );
+
+            let record = BucketRecord {
+                owner,
+                is_private,
+                encryption_version: 1,
+                creation_date: T::UnixTime::now().as_secs(),
+            };
+
+            BucketMap::<T>::insert(bucket_name_hash, record);
+
+            Self::deposit_event(Event::BucketCreated {
+                hash: bucket_name_hash,
+                owner,
+                is_private,
+            });
+
+            Ok(())
+        }
+
+        #[pallet::call_index(5)]
+        #[pallet::weight(Weight::from_parts(10_000, 0) + T::DbWeight::get().reads_writes(1, 1))]
+        pub fn delete_bucket(origin: OriginFor<T>, bucket_name_hash: [u8; 32]) -> DispatchResult {
+            let record = BucketMap::<T>::get(bucket_name_hash).ok_or(Error::<T>::BucketNotFound)?;
+
+            Self::ensure_bucket_owner_or_sponsor_or_governance(origin, record.owner)?;
+
+            BucketMap::<T>::remove(bucket_name_hash);
+
+            Self::deposit_event(Event::BucketDeleted {
+                hash: bucket_name_hash,
+                owner: record.owner,
+            });
+
+            Ok(())
+        }
+
+        #[pallet::call_index(6)]
+        #[pallet::weight(Weight::from_parts(10_000, 0) + T::DbWeight::get().reads_writes(1, 1))]
+        pub fn increment_encryption_version(
+            origin: OriginFor<T>,
+            bucket_name_hash: [u8; 32],
+        ) -> DispatchResult {
+            let mut record =
+                BucketMap::<T>::get(bucket_name_hash).ok_or(Error::<T>::BucketNotFound)?;
+
+            Self::ensure_bucket_owner_or_sponsor_or_governance(origin, record.owner)?;
+
+            record.encryption_version = record
+                .encryption_version
+                .checked_add(1)
+                .ok_or(Error::<T>::EncryptionVersionOverflow)?;
+
+            let new_version = record.encryption_version;
+            BucketMap::<T>::insert(bucket_name_hash, record);
+
+            Self::deposit_event(Event::EncryptionVersionIncremented {
+                hash: bucket_name_hash,
+                new_version,
+            });
+
+            Ok(())
+        }
     }
 
     impl<T: Config> Pallet<T> {
@@ -230,6 +339,44 @@ pub mod pallet {
             let caller_owner = T::AccountIdToSubstrateAddress::convert(who);
 
             ensure!(caller_owner == owner, Error::<T>::NotAuthorized);
+            Ok(())
+        }
+
+        fn ensure_owner_or_sponsor_or_governance(
+            origin: OriginFor<T>,
+            owner: SubstrateAddress32,
+        ) -> DispatchResult {
+            if T::GovernanceOrigin::try_origin(origin.clone()).is_ok() {
+                return Ok(());
+            }
+
+            let who = ensure_signed(origin).map_err(|_| Error::<T>::NotAuthorized)?;
+            let caller_owner = T::AccountIdToSubstrateAddress::convert(who.clone());
+
+            if caller_owner == owner {
+                return Ok(());
+            }
+
+            ensure!(who == T::SponsorAccount::get(), Error::<T>::NotAuthorized);
+            Ok(())
+        }
+
+        fn ensure_bucket_owner_or_sponsor_or_governance(
+            origin: OriginFor<T>,
+            owner: SubstrateAddress32,
+        ) -> DispatchResult {
+            if T::GovernanceOrigin::try_origin(origin.clone()).is_ok() {
+                return Ok(());
+            }
+
+            let who = ensure_signed(origin).map_err(|_| Error::<T>::NotAuthorized)?;
+            let caller_owner = T::AccountIdToSubstrateAddress::convert(who.clone());
+
+            if caller_owner == owner {
+                return Ok(());
+            }
+
+            ensure!(who == T::SponsorAccount::get(), Error::<T>::NotAuthorized);
             Ok(())
         }
 

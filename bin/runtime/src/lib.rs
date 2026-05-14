@@ -88,6 +88,11 @@ pub fn native_version() -> NativeVersion {
     }
 }
 
+pub type AuraId = sp_consensus_aura::sr25519::AuthorityId;
+pub type GrandpaId = sp_consensus_grandpa::AuthorityId;
+pub use apis::RuntimeApi;
+
+
 pub type Signature = MultiSignature;
 pub type AccountId = <<Signature as Verify>::Signer as IdentifyAccount>::AccountId;
 pub type Balance = u128;
@@ -109,7 +114,6 @@ pub type TxExtension = (
     frame_system::CheckNonce<Runtime>,
     frame_system::CheckWeight<Runtime>,
     pallet_transaction_payment::ChargeTransactionPayment<Runtime>,
-    frame_metadata_hash_extension::CheckMetadataHash<Runtime>,
     frame_system::WeightReclaim<Runtime>,
 );
 
@@ -172,4 +176,7 @@ mod runtime {
 
     #[runtime::pallet_index(10)]
     pub type S3Registry = chain_registry_pallet;
+
+    #[runtime::pallet_index(11)]
+    pub type S3Contracts = pallet_s3_contracts;
 }

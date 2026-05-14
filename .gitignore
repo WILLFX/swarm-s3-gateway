@@ -1,0 +1,7 @@
+target/
+artifacts/
+gateway/metadata/
+*.bak
+*.save
+*.before_*
+*.recovery_before_*

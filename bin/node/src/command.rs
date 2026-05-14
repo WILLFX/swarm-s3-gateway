@@ -3,9 +3,10 @@ use crate::{
     cli::{Cli, Subcommand},
     service,
 };
+use clap::Parser;
+use s3_registry_runtime::opaque::Block;
 use sc_cli::SubstrateCli;
 use sc_service::PartialComponents;
-use s3_registry_runtime::opaque::Block;
 
 impl SubstrateCli for Cli {
     fn impl_name() -> String {
@@ -35,7 +36,9 @@ impl SubstrateCli for Cli {
     fn load_spec(&self, id: &str) -> Result<Box<dyn sc_service::ChainSpec>, String> {
         Ok(match id {
             "dev" => Box::new(chain_spec::development_chain_spec()?),
-            path => Box::new(chain_spec::ChainSpec::from_json_file(std::path::PathBuf::from(path))?),
+            path => Box::new(chain_spec::ChainSpec::from_json_file(
+                std::path::PathBuf::from(path),
+            )?),
         })
     }
 }
@@ -52,30 +55,46 @@ pub fn run() -> sc_cli::Result<()> {
         Some(Subcommand::CheckBlock(cmd)) => {
             let runner = cli.create_runner(cmd)?;
             runner.async_run(|config| {
-                let PartialComponents { client, task_manager, import_queue, .. } =
-                    service::new_partial(&config)?;
+                let PartialComponents {
+                    client,
+                    task_manager,
+                    import_queue,
+                    ..
+                } = service::new_partial(&config)?;
                 Ok((cmd.run(client, import_queue), task_manager))
             })
         }
         Some(Subcommand::ExportBlocks(cmd)) => {
             let runner = cli.create_runner(cmd)?;
             runner.async_run(|config| {
-                let PartialComponents { client, task_manager, .. } = service::new_partial(&config)?;
+                let PartialComponents {
+                    client,
+                    task_manager,
+                    ..
+                } = service::new_partial(&config)?;
                 Ok((cmd.run(client, config.database), task_manager))
             })
         }
         Some(Subcommand::ExportState(cmd)) => {
             let runner = cli.create_runner(cmd)?;
             runner.async_run(|config| {
-                let PartialComponents { client, task_manager, .. } = service::new_partial(&config)?;
+                let PartialComponents {
+                    client,
+                    task_manager,
+                    ..
+                } = service::new_partial(&config)?;
                 Ok((cmd.run(client, config.chain_spec), task_manager))
             })
         }
         Some(Subcommand::ImportBlocks(cmd)) => {
             let runner = cli.create_runner(cmd)?;
             runner.async_run(|config| {
-                let PartialComponents { client, task_manager, import_queue, .. } =
-                    service::new_partial(&config)?;
+                let PartialComponents {
+                    client,
+                    task_manager,
+                    import_queue,
+                    ..
+                } = service::new_partial(&config)?;
                 Ok((cmd.run(client, import_queue), task_manager))
             })
         }
@@ -86,8 +105,12 @@ pub fn run() -> sc_cli::Result<()> {
         Some(Subcommand::Revert(cmd)) => {
             let runner = cli.create_runner(cmd)?;
             runner.async_run(|config| {
-                let PartialComponents { client, task_manager, backend, .. } =
-                    service::new_partial(&config)?;
+                let PartialComponents {
+                    client,
+                    task_manager,
+                    backend,
+                    ..
+                } = service::new_partial(&config)?;
                 let aux_revert = Box::new(|client, _, blocks| {
                     sc_consensus_grandpa::revert(client, blocks)?;
                     Ok(())
@@ -102,16 +125,14 @@ pub fn run() -> sc_cli::Result<()> {
         None => {
             let runner = cli.create_runner(&cli.run)?;
             runner.run_node_until_exit(|config| async move {
-                match config.network.network_backend.unwrap_or_default() {
-                    sc_network::config::NetworkBackendType::Libp2p => {
-                        service::new_full::<
-                            sc_network::NetworkWorker<
-                                s3_registry_runtime::opaque::Block,
-                                <s3_registry_runtime::opaque::Block as sp_runtime::traits::Block>::Hash,
-                            >,
-                        >(config)
-                        .map_err(sc_cli::Error::Service)
-                    }
+                match config.network.network_backend {
+                    sc_network::config::NetworkBackendType::Libp2p => service::new_full::<
+                        sc_network::NetworkWorker<
+                            s3_registry_runtime::opaque::Block,
+                            <s3_registry_runtime::opaque::Block as sp_runtime::traits::Block>::Hash,
+                        >,
+                    >(config)
+                    .map_err(sc_cli::Error::Service),
                     sc_network::config::NetworkBackendType::Litep2p => {
                         service::new_full::<sc_network::Litep2pNetworkBackend>(config)
                             .map_err(sc_cli::Error::Service)
