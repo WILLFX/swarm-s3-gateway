@@ -1,9 +1,9 @@
-use anyhow::{anyhow, Result};
-use async_trait::async_trait;
 use aes_gcm::{
-    aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit, Payload},
 };
+use anyhow::{Result, anyhow};
+use async_trait::async_trait;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, Uri};
 use bytes::Bytes;
 use common::types::{AccessKeyHash, ChainRegistryEntry, SubstrateAddress32};
@@ -27,6 +27,17 @@ impl RegistryClient for MockRegistryClient {
             return Err(anyhow!("unexpected access key hash"));
         }
         Ok(self.entry.clone())
+    }
+
+    async fn fetch_bucket(
+        &self,
+        _bucket_name_hash: [u8; 32],
+    ) -> anyhow::Result<Option<common::types::ChainBucketRecord>> {
+        Ok(None)
+    }
+
+    async fn fetch_owner_catalog_root(&self, _owner: [u8; 32]) -> anyhow::Result<Vec<u8>> {
+        Ok(Vec::new())
     }
 }
 
@@ -90,13 +101,9 @@ fn percent_encode(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for b in input.as_bytes() {
         match *b {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~' => out.push(*b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
             _ => out.push_str(&format!("%{:02X}", b)),
         }
     }
@@ -261,10 +268,8 @@ fn build_signed_request(
         signature
     );
 
-    req.headers_mut().insert(
-        "authorization",
-        HeaderValue::from_str(&authorization)?,
-    );
+    req.headers_mut()
+        .insert("authorization", HeaderValue::from_str(&authorization)?);
 
     Ok(req)
 }

@@ -31,7 +31,7 @@ impl SecretUnwrapper for EnvKeyUnwrapper {
 
         // S3 secrets use 12-byte nonces for AES-GCM
         let nonce = Nonce::from_slice(nonce_bytes);
-        
+
         let payload = Payload {
             msg: ciphertext,
             aad: aad,
@@ -44,5 +44,3 @@ impl SecretUnwrapper for EnvKeyUnwrapper {
         Ok(decrypted)
     }
 }
-
-

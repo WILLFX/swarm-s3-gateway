@@ -1,11 +1,11 @@
 use futures::FutureExt;
+use s3_registry_runtime::{self, apis::RuntimeApi, opaque::Block};
 use sc_client_api::{Backend, BlockBackend};
 use sc_consensus_aura::{ImportQueueParams, SlotProportion, StartAuraParams};
 use sc_consensus_grandpa::SharedVoterState;
 use sc_service::{error::Error as ServiceError, Configuration, TaskManager, WarpSyncConfig};
 use sc_telemetry::{Telemetry, TelemetryWorker};
 use sc_transaction_pool_api::OffchainTransactionPoolFactory;
-use s3_registry_runtime::{self, opaque::Block, RuntimeApi};
 use sp_consensus_aura::sr25519::AuthorityPair as AuraPair;
 use std::{sync::Arc, time::Duration};
 
@@ -50,11 +50,14 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
             config,
             telemetry.as_ref().map(|(_, telemetry)| telemetry.handle()),
             executor,
+            Vec::new(),
         )?;
     let client = Arc::new(client);
 
     let telemetry = telemetry.map(|(worker, telemetry)| {
-        task_manager.spawn_handle().spawn("telemetry", None, worker.run());
+        task_manager
+            .spawn_handle()
+            .spawn("telemetry", None, worker.run());
         telemetry
     });
 
@@ -80,8 +83,8 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
     )?;
 
     let cidp_client = client.clone();
-    let import_queue =
-        sc_consensus_aura::import_queue::<AuraPair, _, _, _, _, _>(ImportQueueParams {
+    let import_queue = sc_consensus_aura::import_queue::<AuraPair, _, _, _, _, _>(
+        ImportQueueParams {
             block_import: grandpa_block_import.clone(),
             justification_import: Some(Box::new(grandpa_block_import.clone())),
             client: client.clone(),
@@ -108,7 +111,8 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
             check_for_equivocation: Default::default(),
             telemetry: telemetry.as_ref().map(|x| x.handle()),
             compatibility_mode: Default::default(),
-        })?;
+        },
+    )?;
 
     Ok(sc_service::PartialComponents {
         client,
@@ -147,7 +151,11 @@ pub fn new_full<
 
     let peer_store_handle = net_config.peer_store_handle();
     let grandpa_protocol_name = sc_consensus_grandpa::protocol_standard_name(
-        &client.block_hash(0).ok().flatten().expect("Genesis block exists; qed"),
+        &client
+            .block_hash(0)
+            .ok()
+            .flatten()
+            .expect("Genesis block exists; qed"),
         &config.chain_spec,
     );
     let (grandpa_protocol_config, grandpa_notification_service) =
@@ -171,6 +179,7 @@ pub fn new_full<
             client: client.clone(),
             transaction_pool: transaction_pool.clone(),
             spawn_handle: task_manager.spawn_handle(),
+            spawn_essential_handle: task_manager.spawn_essential_handle(),
             import_queue,
             block_announce_validator_builder: None,
             warp_sync_config: Some(WarpSyncConfig::WithProvider(warp_sync)),
@@ -195,7 +204,9 @@ pub fn new_full<
         task_manager.spawn_handle().spawn(
             "offchain-workers-runner",
             "offchain-worker",
-            offchain_workers.run(client.clone(), task_manager.spawn_handle()).boxed(),
+            offchain_workers
+                .run(client.clone(), task_manager.spawn_handle())
+                .boxed(),
         );
     }
 
@@ -211,7 +222,10 @@ pub fn new_full<
         let pool = transaction_pool.clone();
 
         Box::new(move |_| {
-            let deps = crate::rpc::FullDeps { client: client.clone(), pool: pool.clone() };
+            let deps = crate::rpc::FullDeps {
+                client: client.clone(),
+                pool: pool.clone(),
+            };
             crate::rpc::create_full(deps).map_err(Into::into)
         })
     };
@@ -229,6 +243,7 @@ pub fn new_full<
         sync_service: sync_service.clone(),
         config,
         telemetry: telemetry.as_mut(),
+        tracing_execute_block: None,
     })?;
 
     if role.is_authority() {
