@@ -8,11 +8,12 @@ pub mod pallet {
     use common::types::{AccessKeyHash, SubstrateAddress32};
     use frame_support::sp_runtime::traits::Convert;
     use frame_support::{
+        BoundedVec,
         dispatch::DispatchResult,
         pallet_prelude::*,
         traits::{EnsureOrigin, UnixTime},
-        BoundedVec,
     };
+
     use frame_system::{ensure_signed, pallet_prelude::*};
     use scale_info::TypeInfo;
     use sp_std::vec::Vec;
@@ -396,7 +397,7 @@ mod tests {
     use common::types::{AccessKeyHash, SubstrateAddress32};
     use frame_support::{
         assert_noop, assert_ok, construct_runtime, derive_impl,
-        sp_runtime::{traits::Convert, BuildStorage},
+        sp_runtime::{BuildStorage, traits::Convert},
     };
 
     type Block = frame_system::mocking::MockBlock<Test>;
@@ -423,7 +424,25 @@ mod tests {
         }
     }
 
+    pub struct TestUnixTime;
+
+    impl frame_support::traits::UnixTime for TestUnixTime {
+        fn now() -> core::time::Duration {
+            core::time::Duration::from_secs(1_700_000_000)
+        }
+    }
+
+    pub struct TestSponsorAccount;
+
+    impl frame_support::traits::Get<<Test as frame_system::Config>::AccountId> for TestSponsorAccount {
+        fn get() -> <Test as frame_system::Config>::AccountId {
+            1
+        }
+    }
+
     impl Config for Test {
+        type SponsorAccount = TestSponsorAccount;
+        type UnixTime = TestUnixTime;
         type RuntimeEvent = RuntimeEvent;
         type GovernanceOrigin = frame_system::EnsureRoot<u64>;
         type AccountIdToSubstrateAddress = AccountIdToSubstrateAddress;
