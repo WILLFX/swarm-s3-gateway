@@ -9,8 +9,8 @@ use crate::{
     app_state::AppState,
     crypto::bucket_name_hash,
     manifest::{
-        BucketManifest, read_owner_catalog_manifest, read_private_bucket_manifest_v2,
-        write_owner_catalog_manifest,
+        BucketManifest, PrivateBucketManifestV2, read_owner_catalog_manifest,
+        read_private_bucket_manifest_v2, write_owner_catalog_manifest,
     },
     s3_response::{S3ErrorKind, S3ErrorResponse, chain_error_response, no_content_response},
 };
@@ -108,13 +108,7 @@ async fn ensure_bucket_manifest_empty(
             }
         };
 
-        return if manifest.objects.is_empty() {
-            Ok(())
-        } else {
-            Err(S3ErrorResponse::new(S3ErrorKind::BucketNotEmpty)
-                .with_resource(format!("/{bucket}"))
-                .into_response())
-        };
+        return ensure_private_bucket_manifest_empty(bucket, &manifest);
     }
 
     let manifest_reference = hex::encode(&chain_bucket.bucket_manifest_root);
@@ -149,6 +143,19 @@ async fn ensure_bucket_manifest_empty(
         }
     };
 
+    if manifest.objects.is_empty() {
+        Ok(())
+    } else {
+        Err(S3ErrorResponse::new(S3ErrorKind::BucketNotEmpty)
+            .with_resource(format!("/{bucket}"))
+            .into_response())
+    }
+}
+
+fn ensure_private_bucket_manifest_empty(
+    bucket: &str,
+    manifest: &PrivateBucketManifestV2,
+) -> Result<(), Response> {
     if manifest.objects.is_empty() {
         Ok(())
     } else {
@@ -203,4 +210,48 @@ async fn write_owner_catalog_without_bucket(
     .await?;
 
     Ok(record.manifest_reference)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::PrivateBucketObjectEntry;
+    use axum::http::StatusCode;
+    use std::collections::BTreeMap;
+
+    fn private_entry(object_key: &str) -> PrivateBucketObjectEntry {
+        PrivateBucketObjectEntry {
+            object_key: object_key.to_string(),
+            object_key_id: [4u8; 32],
+            object_manifest_reference:
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            encryption_version: 1,
+            size: 38,
+            etag: "etag".to_string(),
+            content_type: "text/plain".to_string(),
+            last_modified: "2026-05-14T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn private_delete_bucket_allows_empty_private_manifest() {
+        let manifest = PrivateBucketManifestV2::default();
+
+        let result = ensure_private_bucket_manifest_empty("test-bucket-private", &manifest);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn private_delete_bucket_rejects_non_empty_private_manifest() {
+        let mut objects = BTreeMap::new();
+        objects.insert("entry-a".to_string(), private_entry("secret.txt"));
+
+        let manifest = PrivateBucketManifestV2 { objects };
+
+        let response = ensure_private_bucket_manifest_empty("test-bucket-private", &manifest)
+            .expect_err("non-empty private bucket manifest must be rejected");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
 }
