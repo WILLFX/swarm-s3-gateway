@@ -5,7 +5,8 @@ use crate::chain::{anchor_client::ContractAnchorClient, registry::ChainRegistryC
 use crate::traits::{AnchorClient, RegistryClient, SecretUnwrapper};
 use anyhow::{Context, Result, bail};
 use common::types::SubstrateAddress32;
-use std::{env, fmt, sync::Arc};
+use std::{env, fmt, str::FromStr, sync::Arc};
+use subxt_signer::{SecretUri, sr25519::Keypair};
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
@@ -109,11 +110,11 @@ pub async fn build_production_state() -> Result<AppState> {
         allow_unsigned_payload,
     });
 
-    let anchor_caller = load_anchor_caller_address()?;
+    let (anchor_signer, anchor_caller) = load_anchor_signer_and_caller()?;
     let anchor_client: Arc<dyn AnchorClient> = Arc::new(ContractAnchorClient::new(
         chain_registry_client.inner().clone(),
         bucket_contract_address,
-        subxt_signer::sr25519::dev::alice(),
+        anchor_signer,
         anchor_caller,
     ));
 
@@ -129,19 +130,51 @@ pub async fn build_production_state() -> Result<AppState> {
     })
 }
 
-fn load_anchor_caller_address() -> Result<SubstrateAddress32> {
-    const DEV_ALICE_ACCOUNT: SubstrateAddress32 = [
-        0xd4, 0x35, 0x93, 0xc7, 0x15, 0xfd, 0xd3, 0x1c, 0x61, 0x14, 0x1a, 0xbd, 0x04, 0xa9, 0x9f,
-        0xd6, 0x82, 0x2c, 0x85, 0x58, 0x85, 0x4c, 0xcd, 0xe3, 0x9a, 0x56, 0x84, 0xe7, 0xa5, 0x6d,
-        0xa2, 0x7d,
-    ];
+fn load_anchor_signer_and_caller() -> Result<(Keypair, SubstrateAddress32)> {
+    let signer_suri = match env::var("S3GW_ANCHOR_SIGNER_SURI")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        Some(value) => value,
+        None if read_bool_env("S3GW_ENABLE_DEV_DEFAULTS")?.unwrap_or(false) => {
+            warn!("S3GW_ENABLE_DEV_DEFAULTS is enabled; using //Alice as local dev anchor signer");
+            "//Alice".to_string()
+        }
+        None => {
+            bail!("missing required environment variable: S3GW_ANCHOR_SIGNER_SURI");
+        }
+    };
 
+    let uri = SecretUri::from_str(&signer_suri)
+        .map_err(|err| anyhow::anyhow!("S3GW_ANCHOR_SIGNER_SURI is invalid: {err:?}"))?;
+
+    let signer = Keypair::from_uri(&uri)
+        .map_err(|err| anyhow::anyhow!("failed to load S3GW_ANCHOR_SIGNER_SURI: {err:?}"))?;
+
+    let caller: SubstrateAddress32 = signer.public_key().0;
+
+    if let Some(configured_caller) = load_optional_anchor_caller_address()? {
+        if configured_caller != caller {
+            bail!("S3GW_ANCHOR_CALLER_HEX does not match S3GW_ANCHOR_SIGNER_SURI");
+        }
+    }
+
+    info!(
+        anchor_caller = %hex::encode(caller),
+        "loaded configured contract anchor signer"
+    );
+
+    Ok((signer, caller))
+}
+
+fn load_optional_anchor_caller_address() -> Result<Option<SubstrateAddress32>> {
     let Some(value) = env::var("S3GW_ANCHOR_CALLER_HEX")
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
     else {
-        return Ok(DEV_ALICE_ACCOUNT);
+        return Ok(None);
     };
 
     let trimmed = value.trim_start_matches("0x");
@@ -152,7 +185,7 @@ fn load_anchor_caller_address() -> Result<SubstrateAddress32> {
         .try_into()
         .map_err(|_| anyhow::anyhow!("S3GW_ANCHOR_CALLER_HEX must decode to exactly 32 bytes"))?;
 
-    Ok(address)
+    Ok(Some(address))
 }
 
 async fn build_chain_registry_client() -> Result<Arc<ChainRegistryClient>> {
