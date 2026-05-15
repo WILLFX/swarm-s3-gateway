@@ -2,37 +2,56 @@ name: Rust
 
 on:
   push:
-    branches: [main, master]
+    branches:
+      - main
+      - feature/**
+      - fix/**
+      - test/**
+      - docs/**
+      - ci/**
   pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  test-gateway-identity-handshake:
+  rust:
+    name: Rust checks and tests
     runs-on: ubuntu-latest
 
-    env:
-      S3GW_MASTER_SERVICE_KEY_HEX: ${{ secrets.S3GW_MASTER_SERVICE_KEY_HEX }}
-
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Protoc
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
-          protoc --version
+      - name: Check private lifecycle smoke script syntax
+        run: bash -n scripts/private_lifecycle_smoke.sh
 
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Test chain registry pallet
+        run: cargo test -p chain-registry-pallet -- --nocapture
 
-      - name: Verify master service key is present
-        run: |
-          test -n "$S3GW_MASTER_SERVICE_KEY_HEX"
+      - name: Check gateway
+        run: cargo check -p gateway
 
-      - name: Run gateway and pallet tests
-        run: |
-          cargo test -p gateway
-          cargo test -p chain-registry-pallet
+      - name: Test gateway
+        run: cargo test -p gateway -- --nocapture
+
+      - name: Check identity contract
+        run: cargo check --manifest-path contracts/s3_identity_contract/Cargo.toml
+
+      - name: Test identity contract
+        run: cargo test --manifest-path contracts/s3_identity_contract/Cargo.toml -- --nocapture
+
+      - name: Check bucket contract
+        run: cargo check --manifest-path contracts/s3_bucket_contract/Cargo.toml
+
+      - name: Test bucket contract
+        run: cargo test --manifest-path contracts/s3_bucket_contract/Cargo.toml -- --nocapture
