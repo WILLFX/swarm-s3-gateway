@@ -38,9 +38,13 @@ async fn main() -> Result<()> {
             0xa5, 0x6d, 0xa2, 0x7d,
         ]);
 
-    let suri = env::var("OWNER_SURI").unwrap_or_else(|_| "//Alice".to_string());
-    let pair = sr25519::Pair::from_string(&suri, None)
-        .map_err(|err| anyhow!("failed to load OWNER_SURI {suri}: {err:?}"))?;
+    let pair = load_bucket_owner_signer()?;
+
+    if pair.public().0 != owner {
+        return Err(anyhow!(
+            "OWNER_HEX must match the public key derived from S3GW_BUCKET_OWNER_SIGNER_SURI"
+        ));
+    }
 
     let chain = ChainRegistryClient::connect(&rpc_url).await?;
     let bucket_contract = chain
@@ -85,4 +89,17 @@ async fn main() -> Result<()> {
     println!("x-s3gw-owner-signature=0x{}", hex::encode(signature.0));
 
     Ok(())
+}
+
+fn load_bucket_owner_signer() -> Result<sr25519::Pair> {
+    let suri = env::var("S3GW_BUCKET_OWNER_SIGNER_SURI")
+        .map(|v| v.trim().to_string())
+        .ok()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            anyhow!("missing required environment variable: S3GW_BUCKET_OWNER_SIGNER_SURI")
+        })?;
+
+    sr25519::Pair::from_string(&suri, None)
+        .map_err(|err| anyhow!("failed to load S3GW_BUCKET_OWNER_SIGNER_SURI: {err:?}"))
 }

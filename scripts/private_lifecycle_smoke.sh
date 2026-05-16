@@ -14,12 +14,12 @@ set -euo pipefail
 #   AWS_ACCESS_KEY_ID
 #   AWS_SECRET_ACCESS_KEY
 #   S3GW_IDENTITY_REGISTRAR_SIGNER_SURI
+#   S3GW_BUCKET_OWNER_SIGNER_SURI
 #
 # Optional env:
 #   S3GW_ENDPOINT          default: http://127.0.0.1:3000
 #   S3GW_AWS_REGION       default: us-east-1
 #   OWNER_HEX             default: Alice, inside helper binaries
-#   OWNER_SURI            default: //Alice, inside sign_bucket_op
 #   BUCKET                default: private-smoke-<timestamp>
 #   OBJECT_KEY            default: secret.txt
 
@@ -71,6 +71,7 @@ sign_bucket_op() {
   local visibility="${3:-private}"
 
   RPC_URL="${RPC_URL:-${S3GW_CHAIN_RPC_URL:-}}" \
+    S3GW_BUCKET_OWNER_SIGNER_SURI="${S3GW_BUCKET_OWNER_SIGNER_SURI}" \
     cargo run -q -p gateway --bin sign_bucket_op -- "$op" "$bucket" "$visibility" \
     | awk -F= '/^x-s3gw-owner-signature=/{print $2}'
 }
@@ -118,6 +119,7 @@ export MASTER_SERVICE_KEY_HEX="${MASTER_SERVICE_KEY_HEX:-${S3GW_MASTER_SERVICE_K
 need_env RPC_URL
 need_env MASTER_SERVICE_KEY_HEX
 need_env S3GW_IDENTITY_REGISTRAR_SIGNER_SURI
+need_env S3GW_BUCKET_OWNER_SIGNER_SURI
 
 echo "== preflight: gateway reachable =="
 if ! curl --silent --show-error --output /dev/null --max-time 3 "${ENDPOINT}/"; then
