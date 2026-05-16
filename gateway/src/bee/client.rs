@@ -60,19 +60,16 @@ impl BeeClient {
     /// Builds a Bee client from:
     /// - `base_url` passed by caller
     /// - `S3GW_BEE_STAMP_BATCH_ID` from env
-    /// - `S3GW_GAS_TANK_SEED` from env
+    /// - `S3GW_BEE_FEED_SECRET_KEY_HEX` from env in production
     ///
+    /// Local development may use `S3GW_GAS_TANK_SEED`, but only when
+    /// `S3GW_ENABLE_DEV_DEFAULTS=true` is explicitly enabled.
     /// The postage batch is required for every upload.
-    /// The Gas Tank seed is deterministically transformed into a secp256k1
-    /// feed-signing key so every gateway instance derives the same Bee feed owner.
     pub fn from_env(base_url: impl Into<String>) -> Result<Self> {
         let postage_batch_id = env::var("S3GW_BEE_STAMP_BATCH_ID")
             .context("missing required environment variable: S3GW_BEE_STAMP_BATCH_ID")?;
 
         validate_batch_id(&postage_batch_id)?;
-
-        let gas_tank_seed = env::var("S3GW_GAS_TANK_SEED")
-            .context("missing required environment variable: S3GW_GAS_TANK_SEED")?;
 
         let allow_dev_bytes_fallback =
             read_bool_env("S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK")?.unwrap_or(false);
@@ -84,7 +81,7 @@ impl BeeClient {
             );
         }
 
-        let feed_secret_key = derive_feed_secret_key_from_seed(&gas_tank_seed)?;
+        let feed_secret_key = load_feed_secret_key(enable_dev_defaults)?;
         let feed_owner_hex = ethereum_address_from_secret_key(&feed_secret_key);
 
         let http = Client::builder()
@@ -462,6 +459,44 @@ fn decode_32(hex_value: &str, field_name: &str) -> Result<[u8; 32]> {
     Ok(arr)
 }
 
+fn load_feed_secret_key(enable_dev_defaults: bool) -> Result<SecretKey> {
+    match env::var("S3GW_BEE_FEED_SECRET_KEY_HEX") {
+        Ok(value) => return parse_feed_secret_key_hex(&value),
+        Err(env::VarError::NotPresent) => {}
+        Err(env::VarError::NotUnicode(_)) => {
+            bail!("environment variable S3GW_BEE_FEED_SECRET_KEY_HEX is not valid UTF-8")
+        }
+    }
+
+    if !enable_dev_defaults {
+        bail!(
+            "missing required environment variable: S3GW_BEE_FEED_SECRET_KEY_HEX; S3GW_GAS_TANK_SEED is local-development only and requires S3GW_ENABLE_DEV_DEFAULTS=true"
+        );
+    }
+
+    let gas_tank_seed = env::var("S3GW_GAS_TANK_SEED").context(
+        "missing required environment variable: S3GW_GAS_TANK_SEED when S3GW_ENABLE_DEV_DEFAULTS=true",
+    )?;
+
+    derive_feed_secret_key_from_seed(&gas_tank_seed)
+}
+
+fn parse_feed_secret_key_hex(value: &str) -> Result<SecretKey> {
+    let raw = value.trim().trim_start_matches("0x");
+    let bytes = hex::decode(raw).context("S3GW_BEE_FEED_SECRET_KEY_HEX must be valid hex")?;
+
+    if bytes.len() != 32 {
+        bail!(
+            "S3GW_BEE_FEED_SECRET_KEY_HEX must decode to exactly 32 bytes, got {}",
+            bytes.len()
+        );
+    }
+
+    SecretKey::from_slice(&bytes).map_err(|err| {
+        anyhow!("S3GW_BEE_FEED_SECRET_KEY_HEX is not a valid secp256k1 secret key: {err}")
+    })
+}
+
 fn derive_feed_secret_key_from_seed(seed: &str) -> Result<SecretKey> {
     let mut counter: u32 = 0;
 
@@ -565,6 +600,7 @@ mod env_gate_tests {
 
     const BEE_ENV_KEYS: &[&str] = &[
         "S3GW_BEE_STAMP_BATCH_ID",
+        "S3GW_BEE_FEED_SECRET_KEY_HEX",
         "S3GW_GAS_TANK_SEED",
         "S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK",
         "S3GW_ENABLE_DEV_DEFAULTS",
@@ -605,6 +641,47 @@ mod env_gate_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn production_requires_feed_secret_key_hex() {
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let _env = EnvGuard::set(&[
+            ("S3GW_BEE_STAMP_BATCH_ID", Some(VALID_BATCH_ID)),
+            ("S3GW_BEE_FEED_SECRET_KEY_HEX", None),
+            ("S3GW_GAS_TANK_SEED", Some("test-gas-tank-seed")),
+            ("S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK", None),
+            ("S3GW_ENABLE_DEV_DEFAULTS", None),
+        ]);
+
+        let err = BeeClient::from_env("http://127.0.0.1:1633")
+            .expect_err("production must require S3GW_BEE_FEED_SECRET_KEY_HEX");
+
+        assert!(
+            format!("{err:#}")
+                .contains("missing required environment variable: S3GW_BEE_FEED_SECRET_KEY_HEX"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn production_accepts_feed_secret_key_hex() {
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let _env = EnvGuard::set(&[
+            ("S3GW_BEE_STAMP_BATCH_ID", Some(VALID_BATCH_ID)),
+            (
+                "S3GW_BEE_FEED_SECRET_KEY_HEX",
+                Some("1111111111111111111111111111111111111111111111111111111111111111"),
+            ),
+            ("S3GW_GAS_TANK_SEED", None),
+            ("S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK", None),
+            ("S3GW_ENABLE_DEV_DEFAULTS", None),
+        ]);
+
+        let client = BeeClient::from_env("http://127.0.0.1:1633")
+            .expect("production feed secret key hex should build Bee client");
+
+        assert!(!client.allow_dev_bytes_fallback);
     }
 
     #[test]
