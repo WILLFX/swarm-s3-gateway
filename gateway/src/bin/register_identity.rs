@@ -1,23 +1,24 @@
 use aes_gcm::{
-    aead::{generic_array::GenericArray, AeadInPlace, KeyInit},
     Aes256Gcm,
+    aead::{AeadInPlace, KeyInit, generic_array::GenericArray},
 };
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use gateway::{
     chain::registry::ChainRegistryClient,
-    contracts_abi::{decode_exec_result, encode_identity_register_identity, IdentityError},
+    contracts_abi::{IdentityError, decode_exec_result, encode_identity_register_identity},
     s3_runtime::api,
 };
 use sha2::{Digest, Sha256};
 use std::{
     env,
+    str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
 use subxt::{
-    utils::{AccountId32, MultiAddress},
     OnlineClient, PolkadotConfig,
+    utils::{AccountId32, MultiAddress},
 };
-use subxt_signer::sr25519::dev;
+use subxt_signer::{SecretUri, sr25519::Keypair};
 
 const ALICE_OWNER_HEX: &str = "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d";
 
@@ -31,6 +32,15 @@ async fn main() -> Result<()> {
 
     let master_key = decode_32_hex(&master_key_hex, "MASTER_SERVICE_KEY_HEX")?;
     let owner = decode_32_hex(&owner_hex, "OWNER_HEX")?;
+    let signer = load_identity_registrar_signer()?;
+    let signer_account = signer.public_key().0;
+
+    if signer_account != owner {
+        bail!(
+            "OWNER_HEX must match the public key derived from S3GW_IDENTITY_REGISTRAR_SIGNER_SURI"
+        );
+    }
+
     let access_key_hash = sha256_32(access_key_id.as_bytes());
 
     let nonce = derive_nonce(&access_key_id, &secret_access_key);
@@ -98,8 +108,6 @@ async fn main() -> Result<()> {
     }
 
     let client = OnlineClient::<PolkadotConfig>::from_url(&rpc_url).await?;
-    let signer = dev::alice();
-
     let call = api::tx().contracts().call(
         MultiAddress::Id(dest),
         0u128,
@@ -173,4 +181,20 @@ fn encrypt_secret(
         .map_err(|_| anyhow!("failed to encrypt secret"))?;
 
     Ok(buf)
+}
+
+fn load_identity_registrar_signer() -> Result<Keypair> {
+    let signer_suri = env::var("S3GW_IDENTITY_REGISTRAR_SIGNER_SURI")
+        .map(|v| v.trim().to_string())
+        .ok()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            anyhow!("missing required environment variable: S3GW_IDENTITY_REGISTRAR_SIGNER_SURI")
+        })?;
+
+    let uri = SecretUri::from_str(&signer_suri)
+        .map_err(|err| anyhow!("S3GW_IDENTITY_REGISTRAR_SIGNER_SURI is invalid: {err:?}"))?;
+
+    Keypair::from_uri(&uri)
+        .map_err(|err| anyhow!("failed to load S3GW_IDENTITY_REGISTRAR_SIGNER_SURI: {err:?}"))
 }
