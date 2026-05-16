@@ -84,6 +84,7 @@ export S3GW_BEE_API_URL="http://127.0.0.1:1633"
 
 export S3GW_MASTER_SERVICE_KEY_HEX="PASTE_64_HEX_MASTER_SERVICE_KEY"
 export S3GW_BEE_STAMP_BATCH_ID="PASTE_64_HEX_BEE_POSTAGE_BATCH_ID"
+# Local-development placeholder only. Do not use this seed in production.
 export S3GW_GAS_TANK_SEED="dev-gas-tank-seed"
 
 export S3GW_EXPECTED_REGION="us-east-1"
