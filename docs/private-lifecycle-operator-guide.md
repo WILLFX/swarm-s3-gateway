@@ -231,3 +231,32 @@ The smoke script checks this for:
 - private LIST
 
 Public bucket responses may still expose the Swarm reference header.
+
+## Operator signer environment variables
+
+The gateway and helper binaries must not silently use development signers in production.
+
+Required signer variables:
+
+    S3GW_ANCHOR_SIGNER_SURI
+    S3GW_SUDO_SIGNER_SURI
+    S3GW_IDENTITY_REGISTRAR_SIGNER_SURI
+    S3GW_BUCKET_OWNER_SIGNER_SURI
+
+For local development, these can point to Alice:
+
+    export S3GW_ANCHOR_SIGNER_SURI=//Alice
+    export S3GW_SUDO_SIGNER_SURI=//Alice
+    export S3GW_IDENTITY_REGISTRAR_SIGNER_SURI=//Alice
+    export S3GW_BUCKET_OWNER_SIGNER_SURI=//Alice
+
+S3GW_ENABLE_DEV_DEFAULTS=true is only for local development. It allows the gateway to use the Alice anchor signer if S3GW_ANCHOR_SIGNER_SURI is not set. Do not enable it in production.
+
+The private lifecycle smoke script requires:
+
+    export S3GW_IDENTITY_REGISTRAR_SIGNER_SURI=//Alice
+    export S3GW_BUCKET_OWNER_SIGNER_SURI=//Alice
+
+The contract address setter requires:
+
+    export S3GW_SUDO_SIGNER_SURI=//Alice
