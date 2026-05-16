@@ -260,3 +260,14 @@ The private lifecycle smoke script requires:
 The contract address setter requires:
 
     export S3GW_SUDO_SIGNER_SURI=//Alice
+
+## Bee development fallback
+
+`S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK=true` is only for local development when Bee SOC pointer writes are unavailable in dev mode.
+
+It now requires:
+
+    export S3GW_ENABLE_DEV_DEFAULTS=true
+    export S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK=true
+
+Do not enable either variable in production. Production deployments must use real Bee pointer/SOC support instead of the in-memory development fallback.
