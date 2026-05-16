@@ -13,6 +13,7 @@ set -euo pipefail
 #   MASTER_SERVICE_KEY_HEX or S3GW_MASTER_SERVICE_KEY_HEX
 #   AWS_ACCESS_KEY_ID
 #   AWS_SECRET_ACCESS_KEY
+#   S3GW_IDENTITY_REGISTRAR_SIGNER_SURI
 #
 # Optional env:
 #   S3GW_ENDPOINT          default: http://127.0.0.1:3000
@@ -116,6 +117,7 @@ export MASTER_SERVICE_KEY_HEX="${MASTER_SERVICE_KEY_HEX:-${S3GW_MASTER_SERVICE_K
 
 need_env RPC_URL
 need_env MASTER_SERVICE_KEY_HEX
+need_env S3GW_IDENTITY_REGISTRAR_SIGNER_SURI
 
 echo "== preflight: gateway reachable =="
 if ! curl --silent --show-error --output /dev/null --max-time 3 "${ENDPOINT}/"; then
