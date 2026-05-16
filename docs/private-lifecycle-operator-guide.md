@@ -271,3 +271,15 @@ It now requires:
     export S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK=true
 
 Do not enable either variable in production. Production deployments must use real Bee pointer/SOC support instead of the in-memory development fallback.
+
+## Bee feed signing secret
+
+Production deployments must set a real 32-byte secp256k1 feed signing secret:
+
+    export S3GW_BEE_FEED_SECRET_KEY_HEX=<64-character-hex-secret>
+
+`S3GW_GAS_TANK_SEED` is local-development only and is accepted only when:
+
+    export S3GW_ENABLE_DEV_DEFAULTS=true
+
+Do not use `S3GW_GAS_TANK_SEED` in production.
