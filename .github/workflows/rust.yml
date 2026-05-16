@@ -38,6 +38,9 @@ jobs:
       - name: Test chain registry pallet
         run: cargo test -p chain-registry-pallet -- --nocapture
 
+      - name: Prevent silent development signers
+        run: ./scripts/check_no_silent_dev_signers.sh
+
       - name: Check gateway
         run: cargo check -p gateway
 
