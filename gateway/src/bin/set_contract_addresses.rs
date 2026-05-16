@@ -1,10 +1,10 @@
-use anyhow::{anyhow, Context, Result};
-use std::env;
+use anyhow::{Context, Result, anyhow};
+use std::{env, str::FromStr};
 use subxt::{
-    dynamic::{tx, Value},
     OnlineClient, PolkadotConfig,
+    dynamic::{Value, tx},
 };
-use subxt_signer::sr25519::{dev, Keypair};
+use subxt_signer::{SecretUri, sr25519::Keypair};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("failed to connect to chain RPC at {rpc_url}"))?;
 
-    let signer = dev::alice();
+    let signer = load_sudo_signer()?;
 
     if let Some(address) = identity_address {
         submit_sudo_setter(
@@ -101,4 +101,17 @@ fn decode_32_hex(value: &str, name: &str) -> Result<[u8; 32]> {
         .try_into()
         .map_err(|_| anyhow!("{name} must decode to exactly 32 bytes"))?;
     Ok(arr)
+}
+
+fn load_sudo_signer() -> Result<Keypair> {
+    let signer_suri = env::var("S3GW_SUDO_SIGNER_SURI")
+        .map(|v| v.trim().to_string())
+        .ok()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| anyhow!("missing required environment variable: S3GW_SUDO_SIGNER_SURI"))?;
+
+    let uri = SecretUri::from_str(&signer_suri)
+        .map_err(|err| anyhow!("S3GW_SUDO_SIGNER_SURI is invalid: {err:?}"))?;
+
+    Keypair::from_uri(&uri).map_err(|err| anyhow!("failed to load S3GW_SUDO_SIGNER_SURI: {err:?}"))
 }
