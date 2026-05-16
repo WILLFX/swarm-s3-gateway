@@ -76,6 +76,13 @@ impl BeeClient {
 
         let allow_dev_bytes_fallback =
             read_bool_env("S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK")?.unwrap_or(false);
+        let enable_dev_defaults = read_bool_env("S3GW_ENABLE_DEV_DEFAULTS")?.unwrap_or(false);
+
+        if allow_dev_bytes_fallback && !enable_dev_defaults {
+            bail!(
+                "S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK=true requires S3GW_ENABLE_DEV_DEFAULTS=true and must not be used in production"
+            );
+        }
 
         let feed_secret_key = derive_feed_secret_key_from_seed(&gas_tank_seed)?;
         let feed_owner_hex = ethereum_address_from_secret_key(&feed_secret_key);
