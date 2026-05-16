@@ -283,3 +283,33 @@ Production deployments must set a real 32-byte secp256k1 feed signing secret:
     export S3GW_ENABLE_DEV_DEFAULTS=true
 
 Do not use `S3GW_GAS_TANK_SEED` in production.
+
+## Production secret safety
+
+The values below are local-development placeholders only and must never be used in production:
+
+    //Alice
+    dev-gas-tank-seed
+    1111111111111111111111111111111111111111111111111111111111111111
+
+Production deployments must use real operator-controlled signer secrets for:
+
+    S3GW_ANCHOR_SIGNER_SURI
+    S3GW_SUDO_SIGNER_SURI
+    S3GW_IDENTITY_REGISTRAR_SIGNER_SURI
+    S3GW_BUCKET_OWNER_SIGNER_SURI
+
+Production deployments must also generate a real Bee feed signing secret:
+
+    openssl rand -hex 32
+
+Then configure it as:
+
+    export S3GW_BEE_FEED_SECRET_KEY_HEX=<generated-64-character-hex-secret>
+
+Do not enable these in production:
+
+    S3GW_ENABLE_DEV_DEFAULTS=true
+    S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK=true
+
+Both are local-development escape hatches only.
