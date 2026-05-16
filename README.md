@@ -1,8 +1,126 @@
 # Swarm S3 Gateway
 
-Swarm S3 Gateway is an S3-compatible gateway backed by Swarm storage and on-chain contract anchors.
+Swarm S3 Gateway is an S3-compatible gateway that stores object data on Swarm while using on-chain contracts to anchor identity and bucket state.
 
-The gateway supports public and private bucket/object flows. Public objects can expose their Swarm storage reference for transparency. Private objects are encrypted and private S3 responses hide Swarm references so clients do not receive storage/decryption references through normal S3-compatible headers or listings.
+The goal is to make Swarm usable through familiar S3-style operations while supporting both public and private bucket flows.
+
+This project is not only a storage proxy. It has three major parts working together:
+
+1. **Gateway service**
+2. **On-chain contracts**
+3. **Swarm/Bee storage**
+
+Each part has a different responsibility.
+
+## Core architecture
+
+### 1. Gateway service
+
+The gateway is the S3-compatible HTTP service.
+
+It is responsible for:
+
+- Accepting S3-style requests such as PUT, GET, HEAD, LIST, and DELETE
+- Validating request authentication
+- Resolving identities from registered access keys
+- Encrypting private object payloads before writing them to Swarm
+- Decrypting private object payloads when an authorized client reads them
+- Creating and reading object/bucket manifests
+- Writing object bytes and manifest bytes to Bee/Swarm
+- Calling the chain/contracts to anchor bucket and object manifest roots
+- Hiding private Swarm references from private S3 responses
+
+The gateway is the coordination layer. It speaks S3 to clients, Bee HTTP to Swarm, and contract calls to the chain.
+
+### 2. On-chain contracts
+
+The contracts are the source of truth for identity and bucket state.
+
+The current contract-backed flows include:
+
+- Identity registration
+- Access key to owner mapping
+- Bucket contract address configuration
+- Identity contract address configuration
+- Bucket manifest root anchoring
+- Owner catalog root anchoring
+
+The contracts are important because the gateway should not be the only place that remembers ownership and bucket state. The chain gives the system an auditable state anchor.
+
+Future delegation and authorization tests should focus here first, because the contracts must prove that unauthorized accounts cannot mutate or access private bucket state.
+
+### 3. Swarm/Bee storage
+
+Swarm/Bee is the content-addressed storage backend.
+
+It stores:
+
+- Object payload bytes
+- Encrypted private object bytes
+- Object manifests
+- Bucket manifests
+- Catalog manifests
+
+Swarm itself does not enforce privacy. If someone has a usable Swarm reference, they can try to fetch the bytes. For private objects, privacy depends on:
+
+- Encrypting object payloads
+- Keeping private manifest structure controlled by the gateway/contracts
+- Not leaking usable Swarm references in private S3 responses
+- Enforcing identity, ownership, and future delegation rules through the gateway and contracts
+
+This means the gateway must treat Swarm references as sensitive for private objects.
+
+## Public vs private buckets
+
+### Public buckets
+
+Public buckets are intended to be externally readable or verifiable.
+
+For public objects, responses may expose:
+
+    x-amz-meta-swarm-ref
+
+This is useful because the Swarm reference lets users verify or fetch public content directly.
+
+### Private buckets
+
+Private buckets are different.
+
+For private objects, exposing the Swarm reference can leak a storage/decryption path. Even if the payload is encrypted, the reference itself can reveal where the encrypted data lives and may allow direct retrieval attempts outside the gateway.
+
+For that reason, private responses omit:
+
+    x-amz-meta-swarm-ref
+
+from:
+
+- PUT object responses
+- HEAD object responses
+- GET object responses
+- ListObjectsV2 responses
+
+The gateway still stores and uses the Swarm references internally. It simply does not expose them through normal private S3-compatible responses.
+
+## Private object flow
+
+A private PUT flow works like this:
+
+1. Client sends an S3 PUT request to the gateway.
+2. Gateway validates the request identity.
+3. Gateway encrypts the object payload.
+4. Gateway writes the encrypted bytes to Bee/Swarm.
+5. Gateway writes object and bucket manifests.
+6. Gateway anchors the updated manifest root through the bucket contract.
+7. Gateway returns an S3-compatible response without leaking `x-amz-meta-swarm-ref`.
+
+A private GET flow works like this:
+
+1. Client sends an S3 GET request to the gateway.
+2. Gateway validates the request identity.
+3. Gateway resolves the private object manifest.
+4. Gateway fetches encrypted bytes from Bee/Swarm.
+5. Gateway decrypts the payload.
+6. Gateway returns the plaintext object body without leaking `x-amz-meta-swarm-ref`.
 
 ## Current status
 
@@ -14,35 +132,19 @@ The project currently has:
 - Contract-backed identity registration
 - Contract-backed bucket anchoring
 - Private object encryption and manifest handling
+- Private response Swarm reference hiding
 - CI guards against silent development signer fallbacks
 - CI guards for unsafe secret examples in docs
 - CI guards for local and production environment templates
 - Separate local and production environment examples
 
-## Private bucket security model
-
-Swarm data is publicly retrievable if someone has the correct reference. For private objects, the gateway encrypts object data and must avoid leaking usable Swarm references through private S3 responses.
-
-For private buckets and private objects, the gateway omits:
-
-    x-amz-meta-swarm-ref
-
-from:
-
-- PUT object responses
-- HEAD object responses
-- GET object responses
-- ListObjectsV2 responses
-
-Public buckets may keep this header because public objects are intended to be externally readable or verifiable.
-
 ## Environment templates
 
-Use the local template only for development:
+Local development:
 
     .env.local.example
 
-Use the production template for deployment planning:
+Production planning:
 
     .env.production.example
 
@@ -50,43 +152,17 @@ Production deployments must replace all placeholder values with real operator-co
 
 Do not use development signers, weak placeholder keys, or development fallback flags in production.
 
-## Local development
-
-Copy the local example and fill in required values:
-
-    cp .env.local.example .env.local
-
-Then export the values into your shell before running the gateway.
-
-The gateway expects a running chain node and a reachable Bee API.
-
-## Production configuration
-
-Production deployments should use:
-
-    .env.production.example
-
-Production requires real values for:
-
-- S3GW_MASTER_SERVICE_KEY_HEX
-- S3GW_BEE_STAMP_BATCH_ID
-- S3GW_BEE_FEED_SECRET_KEY_HEX
-- S3GW_ANCHOR_SIGNER_SURI
-- S3GW_SUDO_SIGNER_SURI
-- S3GW_IDENTITY_REGISTRAR_SIGNER_SURI
-- S3GW_BUCKET_OWNER_SIGNER_SURI
-
-Generate the Bee feed signing secret with:
-
-    openssl rand -hex 32
-
-Do not enable development fallback flags in production.
-
 ## Run the gateway
 
 Example local run:
 
     RUST_LOG=gateway=debug cargo run -p gateway --bin gateway
+
+The gateway expects:
+
+- A running chain node
+- A reachable Bee API
+- Required environment variables exported into the shell
 
 ## Private lifecycle smoke test
 
@@ -94,11 +170,11 @@ After the gateway is running, run:
 
     ./scripts/private_lifecycle_smoke.sh
 
-The expected result is:
+Expected result:
 
     PRIVATE LIFECYCLE SMOKE PASSED
 
-This verifies the private bucket lifecycle:
+This verifies:
 
 - Register identity
 - Create private bucket
@@ -112,7 +188,7 @@ This verifies the private bucket lifecycle:
 
 ## Local checks
 
-Run the main local checks:
+Run:
 
     ./scripts/check_env_templates.py
     ./scripts/check_docs_secret_safety.py
@@ -132,7 +208,7 @@ See:
 
     docs/private-lifecycle-operator-guide.md
 
-That guide contains the deeper private lifecycle and operator setup details.
+That guide contains deeper private lifecycle and operator setup details.
 
 ## Security notes
 
@@ -147,6 +223,7 @@ Current safeguards include:
 - CI guard for unsafe signer regressions
 - CI guard for unsafe secret examples in docs
 - CI guard for environment template completeness
+- Tests proving private responses omit Swarm reference headers
 
 ## Remaining security work
 
