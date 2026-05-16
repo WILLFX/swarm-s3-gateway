@@ -44,6 +44,9 @@ jobs:
       - name: Check docs secret safety
         run: ./scripts/check_docs_secret_safety.py
 
+      - name: Check chain privacy surface
+        run: ./scripts/check_chain_privacy_surface.py
+
       - name: Check env templates
         run: ./scripts/check_env_templates.py
 
