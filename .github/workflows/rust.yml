@@ -44,6 +44,9 @@ jobs:
       - name: Check docs secret safety
         run: ./scripts/check_docs_secret_safety.py
 
+      - name: Check env templates
+        run: ./scripts/check_env_templates.py
+
       - name: Check gateway
         run: cargo check -p gateway
 
