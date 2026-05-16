@@ -41,6 +41,9 @@ jobs:
       - name: Prevent silent development signers
         run: ./scripts/check_no_silent_dev_signers.sh
 
+      - name: Check docs secret safety
+        run: ./scripts/check_docs_secret_safety.py
+
       - name: Check gateway
         run: cargo check -p gateway
 
