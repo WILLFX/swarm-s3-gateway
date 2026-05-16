@@ -553,3 +553,94 @@ fn extract_pointer_payload(data: &[u8]) -> Result<Vec<u8>> {
 
     Ok(data[8..8 + span].to_vec())
 }
+
+#[cfg(test)]
+mod env_gate_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const VALID_BATCH_ID: &str = "a50241a2e9e1db389e5d8b9f0b39f35eeca117036449b06246c11caa6d37285c";
+
+    const BEE_ENV_KEYS: &[&str] = &[
+        "S3GW_BEE_STAMP_BATCH_ID",
+        "S3GW_GAS_TANK_SEED",
+        "S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK",
+        "S3GW_ENABLE_DEV_DEFAULTS",
+    ];
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(values: &[(&'static str, Option<&'static str>)]) -> Self {
+            let saved = BEE_ENV_KEYS
+                .iter()
+                .map(|&key| (key, env::var(key).ok()))
+                .collect();
+
+            for (key, value) in values {
+                unsafe {
+                    match value {
+                        Some(value) => env::set_var(key, value),
+                        None => env::remove_var(key),
+                    }
+                }
+            }
+
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                unsafe {
+                    match value {
+                        Some(value) => env::set_var(key, value),
+                        None => env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bee_dev_fallback_requires_dev_defaults() {
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let _env = EnvGuard::set(&[
+            ("S3GW_BEE_STAMP_BATCH_ID", Some(VALID_BATCH_ID)),
+            ("S3GW_GAS_TANK_SEED", Some("test-gas-tank-seed")),
+            ("S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK", Some("true")),
+            ("S3GW_ENABLE_DEV_DEFAULTS", None),
+        ]);
+
+        let err = BeeClient::from_env("http://127.0.0.1:1633")
+            .expect_err("Bee dev fallback must fail without S3GW_ENABLE_DEV_DEFAULTS=true");
+
+        assert!(
+            format!("{err:#}").contains(
+                "S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK=true requires S3GW_ENABLE_DEV_DEFAULTS=true"
+            ),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn bee_dev_fallback_is_allowed_with_dev_defaults() {
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let _env = EnvGuard::set(&[
+            ("S3GW_BEE_STAMP_BATCH_ID", Some(VALID_BATCH_ID)),
+            ("S3GW_GAS_TANK_SEED", Some("test-gas-tank-seed")),
+            ("S3GW_BEE_ALLOW_DEV_BYTES_FALLBACK", Some("true")),
+            ("S3GW_ENABLE_DEV_DEFAULTS", Some("true")),
+        ]);
+
+        let client = BeeClient::from_env("http://127.0.0.1:1633")
+            .expect("Bee dev fallback should be allowed when dev defaults are explicit");
+
+        assert!(client.allow_dev_bytes_fallback);
+    }
+}
