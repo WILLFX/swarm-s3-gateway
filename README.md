@@ -235,4 +235,44 @@ The next major security work should focus on delegation and authorization scope 
 - Revocation behavior tests
 - Encryption version rotation design
 
-These are the next layers needed to prove that unauthorized accounts cannot access or mutate private bucket state.
+These are the next layers needed to prove that unauthorized accounts cannot access or mutate private bucket state. 
+## Documentation map
+
+This README is the project entry point. For deeper operational and security details, see the docs below.
+
+### Private lifecycle operator guide
+
+See:
+
+    docs/private-lifecycle-operator-guide.md
+
+This guide covers the full private bucket lifecycle and local operator setup, including:
+
+- required local dependencies
+- local Substrate/contracts chain
+- Bee/Swarm node requirements
+- S3 gateway server setup
+- identity and bucket contract registration
+- private lifecycle smoke testing
+- required signer environment variables
+- Bee development fallback notes
+- production secret safety notes
+
+Use this guide when setting up or validating the gateway locally.
+
+### Chain privacy surface
+
+See:
+
+    docs/security/chain-privacy-surface.md
+
+This document explains what the public chain exposes and what remains private. It covers:
+
+- expected public metadata leakage
+- owner and bucket root exposure
+- why private manifests must be encrypted before anchoring
+- bucket-name hash guessing risk
+- timing and size metadata risks
+- what the chain must not store or emit
+
+Use this document when reviewing the privacy model.
