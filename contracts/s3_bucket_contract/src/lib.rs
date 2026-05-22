@@ -3,14 +3,20 @@
 #[ink::contract]
 mod s3_bucket_contract {
     use ink::{
-        env::{call::FromAccountId, sr25519_verify},
+        env::{
+            DefaultEnvironment,
+            call::{ExecutionInput, Selector, build_call},
+            sr25519_verify,
+        },
         prelude::vec::Vec,
         storage::Mapping,
     };
     use s3_contracts_common::{
         AccountId32, BucketRecord, DelegationEntry, OP_CREATE_BUCKET, OP_DELETE_BUCKET,
-        OP_DELETE_OBJECT, OP_PUT_OBJECT, S3IdentityRead,
+        OP_DELETE_OBJECT, OP_PUT_OBJECT,
     };
+
+    const IDENTITY_GET_DELEGATION_SELECTOR: [u8; 4] = [0x0d, 0xb9, 0xc9, 0x10];
 
     #[derive(scale::Encode, scale::Decode, scale_info::TypeInfo, Debug, PartialEq, Eq)]
     pub enum Error {
@@ -357,12 +363,20 @@ mod s3_bucket_contract {
             owner: AccountId32,
             delegate: AccountId32,
         ) -> Result<DelegationEntry> {
-            let identity: ink::contract_ref!(S3IdentityRead) =
-                FromAccountId::from_account_id(self.identity_contract);
+            let result = build_call::<DefaultEnvironment>()
+                .call(self.identity_contract)
+                .exec_input(
+                    ExecutionInput::new(Selector::new(IDENTITY_GET_DELEGATION_SELECTOR))
+                        .push_arg(owner)
+                        .push_arg(delegate),
+                )
+                .returns::<Option<DelegationEntry>>()
+                .try_invoke();
 
-            match identity.get_delegation(owner, delegate) {
-                Some(entry) => Ok(entry),
-                None => Err(Error::NotAuthorized),
+            match result {
+                Ok(Ok(Some(entry))) => Ok(entry),
+                Ok(Ok(None)) => Err(Error::NotAuthorized),
+                Ok(Err(_)) | Err(_) => Err(Error::NotAuthorized),
             }
         }
 

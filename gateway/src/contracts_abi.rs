@@ -91,6 +91,8 @@ pub const IDENTITY_GET_IDENTITY_SELECTOR: [u8; 4] = [0xd4, 0xd3, 0x67, 0x1f];
 pub const IDENTITY_IS_AUTHORIZED_SELECTOR: [u8; 4] = [0x96, 0xb0, 0x45, 0x3e];
 pub const IDENTITY_IS_DELEGATE_AUTHORIZED_SELECTOR: [u8; 4] = [0x2b, 0xf5, 0x04, 0x89];
 pub const IDENTITY_GET_DELEGATION_SELECTOR: [u8; 4] = [0x0d, 0xb9, 0xc9, 0x10];
+pub const IDENTITY_GRANT_DELEGATION_SELECTOR: [u8; 4] = [0x49, 0x58, 0x95, 0xff];
+pub const IDENTITY_REVOKE_DELEGATION_SELECTOR: [u8; 4] = [0xb2, 0x30, 0x56, 0x5f];
 
 pub const BUCKET_GET_BUCKET_SELECTOR: [u8; 4] = [0x6c, 0x5d, 0xca, 0xd3];
 pub const BUCKET_GET_OWNER_NONCE_SELECTOR: [u8; 4] = [0x7a, 0x1c, 0x13, 0x7b];
@@ -142,6 +144,24 @@ pub fn encode_identity_is_delegate_authorized(
 pub fn encode_identity_get_delegation(owner: AccountId32, delegate: AccountId32) -> Vec<u8> {
     let mut data = IDENTITY_GET_DELEGATION_SELECTOR.to_vec();
     owner.encode_to(&mut data);
+    delegate.encode_to(&mut data);
+    data
+}
+
+pub fn encode_identity_grant_delegation(
+    delegate: AccountId32,
+    allowed_operations: u32,
+    expires_at: u64,
+) -> Vec<u8> {
+    let mut data = IDENTITY_GRANT_DELEGATION_SELECTOR.to_vec();
+    delegate.encode_to(&mut data);
+    allowed_operations.encode_to(&mut data);
+    expires_at.encode_to(&mut data);
+    data
+}
+
+pub fn encode_identity_revoke_delegation(delegate: AccountId32) -> Vec<u8> {
+    let mut data = IDENTITY_REVOKE_DELEGATION_SELECTOR.to_vec();
     delegate.encode_to(&mut data);
     data
 }
