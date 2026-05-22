@@ -39,6 +39,10 @@ struct MockBeeInner {
 }
 
 impl MockBeeStorage {
+    fn insert_bytes(&self, reference: String, bytes: Bytes) {
+        self.inner.lock().unwrap().bytes.insert(reference, bytes);
+    }
+
     fn clear_calls(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.get_calls.clear();
@@ -413,6 +417,53 @@ async fn private_delete_removes_entry_writes_manifest_and_uses_delete_anchor() -
         .expect("non-deleted object entry must remain");
 
     assert_eq!(kept_entry.object_key, fixture.keep_key);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_delete_does_not_write_or_anchor_when_bucket_manifest_cannot_decrypt() -> Result<()>
+{
+    let fixture = private_delete_fixture().await?;
+
+    fixture.bee.insert_bytes(
+        fixture.bucket_manifest_reference.clone(),
+        Bytes::from_static(b"not-a-valid-encrypted-private-bucket-manifest"),
+    );
+
+    let response = delete_object::handle(
+        Path((fixture.bucket.clone(), fixture.delete_key.clone())),
+        Extension(fixture.principal.clone()),
+        State(fixture.state.clone()),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let get_calls = fixture.bee.get_calls();
+    assert_eq!(
+        get_calls,
+        vec![fixture.bucket_manifest_reference.clone()],
+        "private DELETE should stop at the undecryptable bucket manifest"
+    );
+    assert!(
+        !get_calls.contains(&fixture.delete_object_manifest_reference),
+        "private DELETE must not fetch object manifests when bucket manifest cannot decrypt"
+    );
+
+    assert!(
+        fixture.bee.put_calls().is_empty(),
+        "private DELETE must not write a replacement bucket manifest after decrypt failure"
+    );
+    assert!(
+        fixture.anchor.delete_call().is_none(),
+        "private DELETE must not anchor a new bucket manifest root after decrypt failure"
+    );
+    assert_eq!(
+        fixture.anchor.put_anchor_calls(),
+        0,
+        "private DELETE must not use put anchor path after decrypt failure"
+    );
 
     Ok(())
 }
