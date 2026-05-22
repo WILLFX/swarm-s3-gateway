@@ -39,6 +39,10 @@ struct MockBeeInner {
 }
 
 impl MockBeeStorage {
+    fn insert_bytes(&self, reference: String, bytes: Bytes) {
+        self.inner.lock().unwrap().bytes.insert(reference, bytes);
+    }
+
     fn get_stored_bytes(&self, reference: &str) -> Option<Bytes> {
         self.inner.lock().unwrap().bytes.get(reference).cloned()
     }
@@ -385,6 +389,76 @@ async fn private_put_encrypts_payload_writes_manifests_anchors_and_hides_swarm_r
     assert_eq!(
         object_manifest_record.manifest.encryption_version,
         encryption_version
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_put_does_not_anchor_when_existing_bucket_manifest_cannot_decrypt() -> Result<()> {
+    let master_service_key = [42u8; 32];
+    let owner = [7u8; 32];
+    let bucket = "private-bucket".to_string();
+    let key = "secret.txt".to_string();
+    let body = Bytes::from_static(b"private put payload");
+    let encryption_version = 1u32;
+
+    let corrupt_bucket_manifest_reference = hex::encode([211u8; 32]);
+
+    let chain_bucket = ChainBucketRecord {
+        owner,
+        is_private: true,
+        encryption_version,
+        creation_date: 0,
+        bucket_manifest_root: hex::decode(&corrupt_bucket_manifest_reference)?,
+    };
+
+    let bee = Arc::new(MockBeeStorage::default());
+    bee.insert_bytes(
+        corrupt_bucket_manifest_reference,
+        Bytes::from_static(b"not-a-valid-encrypted-private-bucket-manifest"),
+    );
+
+    let anchor = Arc::new(RecordingAnchorClient::default());
+
+    let state = build_state(
+        bee.clone(),
+        anchor.clone(),
+        chain_bucket,
+        master_service_key,
+    );
+
+    let principal = AwsPrincipal {
+        access_key_id: "test-access-key".to_string(),
+        owner,
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+
+    let response = put_object::handle(
+        Path((bucket, key)),
+        Extension(principal),
+        State(state),
+        headers,
+        body,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        response.headers().get("x-amz-meta-swarm-ref").is_none(),
+        "failed private PUT must not expose an encrypted Swarm reference"
+    );
+    assert!(
+        anchor.submitted().is_none(),
+        "private PUT must not anchor a new object when existing bucket manifest cannot decrypt"
+    );
+
+    let put_calls = bee.put_calls();
+    assert!(
+        put_calls.len() < 3,
+        "private PUT must not write a replacement bucket manifest after decrypt failure"
     );
 
     Ok(())
