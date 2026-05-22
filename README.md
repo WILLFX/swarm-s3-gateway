@@ -47,7 +47,7 @@ The current contract-backed flows include:
 
 The contracts are important because the gateway should not be the only place that remembers ownership and bucket state. The chain gives the system an auditable state anchor.
 
-Future delegation and authorization tests should focus here first, because the contracts must prove that unauthorized accounts cannot mutate or access private bucket state.
+Delegation and authorization behavior is now covered at both contract and gateway-smoke level. Future work should focus on trust-minimization and production key-rotation workflows.
 
 ### 3. Swarm/Bee storage
 
