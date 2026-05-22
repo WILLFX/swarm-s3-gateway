@@ -409,6 +409,131 @@ mod s3_identity_contract {
         }
 
         #[ink::test]
+        fn revoke_delegation_removes_authorization_and_record() {
+            let governance = account(9);
+            let mut c = S3IdentityContract::new(governance);
+
+            set_caller(account(1));
+            assert_eq!(
+                c.grant_delegation(account(2), s3_contracts_common::OP_PUT_OBJECT, 1_000),
+                Ok(())
+            );
+
+            set_timestamp(10);
+            assert!(c.is_delegate_authorized(
+                account_bytes(1),
+                account_bytes(2),
+                s3_contracts_common::OP_PUT_OBJECT
+            ));
+            assert!(c.get_delegation(account_bytes(1), account_bytes(2)).is_some());
+
+            assert_eq!(c.revoke_delegation(account(2)), Ok(()));
+
+            assert!(!c.is_delegate_authorized(
+                account_bytes(1),
+                account_bytes(2),
+                s3_contracts_common::OP_PUT_OBJECT
+            ));
+            assert!(c.get_delegation(account_bytes(1), account_bytes(2)).is_none());
+        }
+
+        #[ink::test]
+        fn delegation_expiry_boundary_is_inclusive() {
+            let governance = account(9);
+            let mut c = S3IdentityContract::new(governance);
+
+            set_caller(account(1));
+            assert_eq!(
+                c.grant_delegation(account(2), s3_contracts_common::OP_GET_OBJECT, 100),
+                Ok(())
+            );
+
+            set_timestamp(100);
+            assert!(
+                c.is_delegate_authorized(
+                    account_bytes(1),
+                    account_bytes(2),
+                    s3_contracts_common::OP_GET_OBJECT
+                ),
+                "delegation should remain valid at exactly expires_at"
+            );
+
+            set_timestamp(101);
+            assert!(
+                !c.is_delegate_authorized(
+                    account_bytes(1),
+                    account_bytes(2),
+                    s3_contracts_common::OP_GET_OBJECT
+                ),
+                "delegation should expire after expires_at"
+            );
+        }
+
+        #[ink::test]
+        fn composite_scope_requires_all_requested_bits() {
+            let governance = account(9);
+            let mut c = S3IdentityContract::new(governance);
+
+            let allowed = s3_contracts_common::OP_GET_OBJECT | s3_contracts_common::OP_HEAD_OBJECT;
+
+            set_caller(account(1));
+            assert_eq!(c.grant_delegation(account(2), allowed, 1_000), Ok(()));
+
+            set_timestamp(10);
+            assert!(c.is_delegate_authorized(account_bytes(1), account_bytes(2), allowed));
+            assert!(c.is_delegate_authorized(
+                account_bytes(1),
+                account_bytes(2),
+                s3_contracts_common::OP_GET_OBJECT
+            ));
+            assert!(!c.is_delegate_authorized(
+                account_bytes(1),
+                account_bytes(2),
+                s3_contracts_common::OP_DELETE_OBJECT
+            ));
+            assert!(!c.is_delegate_authorized(
+                account_bytes(1),
+                account_bytes(2),
+                s3_contracts_common::OP_GET_OBJECT | s3_contracts_common::OP_DELETE_OBJECT
+            ));
+        }
+
+        #[ink::test]
+        fn rotate_key_rejects_expired_full_scope_delegate() {
+            let governance = account(9);
+            let mut c = S3IdentityContract::new(governance);
+
+            set_caller(account(1));
+            let hash = sample_hash(7);
+            assert_eq!(c.register_identity(hash, vec![1], [2; 12]), Ok(()));
+            assert_eq!(c.grant_delegation(account(2), OP_ALL, 10), Ok(()));
+
+            set_timestamp(11);
+            set_caller(account(2));
+            assert_eq!(
+                c.rotate_key(hash, vec![9, 9], [8; 12]),
+                Err(Error::DelegationExpired)
+            );
+        }
+
+        #[ink::test]
+        fn rotate_key_rejects_missing_delegate() {
+            let governance = account(9);
+            let mut c = S3IdentityContract::new(governance);
+
+            set_caller(account(1));
+            let hash = sample_hash(7);
+            assert_eq!(c.register_identity(hash, vec![1], [2; 12]), Ok(()));
+
+            set_timestamp(10);
+            set_caller(account(2));
+            assert_eq!(
+                c.rotate_key(hash, vec![9, 9], [8; 12]),
+                Err(Error::NotAuthorized)
+            );
+        }
+
+        #[ink::test]
         fn only_governance_can_change_governance() {
             let governance = account(9);
             let mut c = S3IdentityContract::new(governance);

@@ -50,6 +50,9 @@ jobs:
       - name: Check env templates
         run: ./scripts/check_env_templates.py
 
+      - name: Check delegation scope surface
+        run: ./scripts/check_delegation_scope_surface.py
+
       - name: Check gateway
         run: cargo check -p gateway
 
