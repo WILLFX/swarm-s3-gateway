@@ -186,6 +186,8 @@ struct PrivateFixture {
     bucket: String,
     key: String,
     plaintext: Bytes,
+    object_key_id: [u8; 32],
+    encryption_version: u32,
     bucket_manifest_reference: String,
     object_manifest_reference: String,
     encrypted_payload_reference: String,
@@ -316,6 +318,8 @@ async fn private_fixture() -> Result<PrivateFixture> {
         bucket,
         key,
         plaintext,
+        object_key_id,
+        encryption_version,
         bucket_manifest_reference: bucket_manifest_record.manifest_reference,
         object_manifest_reference: object_manifest_record.manifest_reference,
         encrypted_payload_reference,
@@ -414,6 +418,221 @@ async fn private_list_reads_bucket_manifest_only_and_omits_swarm_ref_header() ->
     assert!(
         !calls.contains(&fixture.encrypted_payload_reference),
         "private ListObjectsV2 must not fetch encrypted payload bytes"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_get_fails_closed_when_bucket_manifest_cannot_decrypt() -> Result<()> {
+    let fixture = private_fixture().await?;
+
+    fixture.bee.insert_bytes(
+        fixture.bucket_manifest_reference.clone(),
+        Bytes::from_static(b"not-a-valid-encrypted-private-bucket-manifest"),
+    );
+
+    let response = get_object::handle(
+        Path((fixture.bucket.clone(), fixture.key.clone())),
+        Extension(fixture.principal.clone()),
+        State(fixture.state.clone()),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await?;
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        !body.contains("private route payload"),
+        "failed private GET must not leak plaintext payload"
+    );
+
+    let calls = fixture.bee.get_calls();
+    assert!(calls.contains(&fixture.bucket_manifest_reference));
+    assert!(
+        !calls.contains(&fixture.object_manifest_reference),
+        "GET must stop before object manifest when bucket manifest cannot decrypt"
+    );
+    assert!(
+        !calls.contains(&fixture.encrypted_payload_reference),
+        "GET must stop before payload when bucket manifest cannot decrypt"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_head_fails_closed_when_object_manifest_cannot_decrypt() -> Result<()> {
+    let fixture = private_fixture().await?;
+
+    fixture.bee.insert_bytes(
+        fixture.object_manifest_reference.clone(),
+        Bytes::from_static(b"not-a-valid-encrypted-private-object-manifest"),
+    );
+
+    let response = head_object::handle(
+        Path((fixture.bucket.clone(), fixture.key.clone())),
+        Extension(fixture.principal.clone()),
+        State(fixture.state.clone()),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        response.headers().get("x-amz-meta-swarm-ref").is_none(),
+        "failed private HEAD must not expose Swarm references"
+    );
+
+    let calls = fixture.bee.get_calls();
+    assert!(calls.contains(&fixture.bucket_manifest_reference));
+    assert!(calls.contains(&fixture.object_manifest_reference));
+    assert!(
+        !calls.contains(&fixture.encrypted_payload_reference),
+        "private HEAD must fail closed without fetching encrypted payload bytes"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_list_fails_closed_when_bucket_manifest_cannot_decrypt() -> Result<()> {
+    let fixture = private_fixture().await?;
+
+    fixture.bee.insert_bytes(
+        fixture.bucket_manifest_reference.clone(),
+        Bytes::from_static(b"not-a-valid-encrypted-private-bucket-manifest"),
+    );
+
+    let response = list_objects_v2::handle(
+        Path(fixture.bucket.clone()),
+        Query(ListObjectsV2Query {
+            list_type: Some(2),
+            prefix: None,
+            max_keys: Some(1000),
+            continuation_token: None,
+        }),
+        Extension(fixture.principal.clone()),
+        State(fixture.state.clone()),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await?;
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        !body.contains("secret.txt"),
+        "failed private ListObjectsV2 must not leak object keys from undecryptable manifests"
+    );
+
+    let calls = fixture.bee.get_calls();
+    assert!(calls.contains(&fixture.bucket_manifest_reference));
+    assert!(
+        !calls.contains(&fixture.object_manifest_reference),
+        "private ListObjectsV2 must not fetch object manifests"
+    );
+    assert!(
+        !calls.contains(&fixture.encrypted_payload_reference),
+        "private ListObjectsV2 must not fetch encrypted payload bytes"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_get_fails_closed_when_payload_cannot_decrypt() -> Result<()> {
+    let fixture = private_fixture().await?;
+
+    fixture.bee.insert_bytes(
+        fixture.encrypted_payload_reference.clone(),
+        Bytes::from_static(b"not-a-valid-encrypted-private-payload"),
+    );
+
+    let response = get_object::handle(
+        Path((fixture.bucket.clone(), fixture.key.clone())),
+        Extension(fixture.principal.clone()),
+        State(fixture.state.clone()),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await?;
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        !body.contains("private route payload"),
+        "failed private GET must not leak plaintext payload"
+    );
+
+    let calls = fixture.bee.get_calls();
+    assert!(calls.contains(&fixture.bucket_manifest_reference));
+    assert!(calls.contains(&fixture.object_manifest_reference));
+    assert!(calls.contains(&fixture.encrypted_payload_reference));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_get_fails_closed_when_object_manifest_version_mismatches_entry() -> Result<()> {
+    let fixture = private_fixture().await?;
+
+    let mismatched_manifest = PrivateObjectManifestV2 {
+        object_key_id: fixture.object_key_id,
+        encrypted_swarm_reference: fixture.encrypted_payload_reference.clone(),
+        encryption_version: fixture.encryption_version + 1,
+        size: fixture.plaintext.len() as u64,
+        etag: "etag-private-secret".to_string(),
+        content_type: "text/plain".to_string(),
+        last_modified: "2026-05-14T00:00:00Z".to_string(),
+    };
+
+    let mismatched_record = write_private_object_manifest_v2(
+        fixture.bee.as_ref(),
+        &fixture.state.master_service_key,
+        &fixture.principal.owner,
+        &fixture.bucket,
+        &fixture.object_key_id,
+        fixture.encryption_version,
+        &mismatched_manifest,
+    )
+    .await?;
+
+    let mismatched_bytes = {
+        let inner = fixture.bee.inner.lock().unwrap();
+        inner
+            .bytes
+            .get(&mismatched_record.manifest_reference)
+            .cloned()
+            .expect("mismatched object manifest bytes should exist")
+    };
+
+    fixture
+        .bee
+        .insert_bytes(fixture.object_manifest_reference.clone(), mismatched_bytes);
+
+    let response = get_object::handle(
+        Path((fixture.bucket.clone(), fixture.key.clone())),
+        Extension(fixture.principal.clone()),
+        State(fixture.state.clone()),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await?;
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        !body.contains("private route payload"),
+        "version mismatch must fail closed without leaking plaintext payload"
+    );
+
+    let calls = fixture.bee.get_calls();
+    assert!(calls.contains(&fixture.bucket_manifest_reference));
+    assert!(calls.contains(&fixture.object_manifest_reference));
+    assert!(
+        !calls.contains(&fixture.encrypted_payload_reference),
+        "GET must stop before payload when object manifest version mismatches bucket entry"
     );
 
     Ok(())
