@@ -29,6 +29,7 @@ mod s3_bucket_contract {
         InsufficientScope,
         UpgradeFailed,
         NonceOverflow,
+        StaleBucketManifestRoot,
     }
 
     pub type Result<T> = core::result::Result<T, Error>;
@@ -224,6 +225,7 @@ mod s3_bucket_contract {
         ) -> Result<()> {
             self.update_bucket_manifest_root_with_scope(
                 bucket_name_hash,
+                None,
                 bucket_manifest_root,
                 OP_PUT_OBJECT,
             )
@@ -237,6 +239,37 @@ mod s3_bucket_contract {
         ) -> Result<()> {
             self.update_bucket_manifest_root_with_scope(
                 bucket_name_hash,
+                None,
+                bucket_manifest_root,
+                OP_DELETE_OBJECT,
+            )
+        }
+
+        #[ink(message)]
+        pub fn update_bucket_manifest_root_for_put_cas(
+            &mut self,
+            bucket_name_hash: [u8; 32],
+            expected_bucket_manifest_root: Vec<u8>,
+            bucket_manifest_root: Vec<u8>,
+        ) -> Result<()> {
+            self.update_bucket_manifest_root_with_scope(
+                bucket_name_hash,
+                Some(expected_bucket_manifest_root),
+                bucket_manifest_root,
+                OP_PUT_OBJECT,
+            )
+        }
+
+        #[ink(message)]
+        pub fn update_bucket_manifest_root_for_delete_cas(
+            &mut self,
+            bucket_name_hash: [u8; 32],
+            expected_bucket_manifest_root: Vec<u8>,
+            bucket_manifest_root: Vec<u8>,
+        ) -> Result<()> {
+            self.update_bucket_manifest_root_with_scope(
+                bucket_name_hash,
+                Some(expected_bucket_manifest_root),
                 bucket_manifest_root,
                 OP_DELETE_OBJECT,
             )
@@ -334,6 +367,7 @@ mod s3_bucket_contract {
         fn update_bucket_manifest_root_with_scope(
             &mut self,
             bucket_name_hash: [u8; 32],
+            expected_bucket_manifest_root: Option<Vec<u8>>,
             bucket_manifest_root: Vec<u8>,
             required_scope: u32,
         ) -> Result<()> {
@@ -345,6 +379,12 @@ mod s3_bucket_contract {
             let owner = record.owner;
 
             self.ensure_object_operation_authorized(owner, self.env().caller(), required_scope)?;
+
+            if let Some(expected_root) = expected_bucket_manifest_root {
+                if record.bucket_manifest_root != expected_root {
+                    return Err(Error::StaleBucketManifestRoot);
+                }
+            }
 
             record.bucket_manifest_root = bucket_manifest_root.clone();
             self.bucket_map.insert(bucket_name_hash, &record);
@@ -812,6 +852,106 @@ mod s3_bucket_contract {
                 .get_bucket(hash(1))
                 .expect("bucket must exist after delete-root update");
             assert_eq!(after_delete.bucket_manifest_root, delete_root);
+        }
+
+        #[ink::test]
+        fn cas_manifest_root_update_rejects_stale_expected_root() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner = account_from_pair(&pair);
+            let owner_bytes = account_bytes_from_pair(&pair);
+
+            set_caller(owner);
+
+            let create_nonce = c.get_owner_nonce(owner_bytes);
+            let create_sig = pair.sign(&create_payload(&c, hash(1), false, create_nonce));
+
+            assert_eq!(
+                c.create_bucket(owner, hash(1), false, create_sig.0, Vec::new()),
+                Ok(())
+            );
+
+            let initial_root = Vec::new();
+            let first_root = vec![1u8; 32];
+            let stale_loser_root = vec![2u8; 32];
+
+            assert_eq!(
+                c.update_bucket_manifest_root_for_put_cas(
+                    hash(1),
+                    initial_root.clone(),
+                    first_root.clone()
+                ),
+                Ok(())
+            );
+
+            assert_eq!(
+                c.update_bucket_manifest_root_for_put_cas(hash(1), initial_root, stale_loser_root),
+                Err(Error::StaleBucketManifestRoot)
+            );
+
+            let current = c
+                .get_bucket(hash(1))
+                .expect("bucket must still exist after stale CAS rejection");
+
+            assert_eq!(
+                current.bucket_manifest_root, first_root,
+                "stale CAS update must not overwrite the committed root"
+            );
+        }
+
+        #[ink::test]
+        fn cas_delete_manifest_root_update_rejects_stale_expected_root() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner = account_from_pair(&pair);
+            let owner_bytes = account_bytes_from_pair(&pair);
+
+            set_caller(owner);
+
+            let create_nonce = c.get_owner_nonce(owner_bytes);
+            let create_sig = pair.sign(&create_payload(&c, hash(1), false, create_nonce));
+
+            assert_eq!(
+                c.create_bucket(owner, hash(1), false, create_sig.0, Vec::new()),
+                Ok(())
+            );
+
+            let initial_root = Vec::new();
+            let delete_root = vec![3u8; 32];
+            let stale_loser_root = vec![4u8; 32];
+
+            assert_eq!(
+                c.update_bucket_manifest_root_for_delete_cas(
+                    hash(1),
+                    initial_root.clone(),
+                    delete_root.clone()
+                ),
+                Ok(())
+            );
+
+            assert_eq!(
+                c.update_bucket_manifest_root_for_delete_cas(
+                    hash(1),
+                    initial_root,
+                    stale_loser_root
+                ),
+                Err(Error::StaleBucketManifestRoot)
+            );
+
+            let current = c
+                .get_bucket(hash(1))
+                .expect("bucket must still exist after stale delete CAS rejection");
+
+            assert_eq!(
+                current.bucket_manifest_root, delete_root,
+                "stale delete CAS update must not overwrite the committed root"
+            );
         }
 
         #[ink::test]
