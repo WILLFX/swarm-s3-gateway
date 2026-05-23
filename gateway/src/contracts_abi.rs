@@ -104,6 +104,11 @@ pub const BUCKET_UPDATE_BUCKET_MANIFEST_ROOT_FOR_PUT_SELECTOR: [u8; 4] = [0x5c, 
 pub const BUCKET_UPDATE_BUCKET_MANIFEST_ROOT_FOR_DELETE_SELECTOR: [u8; 4] =
     [0x94, 0xbc, 0x4c, 0x0d];
 
+pub const BUCKET_UPDATE_BUCKET_MANIFEST_ROOT_FOR_PUT_CAS_SELECTOR: [u8; 4] =
+    [0x1c, 0x30, 0x3f, 0x1f];
+pub const BUCKET_UPDATE_BUCKET_MANIFEST_ROOT_FOR_DELETE_CAS_SELECTOR: [u8; 4] =
+    [0x74, 0x16, 0x08, 0xe1];
+
 pub fn encode_identity_register_identity(
     access_key_hash: AccessKeyHash,
     encrypted_sigv4_secret: Vec<u8>,
@@ -238,6 +243,30 @@ pub fn encode_bucket_update_bucket_manifest_root_for_delete(
 ) -> Vec<u8> {
     let mut data = BUCKET_UPDATE_BUCKET_MANIFEST_ROOT_FOR_DELETE_SELECTOR.to_vec();
     bucket_name_hash.encode_to(&mut data);
+    bucket_manifest_root.encode_to(&mut data);
+    data
+}
+
+pub fn encode_bucket_update_bucket_manifest_root_for_put_cas(
+    bucket_name_hash: BucketNameHash,
+    expected_bucket_manifest_root: Vec<u8>,
+    bucket_manifest_root: Vec<u8>,
+) -> Vec<u8> {
+    let mut data = BUCKET_UPDATE_BUCKET_MANIFEST_ROOT_FOR_PUT_CAS_SELECTOR.to_vec();
+    bucket_name_hash.encode_to(&mut data);
+    expected_bucket_manifest_root.encode_to(&mut data);
+    bucket_manifest_root.encode_to(&mut data);
+    data
+}
+
+pub fn encode_bucket_update_bucket_manifest_root_for_delete_cas(
+    bucket_name_hash: BucketNameHash,
+    expected_bucket_manifest_root: Vec<u8>,
+    bucket_manifest_root: Vec<u8>,
+) -> Vec<u8> {
+    let mut data = BUCKET_UPDATE_BUCKET_MANIFEST_ROOT_FOR_DELETE_CAS_SELECTOR.to_vec();
+    bucket_name_hash.encode_to(&mut data);
+    expected_bucket_manifest_root.encode_to(&mut data);
     bucket_manifest_root.encode_to(&mut data);
     data
 }

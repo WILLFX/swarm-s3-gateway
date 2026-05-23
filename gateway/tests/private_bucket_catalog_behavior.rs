@@ -202,6 +202,7 @@ impl AnchorClient for RecordingAnchorClient {
     async fn update_bucket_manifest_root_for_put_anchor(
         &self,
         _bucket_id: [u8; 32],
+        _expected_bucket_manifest_root: String,
         _bucket_manifest_root: String,
     ) -> Result<String> {
         bail!("put object manifest-root anchor should not be used by bucket catalog tests")
@@ -210,6 +211,7 @@ impl AnchorClient for RecordingAnchorClient {
     async fn update_bucket_manifest_root_for_delete_anchor(
         &self,
         _bucket_id: [u8; 32],
+        _expected_bucket_manifest_root: String,
         _bucket_manifest_root: String,
     ) -> Result<String> {
         bail!("delete object manifest-root anchor should not be used by bucket catalog tests")
@@ -221,6 +223,7 @@ impl AnchorClient for RecordingAnchorClient {
         _bucket_id: [u8; 32],
         _object_key_id: [u8; 32],
         _swarm_ref: String,
+        _expected_bucket_manifest_root: String,
         _bucket_manifest_root: String,
         _size: u64,
         _etag: [u8; 32],

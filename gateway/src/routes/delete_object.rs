@@ -89,6 +89,7 @@ pub async fn handle(
     if let Err(err) = anchor_delete_object_manifest_root(
         state.anchor_client.as_ref(),
         bucket_id,
+        hex::encode(&chain_bucket.bucket_manifest_root),
         new_bucket_record.manifest_reference,
     )
     .await
@@ -174,6 +175,7 @@ async fn handle_private_delete_object(
     if let Err(err) = anchor_delete_object_manifest_root(
         state.anchor_client.as_ref(),
         bucket_id,
+        hex::encode(&chain_bucket.bucket_manifest_root),
         new_bucket_record.manifest_reference,
     )
     .await
@@ -187,10 +189,15 @@ async fn handle_private_delete_object(
 async fn anchor_delete_object_manifest_root(
     anchor_client: &dyn AnchorClient,
     bucket_id: [u8; 32],
+    expected_bucket_manifest_root: String,
     bucket_manifest_root: String,
 ) -> anyhow::Result<String> {
     anchor_client
-        .update_bucket_manifest_root_for_delete_anchor(bucket_id, bucket_manifest_root)
+        .update_bucket_manifest_root_for_delete_anchor(
+            bucket_id,
+            expected_bucket_manifest_root,
+            bucket_manifest_root,
+        )
         .await
 }
 
@@ -261,6 +268,7 @@ mod tests {
         async fn update_bucket_manifest_root_for_put_anchor(
             &self,
             _bucket_id: [u8; 32],
+            _expected_bucket_manifest_root: String,
             _bucket_manifest_root: String,
         ) -> anyhow::Result<String> {
             self.put_calls.fetch_add(1, Ordering::SeqCst);
@@ -270,6 +278,7 @@ mod tests {
         async fn update_bucket_manifest_root_for_delete_anchor(
             &self,
             _bucket_id: [u8; 32],
+            _expected_bucket_manifest_root: String,
             _bucket_manifest_root: String,
         ) -> anyhow::Result<String> {
             self.delete_calls.fetch_add(1, Ordering::SeqCst);
@@ -282,6 +291,7 @@ mod tests {
             _bucket_id: [u8; 32],
             _object_key_id: [u8; 32],
             _swarm_ref: String,
+            _expected_bucket_manifest_root: String,
             _bucket_manifest_root: String,
             _size: u64,
             _etag: [u8; 32],
@@ -297,6 +307,7 @@ mod tests {
         let tx = anchor_delete_object_manifest_root(
             &client,
             [1u8; 32],
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         )
         .await

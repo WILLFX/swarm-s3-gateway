@@ -127,6 +127,7 @@ struct AnchorSubmitRecord {
     bucket_id: [u8; 32],
     object_key_id: [u8; 32],
     swarm_ref: String,
+    expected_bucket_manifest_root: String,
     bucket_manifest_root: String,
     size: u64,
     etag: [u8; 32],
@@ -168,6 +169,7 @@ impl AnchorClient for RecordingAnchorClient {
     async fn update_bucket_manifest_root_for_put_anchor(
         &self,
         _bucket_id: [u8; 32],
+        _expected_bucket_manifest_root: String,
         _bucket_manifest_root: String,
     ) -> Result<String> {
         bail!("update_bucket_manifest_root_for_put_anchor should not be called directly here")
@@ -176,6 +178,7 @@ impl AnchorClient for RecordingAnchorClient {
     async fn update_bucket_manifest_root_for_delete_anchor(
         &self,
         _bucket_id: [u8; 32],
+        _expected_bucket_manifest_root: String,
         _bucket_manifest_root: String,
     ) -> Result<String> {
         bail!("delete anchor must not be used by private PUT")
@@ -187,6 +190,7 @@ impl AnchorClient for RecordingAnchorClient {
         bucket_id: [u8; 32],
         object_key_id: [u8; 32],
         swarm_ref: String,
+        expected_bucket_manifest_root: String,
         bucket_manifest_root: String,
         size: u64,
         etag: [u8; 32],
@@ -196,6 +200,7 @@ impl AnchorClient for RecordingAnchorClient {
             bucket_id,
             object_key_id,
             swarm_ref,
+            expected_bucket_manifest_root,
             bucket_manifest_root,
             size,
             etag,
@@ -307,6 +312,10 @@ async fn private_put_encrypts_payload_writes_manifests_anchors_and_hides_swarm_r
 
     assert_eq!(submitted.owner, owner);
     assert_eq!(submitted.bucket_id, expected_bucket_id);
+    assert_eq!(
+        submitted.expected_bucket_manifest_root, "",
+        "private PUT into an empty bucket must CAS against the empty root"
+    );
     assert_eq!(submitted.object_key_id, expected_object_key_id);
     assert_eq!(submitted.size, body.len() as u64);
     assert_eq!(submitted.etag, expected_etag);
