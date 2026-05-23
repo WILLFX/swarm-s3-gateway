@@ -6,8 +6,11 @@ use common::types::{AccessKeyHash, AwsPrincipal};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
 type HmacSha256 = Hmac<Sha256>;
+
+const SIGV4_MAX_CLOCK_SKEW_SECONDS: i64 = 15 * 60;
 
 pub struct RegistryBackedSigV4Validator {
     pub registry: Arc<dyn RegistryClient>,
@@ -22,6 +25,8 @@ impl RegistryBackedSigV4Validator {
         let auth = header_str(req.headers(), "authorization")?;
         let amz_date = header_str(req.headers(), "x-amz-date")?;
         let payload_hash = header_str(req.headers(), "x-amz-content-sha256")?;
+
+        ensure_amz_date_fresh(amz_date, OffsetDateTime::now_utc().unix_timestamp())?;
 
         let parsed = parse_authorization(auth)?;
         if parsed.algorithm != "AWS4-HMAC-SHA256" {
@@ -117,6 +122,56 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str> {
         .ok_or_else(|| anyhow!("missing required header: {name}"))?
         .to_str()
         .context("invalid header value")
+}
+
+fn ensure_amz_date_fresh(amz_date: &str, now_epoch_seconds: i64) -> Result<()> {
+    let request_epoch_seconds = parse_amz_date_epoch_seconds(amz_date)?;
+
+    let skew = if now_epoch_seconds >= request_epoch_seconds {
+        now_epoch_seconds - request_epoch_seconds
+    } else {
+        request_epoch_seconds - now_epoch_seconds
+    };
+
+    if skew > SIGV4_MAX_CLOCK_SKEW_SECONDS {
+        bail!("x-amz-date outside allowed clock skew");
+    }
+
+    Ok(())
+}
+
+fn parse_amz_date_epoch_seconds(amz_date: &str) -> Result<i64> {
+    if amz_date.len() != 16 || !amz_date.ends_with('Z') || amz_date.as_bytes()[8] != b'T' {
+        bail!("x-amz-date must use AWS SigV4 basic format YYYYMMDDTHHMMSSZ");
+    }
+
+    let year: i32 = amz_date[0..4]
+        .parse()
+        .context("x-amz-date year must be numeric")?;
+    let month_num: u8 = amz_date[4..6]
+        .parse()
+        .context("x-amz-date month must be numeric")?;
+    let day: u8 = amz_date[6..8]
+        .parse()
+        .context("x-amz-date day must be numeric")?;
+    let hour: u8 = amz_date[9..11]
+        .parse()
+        .context("x-amz-date hour must be numeric")?;
+    let minute: u8 = amz_date[11..13]
+        .parse()
+        .context("x-amz-date minute must be numeric")?;
+    let second: u8 = amz_date[13..15]
+        .parse()
+        .context("x-amz-date second must be numeric")?;
+
+    let month = Month::try_from(month_num).context("x-amz-date month is out of range")?;
+    let date = Date::from_calendar_date(year, month, day)
+        .context("x-amz-date calendar date is invalid")?;
+    let clock = Time::from_hms(hour, minute, second).context("x-amz-date time is invalid")?;
+
+    Ok(PrimitiveDateTime::new(date, clock)
+        .assume_utc()
+        .unix_timestamp())
 }
 
 fn parse_authorization(auth: &str) -> Result<ParsedAuthorization> {
@@ -371,6 +426,18 @@ mod tests {
         Ok(ciphertext)
     }
 
+    fn format_amz_date(now: OffsetDateTime) -> String {
+        format!(
+            "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
+            now.year(),
+            u8::from(now.month()),
+            now.day(),
+            now.hour(),
+            now.minute(),
+            now.second()
+        )
+    }
+
     fn build_signed_request(
         method: Method,
         uri: &str,
@@ -441,6 +508,63 @@ mod tests {
         Ok(req)
     }
 
+    #[test]
+    fn sigv4_freshness_accepts_request_inside_skew_window() -> Result<()> {
+        let request_epoch = parse_amz_date_epoch_seconds("20260101T120000Z")?;
+
+        ensure_amz_date_fresh("20260101T120000Z", request_epoch)?;
+        ensure_amz_date_fresh(
+            "20260101T120000Z",
+            request_epoch + SIGV4_MAX_CLOCK_SKEW_SECONDS,
+        )?;
+        ensure_amz_date_fresh(
+            "20260101T120000Z",
+            request_epoch - SIGV4_MAX_CLOCK_SKEW_SECONDS,
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn sigv4_freshness_rejects_stale_and_future_requests() -> Result<()> {
+        let request_epoch = parse_amz_date_epoch_seconds("20260101T120000Z")?;
+
+        let stale = ensure_amz_date_fresh(
+            "20260101T120000Z",
+            request_epoch + SIGV4_MAX_CLOCK_SKEW_SECONDS + 1,
+        )
+        .expect_err("stale x-amz-date must be rejected");
+
+        assert!(
+            format!("{stale:#}").contains("x-amz-date outside allowed clock skew"),
+            "unexpected stale error: {stale:#}"
+        );
+
+        let future = ensure_amz_date_fresh(
+            "20260101T120000Z",
+            request_epoch - SIGV4_MAX_CLOCK_SKEW_SECONDS - 1,
+        )
+        .expect_err("future x-amz-date must be rejected");
+
+        assert!(
+            format!("{future:#}").contains("x-amz-date outside allowed clock skew"),
+            "unexpected future error: {future:#}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn sigv4_freshness_rejects_bad_amz_date_format() {
+        let err = parse_amz_date_epoch_seconds("2026-01-01T12:00:00Z")
+            .expect_err("non-basic x-amz-date format must be rejected");
+
+        assert!(
+            format!("{err:#}").contains("YYYYMMDDTHHMMSSZ"),
+            "unexpected parse error: {err:#}"
+        );
+    }
+
     #[tokio::test]
     async fn happy_path_registry_fetch_unwrap_and_sigv4_validate() -> Result<()> {
         let access_key_id = "AKIA_TEST_ACCESS_KEY_123456";
@@ -484,11 +608,12 @@ mod tests {
         };
 
         let body = Bytes::from_static(b"hello swarm");
+        let amz_date = format_amz_date(OffsetDateTime::now_utc());
         let req = build_signed_request(
             Method::PUT,
             "https://example.local/my-bucket/test.txt",
             "example.local",
-            "20250101T120000Z",
+            &amz_date,
             access_key_id,
             plaintext_sigv4_secret,
             body,

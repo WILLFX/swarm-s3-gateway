@@ -12,6 +12,7 @@ use gateway::traits::{RegistryClient, SecretUnwrapper};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use time::OffsetDateTime;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -204,6 +205,18 @@ fn encrypt_sigv4_secret(
     Ok(ciphertext)
 }
 
+fn format_amz_date(now: OffsetDateTime) -> String {
+    format!(
+        "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
+        now.year(),
+        u8::from(now.month()),
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second()
+    )
+}
+
 fn build_signed_request(
     method: Method,
     uri: &str,
@@ -316,11 +329,12 @@ async fn happy_path_registry_fetch_unwrap_and_sigv4_validate() -> Result<()> {
     };
 
     let body = Bytes::from_static(b"hello swarm");
+    let amz_date = format_amz_date(OffsetDateTime::now_utc());
     let req = build_signed_request(
         Method::PUT,
         "https://example.local/my-bucket/test.txt",
         "example.local",
-        "20250101T120000Z",
+        &amz_date,
         access_key_id,
         plaintext_sigv4_secret,
         body,
@@ -376,11 +390,12 @@ async fn revoked_credential_fails_even_with_valid_signature() -> Result<()> {
     };
 
     let body = Bytes::from_static(b"hello swarm");
+    let amz_date = format_amz_date(OffsetDateTime::now_utc());
     let req = build_signed_request(
         Method::PUT,
         "https://example.local/my-bucket/test.txt",
         "example.local",
-        "20250101T120000Z",
+        &amz_date,
         access_key_id,
         plaintext_sigv4_secret,
         body,
@@ -438,11 +453,12 @@ async fn rotated_key_rejects_request_signed_with_old_secret() -> Result<()> {
     };
 
     let body = Bytes::from_static(b"hello swarm");
+    let amz_date = format_amz_date(OffsetDateTime::now_utc());
     let req = build_signed_request(
         Method::PUT,
         "https://example.local/my-bucket/test.txt",
         "example.local",
-        "20250101T120000Z",
+        &amz_date,
         access_key_id,
         old_sigv4_secret,
         body,
