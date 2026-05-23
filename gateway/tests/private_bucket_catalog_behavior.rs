@@ -137,6 +137,7 @@ struct CreateBucketAnchorRecord {
     bucket_id: [u8; 32],
     is_private: bool,
     owner_signature: [u8; 64],
+    expected_owner_catalog_root: String,
     owner_catalog_root: String,
 }
 
@@ -144,6 +145,7 @@ struct CreateBucketAnchorRecord {
 struct DeleteBucketAnchorRecord {
     bucket_id: [u8; 32],
     owner_signature: [u8; 64],
+    expected_owner_catalog_root: String,
     owner_catalog_root: String,
 }
 
@@ -171,6 +173,7 @@ impl AnchorClient for RecordingAnchorClient {
         bucket_id: [u8; 32],
         is_private: bool,
         owner_signature: [u8; 64],
+        expected_owner_catalog_root: String,
         owner_catalog_root: String,
     ) -> Result<String> {
         *self.create_call.lock().unwrap() = Some(CreateBucketAnchorRecord {
@@ -178,6 +181,7 @@ impl AnchorClient for RecordingAnchorClient {
             bucket_id,
             is_private,
             owner_signature,
+            expected_owner_catalog_root,
             owner_catalog_root,
         });
 
@@ -188,11 +192,13 @@ impl AnchorClient for RecordingAnchorClient {
         &self,
         bucket_id: [u8; 32],
         owner_signature: [u8; 64],
+        expected_owner_catalog_root: String,
         owner_catalog_root: String,
     ) -> Result<String> {
         *self.delete_call.lock().unwrap() = Some(DeleteBucketAnchorRecord {
             bucket_id,
             owner_signature,
+            expected_owner_catalog_root,
             owner_catalog_root,
         });
 
@@ -361,6 +367,10 @@ async fn private_create_bucket_writes_owner_catalog_and_create_anchor() -> Resul
     assert_eq!(create_anchor.bucket_id, bucket_name_hash(&owner, &bucket));
     assert!(create_anchor.is_private);
     assert_eq!(create_anchor.owner_signature, owner_signature());
+    assert_eq!(
+        create_anchor.expected_owner_catalog_root, initial_root,
+        "private bucket create must CAS against the owner catalog root it read"
+    );
 
     let put_calls = bee.put_calls();
     assert_eq!(
@@ -453,6 +463,10 @@ async fn private_delete_empty_bucket_removes_owner_catalog_entry_and_delete_anch
 
     assert_eq!(delete_anchor.bucket_id, bucket_name_hash(&owner, &bucket));
     assert_eq!(delete_anchor.owner_signature, owner_signature());
+    assert_eq!(
+        delete_anchor.expected_owner_catalog_root, initial_root,
+        "private bucket delete must CAS against the owner catalog root it read"
+    );
 
     let put_calls = bee.put_calls();
     assert_eq!(

@@ -160,6 +160,7 @@ impl AnchorClient for RecordingAnchorClient {
         _bucket_id: [u8; 32],
         _is_private: bool,
         _owner_signature: [u8; 64],
+        _expected_owner_catalog_root: String,
         _owner_catalog_root: String,
     ) -> Result<String> {
         bail!("create_bucket_anchor should not be used by private DELETE")
@@ -169,6 +170,7 @@ impl AnchorClient for RecordingAnchorClient {
         &self,
         _bucket_id: [u8; 32],
         _owner_signature: [u8; 64],
+        _expected_owner_catalog_root: String,
         _owner_catalog_root: String,
     ) -> Result<String> {
         bail!("delete_bucket_anchor should not be used by private DELETE object")

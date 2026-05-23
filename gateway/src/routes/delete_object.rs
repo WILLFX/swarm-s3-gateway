@@ -251,6 +251,7 @@ mod tests {
             _bucket_id: [u8; 32],
             _is_private: bool,
             _owner_signature: [u8; 64],
+            _expected_owner_catalog_root: String,
             _owner_catalog_root: String,
         ) -> anyhow::Result<String> {
             Ok("create".to_string())
@@ -260,6 +261,7 @@ mod tests {
             &self,
             _bucket_id: [u8; 32],
             _owner_signature: [u8; 64],
+            _expected_owner_catalog_root: String,
             _owner_catalog_root: String,
         ) -> anyhow::Result<String> {
             Ok("delete-bucket".to_string())
