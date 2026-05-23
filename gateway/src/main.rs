@@ -1,9 +1,14 @@
 use anyhow::Result;
 use axum::{
-    Router, middleware,
+    Router,
+    extract::DefaultBodyLimit,
+    middleware,
     routing::{get, put},
 };
-use gateway::{app_state::build_production_state, auth, routes};
+use gateway::{
+    app_state::build_production_state, auth, request_limits::max_request_body_bytes_from_env,
+    routes,
+};
 use std::{env, net::SocketAddr};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -17,6 +22,12 @@ async fn main() -> Result<()> {
         .init();
 
     let state = build_production_state().await?;
+    let max_request_body_bytes = max_request_body_bytes_from_env()?;
+
+    tracing::info!(
+        max_request_body_bytes,
+        "configured gateway request body limit"
+    );
 
     let authenticated_routes = Router::new()
         .route("/", get(routes::list_bucket::handle))
@@ -38,7 +49,10 @@ async fn main() -> Result<()> {
             auth::middleware::sigv4_auth_middleware,
         ));
 
-    let app = Router::new().merge(authenticated_routes).with_state(state);
+    let app = Router::new()
+        .merge(authenticated_routes)
+        .layer(DefaultBodyLimit::max(max_request_body_bytes))
+        .with_state(state);
 
     let bind_addr = env::var("S3GW_BIND_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:8000".to_string())
