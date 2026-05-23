@@ -30,6 +30,7 @@ mod s3_bucket_contract {
         UpgradeFailed,
         NonceOverflow,
         StaleBucketManifestRoot,
+        StaleOwnerCatalogRoot,
     }
 
     pub type Result<T> = core::result::Result<T, Error>;
@@ -149,6 +150,61 @@ mod s3_bucket_contract {
         }
 
         #[ink(message)]
+        pub fn create_bucket_cas(
+            &mut self,
+            owner: AccountId,
+            bucket_name_hash: [u8; 32],
+            is_private: bool,
+            owner_signature: [u8; 64],
+            expected_owner_catalog_root: Vec<u8>,
+            owner_catalog_root: Vec<u8>,
+        ) -> Result<()> {
+            if self.bucket_map.get(bucket_name_hash).is_some() {
+                return Err(Error::BucketAlreadyExists);
+            }
+
+            let owner_bytes = Self::account_to_bytes(owner);
+            let nonce = self.get_owner_nonce(owner_bytes);
+
+            self.verify_create_signature(
+                owner_bytes,
+                bucket_name_hash,
+                is_private,
+                nonce,
+                owner_signature,
+            )?;
+
+            self.ensure_create_authorized(owner_bytes, self.env().caller())?;
+            self.ensure_owner_catalog_root_matches(owner_bytes, Some(expected_owner_catalog_root))?;
+
+            let record = BucketRecord {
+                owner: owner_bytes,
+                is_private,
+                encryption_version: 1,
+                creation_date: self.env().block_timestamp(),
+                bucket_manifest_root: Vec::new(),
+            };
+
+            self.bucket_map.insert(bucket_name_hash, &record);
+            self.owner_catalog_roots
+                .insert(owner_bytes, &owner_catalog_root);
+            self.bump_owner_nonce(owner_bytes)?;
+
+            self.env().emit_event(OwnerCatalogRootUpdated {
+                owner: owner_bytes,
+                owner_catalog_root,
+            });
+
+            self.env().emit_event(BucketCreated {
+                hash: bucket_name_hash,
+                owner,
+                is_private,
+            });
+
+            Ok(())
+        }
+
+        #[ink(message)]
         pub fn delete_bucket(
             &mut self,
             bucket_name_hash: [u8; 32],
@@ -165,6 +221,43 @@ mod s3_bucket_contract {
 
             self.verify_delete_signature(owner, bucket_name_hash, nonce, owner_signature)?;
             self.ensure_delete_authorized(owner, self.env().caller())?;
+
+            self.bucket_map.remove(bucket_name_hash);
+            self.owner_catalog_roots.insert(owner, &owner_catalog_root);
+            self.bump_owner_nonce(owner)?;
+
+            self.env().emit_event(OwnerCatalogRootUpdated {
+                owner,
+                owner_catalog_root,
+            });
+
+            self.env().emit_event(BucketDeleted {
+                hash: bucket_name_hash,
+                owner,
+            });
+
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn delete_bucket_cas(
+            &mut self,
+            bucket_name_hash: [u8; 32],
+            owner_signature: [u8; 64],
+            expected_owner_catalog_root: Vec<u8>,
+            owner_catalog_root: Vec<u8>,
+        ) -> Result<()> {
+            let record = match self.bucket_map.get(bucket_name_hash) {
+                Some(record) => record,
+                None => return Err(Error::BucketNotFound),
+            };
+
+            let owner = record.owner;
+            let nonce = self.get_owner_nonce(owner);
+
+            self.verify_delete_signature(owner, bucket_name_hash, nonce, owner_signature)?;
+            self.ensure_delete_authorized(owner, self.env().caller())?;
+            self.ensure_owner_catalog_root_matches(owner, Some(expected_owner_catalog_root))?;
 
             self.bucket_map.remove(bucket_name_hash);
             self.owner_catalog_roots.insert(owner, &owner_catalog_root);
@@ -314,6 +407,21 @@ mod s3_bucket_contract {
                 Ok(()) => Ok(()),
                 Err(_) => Err(Error::UpgradeFailed),
             }
+        }
+
+        fn ensure_owner_catalog_root_matches(
+            &self,
+            owner: AccountId32,
+            expected_owner_catalog_root: Option<Vec<u8>>,
+        ) -> Result<()> {
+            if let Some(expected_root) = expected_owner_catalog_root {
+                let current_root = self.owner_catalog_roots.get(owner).unwrap_or_default();
+                if current_root != expected_root {
+                    return Err(Error::StaleOwnerCatalogRoot);
+                }
+            }
+
+            Ok(())
         }
 
         fn ensure_governance(&self, caller: AccountId) -> Result<()> {
@@ -655,6 +763,184 @@ mod s3_bucket_contract {
                 c.delete_bucket(hash(1), delete_sig.0, Vec::new()),
                 Err(Error::BucketNotFound)
             );
+        }
+
+        #[ink::test]
+        fn create_bucket_cas_rejects_stale_owner_catalog_root() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner = account_from_pair(&pair);
+            let owner_bytes = account_bytes_from_pair(&pair);
+
+            set_caller(owner);
+
+            let create_nonce = c.get_owner_nonce(owner_bytes);
+            let create_sig = pair.sign(&create_payload(&c, hash(1), true, create_nonce));
+
+            let stale_expected_root = vec![9u8; 32];
+            let new_catalog_root = vec![1u8; 32];
+
+            assert_eq!(
+                c.create_bucket_cas(
+                    owner,
+                    hash(1),
+                    true,
+                    create_sig.0,
+                    stale_expected_root,
+                    new_catalog_root
+                ),
+                Err(Error::StaleOwnerCatalogRoot)
+            );
+
+            assert!(
+                c.get_bucket(hash(1)).is_none(),
+                "stale create CAS must not create the bucket"
+            );
+            assert_eq!(
+                c.get_owner_catalog_root(owner_bytes),
+                Vec::<u8>::new(),
+                "stale create CAS must not overwrite owner catalog root"
+            );
+        }
+
+        #[ink::test]
+        fn create_bucket_cas_accepts_current_owner_catalog_root() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner = account_from_pair(&pair);
+            let owner_bytes = account_bytes_from_pair(&pair);
+
+            set_caller(owner);
+
+            let create_nonce = c.get_owner_nonce(owner_bytes);
+            let create_sig = pair.sign(&create_payload(&c, hash(1), true, create_nonce));
+
+            let expected_root = Vec::new();
+            let new_catalog_root = vec![1u8; 32];
+
+            assert_eq!(
+                c.create_bucket_cas(
+                    owner,
+                    hash(1),
+                    true,
+                    create_sig.0,
+                    expected_root,
+                    new_catalog_root.clone()
+                ),
+                Ok(())
+            );
+
+            assert!(
+                c.get_bucket(hash(1)).is_some(),
+                "fresh create CAS must create the bucket"
+            );
+            assert_eq!(c.get_owner_catalog_root(owner_bytes), new_catalog_root);
+        }
+
+        #[ink::test]
+        fn delete_bucket_cas_rejects_stale_owner_catalog_root() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner = account_from_pair(&pair);
+            let owner_bytes = account_bytes_from_pair(&pair);
+
+            set_caller(owner);
+
+            let initial_catalog_root = vec![1u8; 32];
+            let create_nonce = c.get_owner_nonce(owner_bytes);
+            let create_sig = pair.sign(&create_payload(&c, hash(1), false, create_nonce));
+
+            assert_eq!(
+                c.create_bucket_cas(
+                    owner,
+                    hash(1),
+                    false,
+                    create_sig.0,
+                    Vec::new(),
+                    initial_catalog_root.clone()
+                ),
+                Ok(())
+            );
+
+            let delete_nonce = c.get_owner_nonce(owner_bytes);
+            let delete_sig = pair.sign(&delete_payload(&c, hash(1), delete_nonce));
+
+            let stale_expected_root = vec![9u8; 32];
+            let new_catalog_root = vec![2u8; 32];
+
+            assert_eq!(
+                c.delete_bucket_cas(hash(1), delete_sig.0, stale_expected_root, new_catalog_root),
+                Err(Error::StaleOwnerCatalogRoot)
+            );
+
+            assert!(
+                c.get_bucket(hash(1)).is_some(),
+                "stale delete CAS must not remove the bucket"
+            );
+            assert_eq!(
+                c.get_owner_catalog_root(owner_bytes),
+                initial_catalog_root,
+                "stale delete CAS must not overwrite owner catalog root"
+            );
+        }
+
+        #[ink::test]
+        fn delete_bucket_cas_accepts_current_owner_catalog_root() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner = account_from_pair(&pair);
+            let owner_bytes = account_bytes_from_pair(&pair);
+
+            set_caller(owner);
+
+            let initial_catalog_root = vec![1u8; 32];
+            let create_nonce = c.get_owner_nonce(owner_bytes);
+            let create_sig = pair.sign(&create_payload(&c, hash(1), false, create_nonce));
+
+            assert_eq!(
+                c.create_bucket_cas(
+                    owner,
+                    hash(1),
+                    false,
+                    create_sig.0,
+                    Vec::new(),
+                    initial_catalog_root.clone()
+                ),
+                Ok(())
+            );
+
+            let delete_nonce = c.get_owner_nonce(owner_bytes);
+            let delete_sig = pair.sign(&delete_payload(&c, hash(1), delete_nonce));
+
+            let new_catalog_root = vec![2u8; 32];
+
+            assert_eq!(
+                c.delete_bucket_cas(
+                    hash(1),
+                    delete_sig.0,
+                    initial_catalog_root,
+                    new_catalog_root.clone()
+                ),
+                Ok(())
+            );
+
+            assert!(
+                c.get_bucket(hash(1)).is_none(),
+                "fresh delete CAS must remove the bucket"
+            );
+            assert_eq!(c.get_owner_catalog_root(owner_bytes), new_catalog_root);
         }
 
         #[ink::test]
