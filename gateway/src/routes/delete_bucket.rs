@@ -51,9 +51,9 @@ pub async fn handle(
         return response;
     }
 
-    let owner_catalog_root =
+    let (expected_owner_catalog_root, owner_catalog_root) =
         match write_owner_catalog_without_bucket(&state, principal.owner, &bucket).await {
-            Ok(root) => root,
+            Ok(roots) => roots,
             Err(err) => {
                 return S3ErrorResponse::new(S3ErrorKind::InternalError)
                     .with_message(format!("failed to write owner bucket catalog: {err}"))
@@ -64,7 +64,12 @@ pub async fn handle(
 
     match state
         .anchor_client
-        .delete_bucket_anchor(bucket_id, owner_signature, owner_catalog_root)
+        .delete_bucket_anchor(
+            bucket_id,
+            owner_signature,
+            expected_owner_catalog_root,
+            owner_catalog_root,
+        )
         .await
     {
         Ok(_) => no_content_response(),
@@ -185,7 +190,7 @@ async fn write_owner_catalog_without_bucket(
     state: &AppState,
     owner: common::types::SubstrateAddress32,
     bucket: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, String)> {
     let root = state
         .registry_client
         .fetch_owner_catalog_root(owner)
@@ -209,7 +214,7 @@ async fn write_owner_catalog_without_bucket(
     )
     .await?;
 
-    Ok(record.manifest_reference)
+    Ok((hex::encode(root), record.manifest_reference))
 }
 
 #[cfg(test)]

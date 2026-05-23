@@ -24,6 +24,7 @@ pub trait AnchorClient: Send + Sync {
         bucket_id: [u8; 32],
         is_private: bool,
         owner_signature: [u8; 64],
+        expected_owner_catalog_root: String,
         owner_catalog_root: String,
     ) -> anyhow::Result<String>;
 
@@ -31,6 +32,7 @@ pub trait AnchorClient: Send + Sync {
         &self,
         bucket_id: [u8; 32],
         owner_signature: [u8; 64],
+        expected_owner_catalog_root: String,
         owner_catalog_root: String,
     ) -> anyhow::Result<String>;
 
