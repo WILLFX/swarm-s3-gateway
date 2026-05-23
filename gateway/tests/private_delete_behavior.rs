@@ -394,6 +394,10 @@ async fn private_delete_removes_entry_writes_manifest_and_uses_delete_anchor() -
         .expect("private DELETE must update the delete manifest root anchor");
 
     assert_eq!(delete_anchor.bucket_id, fixture.expected_bucket_id);
+    assert_eq!(
+        delete_anchor.expected_bucket_manifest_root, fixture.bucket_manifest_reference,
+        "private DELETE must CAS against the bucket manifest root it read"
+    );
     assert_eq!(delete_anchor.bucket_manifest_root, put_calls[0]);
     assert_eq!(fixture.anchor.put_anchor_calls(), 0);
 
