@@ -119,19 +119,12 @@ fn decode_owner_catalog_manifest_bytes(
     let key = derive_owner_catalog_encryption_key(master_key, owner);
     let aad = owner_catalog_aad(owner);
 
-    let plaintext = match decrypt_blob(&key, &aad, encrypted_bytes) {
-        Ok(plaintext) => plaintext,
-        Err(err) => {
-            tracing::warn!(
-                owner = %hex::encode(owner),
-                root_ref = %root_ref,
-                error = %err,
-                "owner catalog could not be decrypted; treating as empty legacy/plaintext catalog"
-            );
-
-            return Ok(RootCatalogManifest::default());
-        }
-    };
+    let plaintext = decrypt_blob(&key, &aad, encrypted_bytes).with_context(|| {
+        format!(
+            "failed to decrypt owner catalog root {root_ref} for owner {}",
+            hex::encode(owner)
+        )
+    })?;
 
     serde_json::from_slice(&plaintext).context("failed to deserialize encrypted owner catalog JSON")
 }
@@ -600,23 +593,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn owner_catalog_decrypt_failure_falls_back_to_empty_catalog() {
+    fn owner_catalog_decrypt_failure_fails_closed() {
         let master_key = [7u8; 32];
         let owner = [9u8; 32];
 
-        let legacy_plaintext_or_invalid_bytes = br#"{"buckets":{"old-bucket":"plaintext-ref"}}"#;
+        let legacy_plaintext_or_invalid_bytes =
+            br#"{\"buckets\":{\"old-bucket\":\"plaintext-ref\"}}"#;
 
-        let catalog = decode_owner_catalog_manifest_bytes(
+        let err = decode_owner_catalog_manifest_bytes(
             &master_key,
             &owner,
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             legacy_plaintext_or_invalid_bytes,
         )
-        .unwrap();
+        .expect_err("owner catalog decrypt failure must fail closed");
 
+        let message = format!("{err:#}");
         assert!(
-            catalog.buckets.is_empty(),
-            "legacy/plaintext owner catalog bytes must be treated as empty on decrypt failure"
+            message.contains("failed to decrypt owner catalog root"),
+            "unexpected error message: {message}"
         );
     }
 
