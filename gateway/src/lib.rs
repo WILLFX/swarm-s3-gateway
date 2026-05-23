@@ -6,6 +6,7 @@ pub mod config;
 pub mod contracts_abi;
 pub mod crypto;
 pub mod manifest;
+pub mod request_limits;
 pub mod routes;
 pub mod s3_response;
 pub mod s3_runtime;

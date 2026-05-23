@@ -53,6 +53,9 @@ jobs:
       - name: Check delegation scope surface
         run: ./scripts/check_delegation_scope_surface.py
 
+      - name: Check request body limit surface
+        run: ./scripts/check_request_body_limit_surface.py
+
       - name: Check SigV4 freshness surface
         run: ./scripts/check_sigv4_freshness_surface.py
 
