@@ -11,8 +11,8 @@ use tracing::debug;
 use crate::{
     contracts_abi::{
         BucketError, decode_exec_result, encode_bucket_create_bucket, encode_bucket_delete_bucket,
-        encode_bucket_update_bucket_manifest_root_for_delete,
-        encode_bucket_update_bucket_manifest_root_for_put,
+        encode_bucket_update_bucket_manifest_root_for_delete_cas,
+        encode_bucket_update_bucket_manifest_root_for_put_cas,
     },
     s3_runtime::api,
     traits::AnchorClient,
@@ -152,30 +152,45 @@ impl AnchorClient for ContractAnchorClient {
     async fn update_bucket_manifest_root_for_put_anchor(
         &self,
         bucket_id: [u8; 32],
+        expected_bucket_manifest_root: String,
         bucket_manifest_root: String,
     ) -> Result<String> {
+        let expected_bucket_manifest_root =
+            decode_swarm_reference_or_empty(&expected_bucket_manifest_root)?;
         let bucket_manifest_root = decode_swarm_reference(&bucket_manifest_root)?;
 
-        let input_data =
-            encode_bucket_update_bucket_manifest_root_for_put(bucket_id, bucket_manifest_root);
+        let input_data = encode_bucket_update_bucket_manifest_root_for_put_cas(
+            bucket_id,
+            expected_bucket_manifest_root,
+            bucket_manifest_root,
+        );
 
-        self.submit_bucket_contract_call(input_data, "bucket::update_bucket_manifest_root_for_put")
-            .await
+        self.submit_bucket_contract_call(
+            input_data,
+            "bucket::update_bucket_manifest_root_for_put_cas",
+        )
+        .await
     }
 
     async fn update_bucket_manifest_root_for_delete_anchor(
         &self,
         bucket_id: [u8; 32],
+        expected_bucket_manifest_root: String,
         bucket_manifest_root: String,
     ) -> Result<String> {
+        let expected_bucket_manifest_root =
+            decode_swarm_reference_or_empty(&expected_bucket_manifest_root)?;
         let bucket_manifest_root = decode_swarm_reference(&bucket_manifest_root)?;
 
-        let input_data =
-            encode_bucket_update_bucket_manifest_root_for_delete(bucket_id, bucket_manifest_root);
+        let input_data = encode_bucket_update_bucket_manifest_root_for_delete_cas(
+            bucket_id,
+            expected_bucket_manifest_root,
+            bucket_manifest_root,
+        );
 
         self.submit_bucket_contract_call(
             input_data,
-            "bucket::update_bucket_manifest_root_for_delete",
+            "bucket::update_bucket_manifest_root_for_delete_cas",
         )
         .await
     }
@@ -186,12 +201,17 @@ impl AnchorClient for ContractAnchorClient {
         bucket_id: [u8; 32],
         _object_key_id: [u8; 32],
         _swarm_ref: String,
+        expected_bucket_manifest_root: String,
         bucket_manifest_root: String,
         _size: u64,
         _etag: [u8; 32],
     ) -> Result<String> {
-        self.update_bucket_manifest_root_for_put_anchor(bucket_id, bucket_manifest_root)
-            .await
+        self.update_bucket_manifest_root_for_put_anchor(
+            bucket_id,
+            expected_bucket_manifest_root,
+            bucket_manifest_root,
+        )
+        .await
     }
 }
 

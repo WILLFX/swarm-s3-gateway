@@ -53,6 +53,9 @@ jobs:
       - name: Check delegation scope surface
         run: ./scripts/check_delegation_scope_surface.py
 
+      - name: Check gateway CAS anchor surface
+        run: ./scripts/check_gateway_cas_anchor_surface.py
+
       - name: Check gateway
         run: cargo check -p gateway
 
