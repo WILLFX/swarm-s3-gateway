@@ -28,6 +28,15 @@ pub trait AnchorClient: Send + Sync {
         owner_catalog_root: String,
     ) -> anyhow::Result<String>;
 
+    async fn create_trustless_bucket_anchor(
+        &self,
+        owner: SubstrateAddress32,
+        bucket_id: [u8; 32],
+        owner_signature: [u8; 64],
+        expected_owner_catalog_root: String,
+        owner_catalog_root: String,
+    ) -> anyhow::Result<String>;
+
     async fn delete_bucket_anchor(
         &self,
         bucket_id: [u8; 32],

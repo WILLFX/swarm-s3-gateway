@@ -158,6 +158,17 @@ impl AnchorClient for RecordingAnchorClient {
         bail!("create_bucket_anchor should not be used by private PUT")
     }
 
+    async fn create_trustless_bucket_anchor(
+        &self,
+        _owner: SubstrateAddress32,
+        _bucket_id: [u8; 32],
+        _owner_signature: [u8; 64],
+        _expected_owner_catalog_root: String,
+        _owner_catalog_root: String,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("create_trustless_bucket_anchor should not be used by these tests")
+    }
+
     async fn delete_bucket_anchor(
         &self,
         _bucket_id: [u8; 32],

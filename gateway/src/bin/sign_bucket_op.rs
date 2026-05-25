@@ -14,11 +14,11 @@ fn decode_32_hex(value: &str, name: &str) -> Result<[u8; 32]> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let op = env::args().nth(1).ok_or_else(|| {
-        anyhow!("usage: sign_bucket_op <create|delete|increment> <bucket> [private|public]")
+        anyhow!("usage: sign_bucket_op <create|create-trustless|delete|increment> <bucket> [private|public]")
     })?;
 
     let bucket = env::args().nth(2).ok_or_else(|| {
-        anyhow!("usage: sign_bucket_op <create|delete|increment> <bucket> [private|public]")
+        anyhow!("usage: sign_bucket_op <create|create-trustless|delete|increment> <bucket> [private|public]")
     })?;
 
     let visibility = env::args().nth(3).unwrap_or_else(|| "public".to_string());
@@ -57,11 +57,12 @@ async fn main() -> Result<()> {
 
     let tag: &[u8] = match op.as_str() {
         "create" => b"s3gw/v1/create_bucket",
+        "create-trustless" => b"s3gw/v1/create_trustless_bucket",
         "delete" => b"s3gw/v1/delete_bucket",
         "increment" => b"s3gw/v1/increment_encryption_version",
         other => {
             return Err(anyhow!(
-                "unsupported op: {other}; use create, delete, or increment"
+                "unsupported op: {other}; use create, create-trustless, delete, or increment"
             ));
         }
     };
@@ -82,6 +83,9 @@ async fn main() -> Result<()> {
     println!("op={op}");
     println!("bucket={bucket}");
     println!("is_private={is_private}");
+    if op == "create-trustless" {
+        println!("bucket_type=trustless-private");
+    }
     println!("owner=0x{}", hex::encode(owner));
     println!("bucket_contract=0x{}", hex::encode(bucket_contract));
     println!("bucket_hash=0x{}", hex::encode(bucket_hash));
