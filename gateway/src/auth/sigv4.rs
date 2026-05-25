@@ -395,6 +395,13 @@ mod tests {
             Ok(None)
         }
 
+        async fn fetch_bucket_type(
+            &self,
+            _bucket_name_hash: [u8; 32],
+        ) -> Result<Option<common::types::ChainBucketType>> {
+            Ok(None)
+        }
+
         async fn fetch_owner_catalog_root(&self, _owner: [u8; 32]) -> anyhow::Result<Vec<u8>> {
             Ok(Vec::new())
         }
