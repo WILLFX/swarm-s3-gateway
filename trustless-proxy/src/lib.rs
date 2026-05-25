@@ -2,6 +2,7 @@ pub mod config;
 pub mod keyring;
 pub mod local_keystore;
 pub mod planner;
+pub mod preflight;
 pub mod recipient_keys;
 pub mod types;
 
@@ -16,6 +17,10 @@ pub use local_keystore::{
 pub use planner::{
     LocalTrustlessStep, PlannerError, RemoteGatewayAction, TrustlessProxyOperation,
     TrustlessRoutePlan, TrustlessRoutePlanner,
+};
+pub use preflight::{
+    PreflightError, TrustlessLocalDecryptPreflight, TrustlessOperationPreflightBuilder,
+    TrustlessPreflightRequest, TrustlessPutPreflight,
 };
 pub use recipient_keys::{
     RecipientEnvelopeBuilder, RecipientKeyError, RecipientKeyRecord, RecipientKeyRequest,
