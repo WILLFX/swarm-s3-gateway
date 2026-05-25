@@ -35,6 +35,13 @@ pub struct ChainBucketRecord {
     pub bucket_manifest_root: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChainBucketType {
+    Public,
+    TrustedGatewayPrivate,
+    TrustlessPrivate,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AwsPrincipal {
     pub access_key_id: String,
