@@ -53,6 +53,9 @@ jobs:
       - name: Check delegation scope surface
         run: ./scripts/check_delegation_scope_surface.py
 
+      - name: Check trustless local proxy scaffold
+        run: ./scripts/check_trustless_local_proxy_scaffold.py
+
       - name: Check trustless private delete-bucket fail-closed
         run: ./scripts/check_trustless_private_delete_bucket_fail_closed.py
 
