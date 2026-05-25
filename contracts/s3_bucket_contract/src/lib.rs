@@ -12,7 +12,7 @@ mod s3_bucket_contract {
         storage::Mapping,
     };
     use s3_contracts_common::{
-        AccountId32, BucketRecord, DelegationEntry, OP_CREATE_BUCKET, OP_DELETE_BUCKET,
+        AccountId32, BucketRecord, BucketType, DelegationEntry, OP_CREATE_BUCKET, OP_DELETE_BUCKET,
         OP_DELETE_OBJECT, OP_PUT_OBJECT,
     };
 
@@ -31,6 +31,7 @@ mod s3_bucket_contract {
         NonceOverflow,
         StaleBucketManifestRoot,
         StaleOwnerCatalogRoot,
+        BucketTypeAlreadyExists,
     }
 
     pub type Result<T> = core::result::Result<T, Error>;
@@ -78,6 +79,7 @@ mod s3_bucket_contract {
     #[ink(storage)]
     pub struct S3BucketContract {
         bucket_map: Mapping<[u8; 32], BucketRecord>,
+        bucket_type_map: Mapping<[u8; 32], BucketType>,
         owner_nonces: Mapping<AccountId32, u64>,
         owner_catalog_roots: Mapping<AccountId32, Vec<u8>>,
         identity_contract: AccountId,
@@ -89,6 +91,7 @@ mod s3_bucket_contract {
         pub fn new(governance: AccountId, identity_contract: AccountId) -> Self {
             Self {
                 bucket_map: Mapping::default(),
+                bucket_type_map: Mapping::default(),
                 owner_nonces: Mapping::default(),
                 owner_catalog_roots: Mapping::default(),
                 identity_contract,
@@ -131,6 +134,8 @@ mod s3_bucket_contract {
             };
 
             self.bucket_map.insert(bucket_name_hash, &record);
+            let bucket_type = Self::bucket_type_from_legacy_privacy(is_private);
+            self.bucket_type_map.insert(bucket_name_hash, &bucket_type);
             self.owner_catalog_roots
                 .insert(owner_bytes, &owner_catalog_root);
             self.bump_owner_nonce(owner_bytes)?;
@@ -186,6 +191,8 @@ mod s3_bucket_contract {
             };
 
             self.bucket_map.insert(bucket_name_hash, &record);
+            let bucket_type = Self::bucket_type_from_legacy_privacy(is_private);
+            self.bucket_type_map.insert(bucket_name_hash, &bucket_type);
             self.owner_catalog_roots
                 .insert(owner_bytes, &owner_catalog_root);
             self.bump_owner_nonce(owner_bytes)?;
@@ -199,6 +206,66 @@ mod s3_bucket_contract {
                 hash: bucket_name_hash,
                 owner,
                 is_private,
+            });
+
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn create_trustless_bucket_cas(
+            &mut self,
+            owner: AccountId,
+            bucket_name_hash: [u8; 32],
+            owner_signature: [u8; 64],
+            expected_owner_catalog_root: Vec<u8>,
+            owner_catalog_root: Vec<u8>,
+        ) -> Result<()> {
+            if self.bucket_map.get(bucket_name_hash).is_some() {
+                return Err(Error::BucketAlreadyExists);
+            }
+
+            if self.bucket_type_map.get(bucket_name_hash).is_some() {
+                return Err(Error::BucketTypeAlreadyExists);
+            }
+
+            let owner_bytes = Self::account_to_bytes(owner);
+            let nonce = self.get_owner_nonce(owner_bytes);
+
+            self.verify_create_trustless_signature(
+                owner_bytes,
+                bucket_name_hash,
+                nonce,
+                owner_signature,
+            )?;
+
+            self.ensure_create_authorized(owner_bytes, self.env().caller())?;
+            self.ensure_owner_catalog_root_matches(owner_bytes, Some(expected_owner_catalog_root))?;
+
+            let record = BucketRecord {
+                owner: owner_bytes,
+                is_private: true,
+                encryption_version: 1,
+                creation_date: self.env().block_timestamp(),
+                bucket_manifest_root: Vec::new(),
+            };
+
+            let bucket_type = BucketType::TrustlessPrivate;
+
+            self.bucket_map.insert(bucket_name_hash, &record);
+            self.bucket_type_map.insert(bucket_name_hash, &bucket_type);
+            self.owner_catalog_roots
+                .insert(owner_bytes, &owner_catalog_root);
+            self.bump_owner_nonce(owner_bytes)?;
+
+            self.env().emit_event(OwnerCatalogRootUpdated {
+                owner: owner_bytes,
+                owner_catalog_root,
+            });
+
+            self.env().emit_event(BucketCreated {
+                hash: bucket_name_hash,
+                owner,
+                is_private: true,
             });
 
             Ok(())
@@ -223,6 +290,7 @@ mod s3_bucket_contract {
             self.ensure_delete_authorized(owner, self.env().caller())?;
 
             self.bucket_map.remove(bucket_name_hash);
+            self.bucket_type_map.remove(bucket_name_hash);
             self.owner_catalog_roots.insert(owner, &owner_catalog_root);
             self.bump_owner_nonce(owner)?;
 
@@ -260,6 +328,7 @@ mod s3_bucket_contract {
             self.ensure_owner_catalog_root_matches(owner, Some(expected_owner_catalog_root))?;
 
             self.bucket_map.remove(bucket_name_hash);
+            self.bucket_type_map.remove(bucket_name_hash);
             self.owner_catalog_roots.insert(owner, &owner_catalog_root);
             self.bump_owner_nonce(owner)?;
 
@@ -379,6 +448,11 @@ mod s3_bucket_contract {
         }
 
         #[ink(message)]
+        pub fn get_bucket_type(&self, bucket_name_hash: [u8; 32]) -> Option<BucketType> {
+            self.bucket_type_map.get(bucket_name_hash)
+        }
+
+        #[ink(message)]
         pub fn get_owner_nonce(&self, owner: AccountId32) -> u64 {
             self.owner_nonces.get(owner).unwrap_or(0)
         }
@@ -406,6 +480,14 @@ mod s3_bucket_contract {
             match self.env().set_code_hash(&new_code_hash) {
                 Ok(()) => Ok(()),
                 Err(_) => Err(Error::UpgradeFailed),
+            }
+        }
+
+        fn bucket_type_from_legacy_privacy(is_private: bool) -> BucketType {
+            if is_private {
+                BucketType::TrustedGatewayPrivate
+            } else {
+                BucketType::Public
             }
         }
 
@@ -568,6 +650,19 @@ mod s3_bucket_contract {
             self.verify_sr25519(owner, &payload, owner_signature)
         }
 
+        fn verify_create_trustless_signature(
+            &self,
+            owner: AccountId32,
+            bucket_name_hash: [u8; 32],
+            owner_nonce: u64,
+            owner_signature: [u8; 64],
+        ) -> Result<()> {
+            let mut payload =
+                self.domain_payload(b"s3gw/v1/create_trustless_bucket", bucket_name_hash);
+            payload.extend_from_slice(&owner_nonce.to_le_bytes());
+            self.verify_sr25519(owner, &payload, owner_signature)
+        }
+
         fn verify_delete_signature(
             &self,
             owner: AccountId32,
@@ -667,6 +762,17 @@ mod s3_bucket_contract {
             payload
         }
 
+        fn create_trustless_payload(
+            contract: &S3BucketContract,
+            bucket_name_hash: [u8; 32],
+            nonce: u64,
+        ) -> Vec<u8> {
+            let mut payload =
+                contract.domain_payload(b"s3gw/v1/create_trustless_bucket", bucket_name_hash);
+            payload.extend_from_slice(&nonce.to_le_bytes());
+            payload
+        }
+
         fn delete_payload(
             contract: &S3BucketContract,
             bucket_name_hash: [u8; 32],
@@ -686,6 +792,158 @@ mod s3_bucket_contract {
                 contract.domain_payload(b"s3gw/v1/increment_encryption_version", bucket_name_hash);
             payload.extend_from_slice(&nonce.to_le_bytes());
             payload
+        }
+
+        #[ink::test]
+        fn legacy_create_bucket_records_public_bucket_type() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner = account_from_pair(&pair);
+            let owner_bytes = account_bytes_from_pair(&pair);
+
+            set_caller(owner);
+
+            let nonce = c.get_owner_nonce(owner_bytes);
+            let sig = pair.sign(&create_payload(&c, hash(1), false, nonce));
+
+            assert_eq!(
+                c.create_bucket(owner, hash(1), false, sig.0, Vec::new()),
+                Ok(())
+            );
+
+            assert_eq!(c.get_bucket_type(hash(1)), Some(BucketType::Public));
+        }
+
+        #[ink::test]
+        fn legacy_private_create_bucket_records_trusted_gateway_private_type() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner = account_from_pair(&pair);
+            let owner_bytes = account_bytes_from_pair(&pair);
+
+            set_caller(owner);
+
+            let nonce = c.get_owner_nonce(owner_bytes);
+            let sig = pair.sign(&create_payload(&c, hash(1), true, nonce));
+
+            assert_eq!(
+                c.create_bucket(owner, hash(1), true, sig.0, Vec::new()),
+                Ok(())
+            );
+
+            assert_eq!(
+                c.get_bucket_type(hash(1)),
+                Some(BucketType::TrustedGatewayPrivate)
+            );
+        }
+
+        #[ink::test]
+        fn create_trustless_bucket_cas_records_trustless_type() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner = account_from_pair(&pair);
+            let owner_bytes = account_bytes_from_pair(&pair);
+
+            set_caller(owner);
+
+            let nonce = c.get_owner_nonce(owner_bytes);
+            let sig = pair.sign(&create_trustless_payload(&c, hash(1), nonce));
+
+            assert_eq!(
+                c.create_trustless_bucket_cas(
+                    owner,
+                    hash(1),
+                    sig.0,
+                    Vec::new(),
+                    b"catalog-v1".to_vec()
+                ),
+                Ok(())
+            );
+
+            let got = c.get_bucket(hash(1));
+            assert!(got.is_some());
+
+            if let Some(record) = got {
+                assert_eq!(record.owner, owner_bytes);
+                assert!(record.is_private);
+                assert_eq!(record.encryption_version, 1);
+            }
+
+            assert_eq!(
+                c.get_bucket_type(hash(1)),
+                Some(BucketType::TrustlessPrivate)
+            );
+            assert_eq!(
+                c.get_owner_catalog_root(owner_bytes),
+                b"catalog-v1".to_vec()
+            );
+        }
+
+        #[ink::test]
+        fn trustless_create_rejects_legacy_create_signature() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner = account_from_pair(&pair);
+            let owner_bytes = account_bytes_from_pair(&pair);
+
+            set_caller(owner);
+
+            let nonce = c.get_owner_nonce(owner_bytes);
+            let legacy_sig = pair.sign(&create_payload(&c, hash(1), true, nonce));
+
+            assert_eq!(
+                c.create_trustless_bucket_cas(
+                    owner,
+                    hash(1),
+                    legacy_sig.0,
+                    Vec::new(),
+                    b"catalog-v1".to_vec()
+                ),
+                Err(Error::InvalidSignature)
+            );
+        }
+
+        #[ink::test]
+        fn delete_bucket_removes_bucket_type() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner = account_from_pair(&pair);
+            let owner_bytes = account_bytes_from_pair(&pair);
+
+            set_caller(owner);
+
+            let create_nonce = c.get_owner_nonce(owner_bytes);
+            let create_sig = pair.sign(&create_payload(&c, hash(1), true, create_nonce));
+
+            assert_eq!(
+                c.create_bucket(owner, hash(1), true, create_sig.0, Vec::new()),
+                Ok(())
+            );
+            assert_eq!(
+                c.get_bucket_type(hash(1)),
+                Some(BucketType::TrustedGatewayPrivate)
+            );
+
+            let delete_nonce = c.get_owner_nonce(owner_bytes);
+            let delete_sig = pair.sign(&delete_payload(&c, hash(1), delete_nonce));
+
+            assert_eq!(c.delete_bucket(hash(1), delete_sig.0, Vec::new()), Ok(()));
+            assert_eq!(c.get_bucket_type(hash(1)), None);
         }
 
         #[ink::test]

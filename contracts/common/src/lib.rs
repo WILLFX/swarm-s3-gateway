@@ -46,6 +46,17 @@ pub struct EncryptionKeyRecord {
     pub updated_at: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, TypeInfo)]
+#[cfg_attr(feature = "std", derive(StorageLayout))]
+pub enum BucketType {
+    #[codec(index = 0)]
+    Public,
+    #[codec(index = 1)]
+    TrustedGatewayPrivate,
+    #[codec(index = 2)]
+    TrustlessPrivate,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, TypeInfo)]
 #[cfg_attr(feature = "std", derive(StorageLayout))]
 pub struct BucketRecord {
