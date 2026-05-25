@@ -355,6 +355,13 @@ impl RegistryClient for ChainRegistryClient {
         self.get_bucket(bucket_name_hash).await
     }
 
+    async fn fetch_bucket_type(
+        &self,
+        bucket_name_hash: [u8; 32],
+    ) -> anyhow::Result<Option<ChainBucketType>> {
+        self.get_bucket_type(bucket_name_hash).await
+    }
+
     async fn fetch_owner_catalog_root(&self, owner: SubstrateAddress32) -> anyhow::Result<Vec<u8>> {
         self.get_owner_catalog_root(owner).await
     }

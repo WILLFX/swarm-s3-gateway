@@ -124,8 +124,8 @@ async fn encrypted_owner_catalog_bytes_do_not_expose_plaintext_bucket_name() -> 
 }
 
 #[tokio::test]
-async fn encrypted_private_bucket_manifest_bytes_do_not_expose_plaintext_object_metadata() -> Result<()>
-{
+async fn encrypted_private_bucket_manifest_bytes_do_not_expose_plaintext_object_metadata()
+-> Result<()> {
     let bee = MockBeeStorage::default();
     let master_key = [11u8; 32];
     let owner: SubstrateAddress32 = [12u8; 32];
@@ -133,7 +133,8 @@ async fn encrypted_private_bucket_manifest_bytes_do_not_expose_plaintext_object_
     let encryption_version = 1;
 
     let object_key = "super-private-object-key-never-plaintext.txt";
-    let object_manifest_reference = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let object_manifest_reference =
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     let content_type = "application/x-s3gw-private-audit";
 
     let object_key_id = [44u8; 32];
@@ -197,8 +198,8 @@ async fn encrypted_private_bucket_manifest_bytes_do_not_expose_plaintext_object_
 }
 
 #[tokio::test]
-async fn encrypted_private_object_manifest_bytes_do_not_expose_plaintext_object_metadata() -> Result<()>
-{
+async fn encrypted_private_object_manifest_bytes_do_not_expose_plaintext_object_metadata()
+-> Result<()> {
     let bee = MockBeeStorage::default();
     let master_key = [21u8; 32];
     let owner: SubstrateAddress32 = [22u8; 32];

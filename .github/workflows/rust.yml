@@ -53,6 +53,9 @@ jobs:
       - name: Check delegation scope surface
         run: ./scripts/check_delegation_scope_surface.py
 
+      - name: Check route bucket type policy foundation
+        run: ./scripts/check_route_bucket_type_policy_foundation.py
+
       - name: Check gateway trustless bucket create route surface
         run: ./scripts/check_gateway_trustless_bucket_create_route_surface.py
 

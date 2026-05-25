@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, Uri};
 use bytes::Bytes;
-use common::types::{AccessKeyHash, ChainRegistryEntry, SubstrateAddress32};
+use common::types::{AccessKeyHash, ChainBucketType, ChainRegistryEntry, SubstrateAddress32};
 use gateway::auth::sigv4::RegistryBackedSigV4Validator;
 use gateway::traits::{RegistryClient, SecretUnwrapper};
 use hmac::{Hmac, Mac};
@@ -34,6 +34,13 @@ impl RegistryClient for MockRegistryClient {
         &self,
         _bucket_name_hash: [u8; 32],
     ) -> anyhow::Result<Option<common::types::ChainBucketRecord>> {
+        Ok(None)
+    }
+
+    async fn fetch_bucket_type(
+        &self,
+        _bucket_name_hash: [u8; 32],
+    ) -> Result<Option<ChainBucketType>> {
         Ok(None)
     }
 

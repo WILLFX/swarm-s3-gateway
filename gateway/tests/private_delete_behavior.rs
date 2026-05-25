@@ -6,7 +6,8 @@ use axum::{
 };
 use bytes::Bytes;
 use common::types::{
-    AccessKeyHash, AwsPrincipal, ChainBucketRecord, ChainRegistryEntry, SubstrateAddress32,
+    AccessKeyHash, AwsPrincipal, ChainBucketRecord, ChainBucketType, ChainRegistryEntry,
+    SubstrateAddress32,
 };
 use gateway::{
     app_state::AppState,
@@ -107,6 +108,13 @@ impl RegistryClient for MockRegistryClient {
 
     async fn fetch_bucket(&self, _bucket_name_hash: [u8; 32]) -> Result<Option<ChainBucketRecord>> {
         Ok(Some(self.bucket.clone()))
+    }
+
+    async fn fetch_bucket_type(
+        &self,
+        _bucket_name_hash: [u8; 32],
+    ) -> Result<Option<ChainBucketType>> {
+        Ok(None)
     }
 
     async fn fetch_owner_catalog_root(&self, _owner: SubstrateAddress32) -> Result<Vec<u8>> {

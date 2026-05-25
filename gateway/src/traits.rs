@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use common::types::{AccessKeyHash, ChainBucketRecord, ChainRegistryEntry, SubstrateAddress32};
+use common::types::{
+    AccessKeyHash, ChainBucketRecord, ChainBucketType, ChainRegistryEntry, SubstrateAddress32,
+};
 
 #[async_trait]
 pub trait RegistryClient: Send + Sync {
@@ -12,6 +14,11 @@ pub trait RegistryClient: Send + Sync {
         &self,
         bucket_name_hash: [u8; 32],
     ) -> anyhow::Result<Option<ChainBucketRecord>>;
+
+    async fn fetch_bucket_type(
+        &self,
+        bucket_name_hash: [u8; 32],
+    ) -> anyhow::Result<Option<ChainBucketType>>;
 
     async fn fetch_owner_catalog_root(&self, owner: SubstrateAddress32) -> anyhow::Result<Vec<u8>>;
 }
