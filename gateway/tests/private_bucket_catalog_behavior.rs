@@ -28,6 +28,9 @@ use std::{
 
 const OWNER_SIGNATURE_HEADER: &str = "x-s3gw-owner-signature";
 const BUCKET_VISIBILITY_HEADER: &str = "x-s3gw-bucket-visibility";
+const BUCKET_TYPE_HEADER: &str = "x-s3gw-bucket-type";
+const EXPECTED_OWNER_CATALOG_ROOT_HEADER: &str = "x-s3gw-expected-owner-catalog-root";
+const OWNER_CATALOG_ROOT_HEADER: &str = "x-s3gw-owner-catalog-root";
 
 #[derive(Default)]
 struct MockBeeStorage {
@@ -142,6 +145,15 @@ struct CreateBucketAnchorRecord {
 }
 
 #[derive(Debug, Clone)]
+struct TrustlessCreateBucketAnchorRecord {
+    owner: SubstrateAddress32,
+    bucket_id: [u8; 32],
+    owner_signature: [u8; 64],
+    expected_owner_catalog_root: String,
+    owner_catalog_root: String,
+}
+
+#[derive(Debug, Clone)]
 struct DeleteBucketAnchorRecord {
     bucket_id: [u8; 32],
     owner_signature: [u8; 64],
@@ -152,12 +164,17 @@ struct DeleteBucketAnchorRecord {
 #[derive(Default)]
 struct RecordingAnchorClient {
     create_call: Mutex<Option<CreateBucketAnchorRecord>>,
+    trustless_create_call: Mutex<Option<TrustlessCreateBucketAnchorRecord>>,
     delete_call: Mutex<Option<DeleteBucketAnchorRecord>>,
 }
 
 impl RecordingAnchorClient {
     fn create_call(&self) -> Option<CreateBucketAnchorRecord> {
         self.create_call.lock().unwrap().clone()
+    }
+
+    fn trustless_create_call(&self) -> Option<TrustlessCreateBucketAnchorRecord> {
+        self.trustless_create_call.lock().unwrap().clone()
     }
 
     fn delete_call(&self) -> Option<DeleteBucketAnchorRecord> {
@@ -190,13 +207,21 @@ impl AnchorClient for RecordingAnchorClient {
 
     async fn create_trustless_bucket_anchor(
         &self,
-        _owner: SubstrateAddress32,
-        _bucket_id: [u8; 32],
-        _owner_signature: [u8; 64],
-        _expected_owner_catalog_root: String,
-        _owner_catalog_root: String,
+        owner: SubstrateAddress32,
+        bucket_id: [u8; 32],
+        owner_signature: [u8; 64],
+        expected_owner_catalog_root: String,
+        owner_catalog_root: String,
     ) -> anyhow::Result<String> {
-        anyhow::bail!("create_trustless_bucket_anchor should not be used by these tests")
+        *self.trustless_create_call.lock().unwrap() = Some(TrustlessCreateBucketAnchorRecord {
+            owner,
+            bucket_id,
+            owner_signature,
+            expected_owner_catalog_root,
+            owner_catalog_root,
+        });
+
+        Ok("mock-create-trustless-bucket-anchor-tx".to_string())
     }
 
     async fn delete_bucket_anchor(
@@ -267,6 +292,26 @@ fn private_create_headers() -> HeaderMap {
     headers.insert(
         BUCKET_VISIBILITY_HEADER,
         HeaderValue::from_static("private"),
+    );
+    headers
+}
+
+fn trustless_create_headers(
+    expected_owner_catalog_root: &str,
+    owner_catalog_root: &str,
+) -> HeaderMap {
+    let mut headers = headers_with_owner_signature();
+    headers.insert(
+        BUCKET_TYPE_HEADER,
+        HeaderValue::from_static("trustless-private"),
+    );
+    headers.insert(
+        EXPECTED_OWNER_CATALOG_ROOT_HEADER,
+        HeaderValue::from_str(expected_owner_catalog_root).unwrap(),
+    );
+    headers.insert(
+        OWNER_CATALOG_ROOT_HEADER,
+        HeaderValue::from_str(owner_catalog_root).unwrap(),
     );
     headers
 }
@@ -407,6 +452,76 @@ async fn private_create_bucket_writes_owner_catalog_and_create_anchor() -> Resul
 
     assert!(updated_catalog.buckets.contains_key(&existing_bucket));
     assert!(updated_catalog.buckets.contains_key(&bucket));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn trustless_create_bucket_uses_client_supplied_catalog_roots_without_bee_writes()
+-> Result<()> {
+    let master_service_key = [42u8; 32];
+    let owner = [7u8; 32];
+    let bucket = "trustless-bucket".to_string();
+    let expected_owner_catalog_root = hex::encode([11u8; 32]);
+    let owner_catalog_root = hex::encode([12u8; 32]);
+
+    let bee = Arc::new(MockBeeStorage::default());
+    let anchor = Arc::new(RecordingAnchorClient::default());
+
+    let state = build_state(
+        bee.clone(),
+        anchor.clone(),
+        MockRegistryClient {
+            bucket: None,
+            owner_catalog_root: vec![11u8; 32],
+        },
+        master_service_key,
+    );
+
+    let principal = AwsPrincipal {
+        access_key_id: "test-access-key".to_string(),
+        owner,
+    };
+
+    let response = create_bucket::handle(
+        Path(bucket.clone()),
+        Extension(principal),
+        State(state),
+        trustless_create_headers(&expected_owner_catalog_root, &owner_catalog_root),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert!(
+        anchor.create_call().is_none(),
+        "trustless bucket create must not call legacy create_bucket_anchor"
+    );
+
+    let trustless_anchor = anchor
+        .trustless_create_call()
+        .expect("trustless bucket create must call create_trustless_bucket_anchor");
+
+    assert_eq!(trustless_anchor.owner, owner);
+    assert_eq!(
+        trustless_anchor.bucket_id,
+        bucket_name_hash(&owner, &bucket)
+    );
+    assert_eq!(trustless_anchor.owner_signature, owner_signature());
+    assert_eq!(
+        trustless_anchor.expected_owner_catalog_root,
+        expected_owner_catalog_root
+    );
+    assert_eq!(trustless_anchor.owner_catalog_root, owner_catalog_root);
+
+    assert!(
+        bee.get_calls().is_empty(),
+        "trustless create must not read/decrypt an owner catalog through the gateway"
+    );
+    assert!(
+        bee.put_calls().is_empty(),
+        "trustless create must not write/encrypt an owner catalog through the gateway"
+    );
 
     Ok(())
 }
