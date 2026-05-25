@@ -62,6 +62,9 @@ jobs:
       - name: Check trustless local proxy recipient keys surface
         run: ./scripts/check_trustless_local_proxy_recipient_keys_surface.py
 
+      - name: Check trustless local proxy keystore surface
+        run: ./scripts/check_trustless_local_proxy_keystore_surface.py
+
       - name: Check trustless private delete-bucket fail-closed
         run: ./scripts/check_trustless_private_delete_bucket_fail_closed.py
 
