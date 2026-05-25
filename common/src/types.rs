@@ -17,6 +17,16 @@ pub struct ChainRegistryEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainEncryptionKeyRecord {
+    pub owner: SubstrateAddress32,
+    pub public_key: Vec<u8>,
+    pub key_type: Vec<u8>,
+    pub key_version: u32,
+    pub enabled: bool,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainBucketRecord {
     pub owner: SubstrateAddress32,
     pub is_private: bool,
