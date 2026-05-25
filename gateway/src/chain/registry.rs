@@ -1,6 +1,9 @@
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
-use common::types::{AccessKeyHash, ChainBucketRecord, ChainRegistryEntry, SubstrateAddress32};
+use common::types::{
+    AccessKeyHash, ChainBucketRecord, ChainEncryptionKeyRecord, ChainRegistryEntry,
+    SubstrateAddress32,
+};
 use subxt::{
     OnlineClient, PolkadotConfig,
     utils::{AccountId32, H256},
@@ -9,9 +12,10 @@ use subxt_signer::sr25519::Keypair;
 
 use crate::{
     contracts_abi::{
-        BucketRecord as ContractBucketRecord, IdentityRecord as ContractIdentityRecord,
-        decode_query_result, encode_bucket_get_bucket, encode_bucket_get_owner_catalog_root,
-        encode_bucket_get_owner_nonce, encode_identity_get_identity,
+        BucketRecord as ContractBucketRecord, EncryptionKeyRecord as ContractEncryptionKeyRecord,
+        IdentityRecord as ContractIdentityRecord, decode_query_result, encode_bucket_get_bucket,
+        encode_bucket_get_owner_catalog_root, encode_bucket_get_owner_nonce,
+        encode_identity_get_encryption_key, encode_identity_get_identity,
     },
     s3_runtime::api,
     traits::RegistryClient,
@@ -116,6 +120,36 @@ impl ChainRegistryClient {
             nonce: entry.nonce,
             key_version: entry.key_version,
             enabled: entry.enabled,
+        }))
+    }
+
+    pub async fn get_encryption_key(
+        &self,
+        owner: SubstrateAddress32,
+    ) -> Result<Option<ChainEncryptionKeyRecord>> {
+        let contract = self
+            .get_identity_contract_address()
+            .await?
+            .ok_or_else(|| anyhow!("identity contract address is not set in S3Contracts pallet"))?;
+
+        let return_data = self
+            .dry_run_contract_read(
+                contract,
+                encode_identity_get_encryption_key(owner),
+                "identity::get_encryption_key",
+            )
+            .await?;
+
+        let maybe_record: Option<ContractEncryptionKeyRecord> =
+            decode_contract_query(&return_data, "identity::get_encryption_key")?;
+
+        Ok(maybe_record.map(|record| ChainEncryptionKeyRecord {
+            owner: record.owner,
+            public_key: record.public_key,
+            key_type: record.key_type,
+            key_version: record.key_version,
+            enabled: record.enabled,
+            updated_at: record.updated_at,
         }))
     }
 

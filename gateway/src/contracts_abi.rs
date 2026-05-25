@@ -23,6 +23,16 @@ pub struct DelegationEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+pub struct EncryptionKeyRecord {
+    pub owner: AccountId32,
+    pub public_key: Vec<u8>,
+    pub key_type: Vec<u8>,
+    pub key_version: u32,
+    pub enabled: bool,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct BucketRecord {
     pub owner: AccountId32,
     pub is_private: bool,
@@ -91,6 +101,7 @@ pub const IDENTITY_GET_IDENTITY_SELECTOR: [u8; 4] = [0xd4, 0xd3, 0x67, 0x1f];
 pub const IDENTITY_IS_AUTHORIZED_SELECTOR: [u8; 4] = [0x96, 0xb0, 0x45, 0x3e];
 pub const IDENTITY_IS_DELEGATE_AUTHORIZED_SELECTOR: [u8; 4] = [0x2b, 0xf5, 0x04, 0x89];
 pub const IDENTITY_GET_DELEGATION_SELECTOR: [u8; 4] = [0x0d, 0xb9, 0xc9, 0x10];
+pub const IDENTITY_GET_ENCRYPTION_KEY_SELECTOR: [u8; 4] = [0xb1, 0xde, 0x34, 0x37];
 pub const IDENTITY_GRANT_DELEGATION_SELECTOR: [u8; 4] = [0x49, 0x58, 0x95, 0xff];
 pub const IDENTITY_REVOKE_DELEGATION_SELECTOR: [u8; 4] = [0xb2, 0x30, 0x56, 0x5f];
 
@@ -152,6 +163,12 @@ pub fn encode_identity_get_delegation(owner: AccountId32, delegate: AccountId32)
     let mut data = IDENTITY_GET_DELEGATION_SELECTOR.to_vec();
     owner.encode_to(&mut data);
     delegate.encode_to(&mut data);
+    data
+}
+
+pub fn encode_identity_get_encryption_key(owner: AccountId32) -> Vec<u8> {
+    let mut data = IDENTITY_GET_ENCRYPTION_KEY_SELECTOR.to_vec();
+    owner.encode_to(&mut data);
     data
 }
 
@@ -317,4 +334,35 @@ pub fn decode_exec_result<T: Decode, E: Decode>(
 ) -> Result<ExecResult<T, E>, parity_scale_codec::Error> {
     let mut input = &data[..];
     ExecResult::<T, E>::decode(&mut input)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_identity_get_encryption_key_uses_metadata_selector() {
+        let owner = [7u8; 32];
+        let encoded = encode_identity_get_encryption_key(owner);
+
+        assert_eq!(&encoded[..4], &IDENTITY_GET_ENCRYPTION_KEY_SELECTOR);
+        assert_eq!(&encoded[..4], &[0xb1, 0xde, 0x34, 0x37]);
+    }
+
+    #[test]
+    fn encryption_key_record_scale_roundtrip_works() {
+        let record = EncryptionKeyRecord {
+            owner: [1u8; 32],
+            public_key: vec![2, 3, 4],
+            key_type: b"aws-esdk-custom-v1".to_vec(),
+            key_version: 3,
+            enabled: true,
+            updated_at: 42,
+        };
+
+        let encoded = record.encode();
+        let decoded = EncryptionKeyRecord::decode(&mut &encoded[..]).unwrap();
+
+        assert_eq!(decoded, record);
+    }
 }
