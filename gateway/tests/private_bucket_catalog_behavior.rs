@@ -102,6 +102,7 @@ impl BeeStorage for MockBeeStorage {
 #[derive(Clone)]
 struct MockRegistryClient {
     bucket: Option<ChainBucketRecord>,
+    bucket_type: Option<ChainBucketType>,
     owner_catalog_root: Vec<u8>,
 }
 
@@ -119,7 +120,7 @@ impl RegistryClient for MockRegistryClient {
         &self,
         _bucket_name_hash: [u8; 32],
     ) -> Result<Option<ChainBucketType>> {
-        Ok(None)
+        Ok(self.bucket_type)
     }
 
     async fn fetch_owner_catalog_root(&self, _owner: SubstrateAddress32) -> Result<Vec<u8>> {
@@ -403,6 +404,7 @@ async fn private_create_bucket_writes_owner_catalog_and_create_anchor() -> Resul
         anchor.clone(),
         MockRegistryClient {
             bucket: None,
+            bucket_type: None,
             owner_catalog_root: hex::decode(&initial_root)?,
         },
         master_service_key,
@@ -481,6 +483,7 @@ async fn trustless_create_bucket_uses_client_supplied_catalog_roots_without_bee_
         anchor.clone(),
         MockRegistryClient {
             bucket: None,
+            bucket_type: None,
             owner_catalog_root: vec![11u8; 32],
         },
         master_service_key,
@@ -535,6 +538,66 @@ async fn trustless_create_bucket_uses_client_supplied_catalog_roots_without_bee_
 }
 
 #[tokio::test]
+async fn trustless_private_delete_bucket_fails_before_gateway_manifest_or_catalog_writes()
+-> Result<()> {
+    let master_service_key = [42u8; 32];
+    let owner = [7u8; 32];
+    let bucket = "trustless-bucket".to_string();
+
+    let bee = Arc::new(MockBeeStorage::default());
+    let anchor = Arc::new(RecordingAnchorClient::default());
+
+    let chain_bucket = ChainBucketRecord {
+        owner,
+        is_private: true,
+        encryption_version: 1,
+        creation_date: 0,
+        bucket_manifest_root: vec![9u8; 32],
+    };
+
+    let state = build_state(
+        bee.clone(),
+        anchor.clone(),
+        MockRegistryClient {
+            bucket: Some(chain_bucket),
+            bucket_type: Some(ChainBucketType::TrustlessPrivate),
+            owner_catalog_root: vec![11u8; 32],
+        },
+        master_service_key,
+    );
+
+    let principal = AwsPrincipal {
+        access_key_id: "test-access-key".to_string(),
+        owner,
+    };
+
+    let response = delete_bucket::handle(
+        Path(bucket),
+        Extension(principal),
+        State(state),
+        headers_with_owner_signature(),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    assert!(
+        bee.get_calls().is_empty(),
+        "trustless private bucket DELETE must fail before gateway reads encrypted bucket or owner catalog manifests"
+    );
+    assert!(
+        bee.put_calls().is_empty(),
+        "trustless private bucket DELETE must fail before gateway writes owner catalog manifests"
+    );
+    assert!(
+        anchor.delete_call().is_none(),
+        "trustless private bucket DELETE must fail before gateway anchors bucket deletion"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn private_delete_empty_bucket_removes_owner_catalog_entry_and_delete_anchor() -> Result<()> {
     let master_service_key = [42u8; 32];
     let owner = [7u8; 32];
@@ -571,6 +634,7 @@ async fn private_delete_empty_bucket_removes_owner_catalog_entry_and_delete_anch
         anchor.clone(),
         MockRegistryClient {
             bucket: Some(chain_bucket),
+            bucket_type: Some(ChainBucketType::TrustedGatewayPrivate),
             owner_catalog_root: hex::decode(&initial_root)?,
         },
         master_service_key,
@@ -685,6 +749,7 @@ async fn private_delete_non_empty_bucket_rejects_before_catalog_update_or_delete
         anchor.clone(),
         MockRegistryClient {
             bucket: Some(chain_bucket),
+            bucket_type: Some(ChainBucketType::TrustedGatewayPrivate),
             owner_catalog_root: Vec::new(),
         },
         master_service_key,
