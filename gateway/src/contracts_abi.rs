@@ -70,6 +70,16 @@ pub enum IdentityError {
     Error6,
     #[codec(index = 7)]
     Error7,
+    #[codec(index = 8)]
+    Error8,
+    #[codec(index = 9)]
+    Error9,
+    #[codec(index = 10)]
+    Error10,
+    #[codec(index = 11)]
+    Error11,
+    #[codec(index = 12)]
+    Error12,
 }
 
 /// Gateway-side labels only.
@@ -102,6 +112,9 @@ pub const IDENTITY_IS_AUTHORIZED_SELECTOR: [u8; 4] = [0x96, 0xb0, 0x45, 0x3e];
 pub const IDENTITY_IS_DELEGATE_AUTHORIZED_SELECTOR: [u8; 4] = [0x2b, 0xf5, 0x04, 0x89];
 pub const IDENTITY_GET_DELEGATION_SELECTOR: [u8; 4] = [0x0d, 0xb9, 0xc9, 0x10];
 pub const IDENTITY_GET_ENCRYPTION_KEY_SELECTOR: [u8; 4] = [0xb1, 0xde, 0x34, 0x37];
+pub const IDENTITY_REGISTER_ENCRYPTION_KEY_SELECTOR: [u8; 4] = [0x89, 0x85, 0x48, 0x3c];
+pub const IDENTITY_ROTATE_ENCRYPTION_KEY_SELECTOR: [u8; 4] = [0x1b, 0x11, 0x67, 0xbb];
+pub const IDENTITY_DISABLE_ENCRYPTION_KEY_SELECTOR: [u8; 4] = [0xc7, 0x7a, 0xba, 0x06];
 pub const IDENTITY_GRANT_DELEGATION_SELECTOR: [u8; 4] = [0x49, 0x58, 0x95, 0xff];
 pub const IDENTITY_REVOKE_DELEGATION_SELECTOR: [u8; 4] = [0xb2, 0x30, 0x56, 0x5f];
 
@@ -170,6 +183,24 @@ pub fn encode_identity_get_encryption_key(owner: AccountId32) -> Vec<u8> {
     let mut data = IDENTITY_GET_ENCRYPTION_KEY_SELECTOR.to_vec();
     owner.encode_to(&mut data);
     data
+}
+
+pub fn encode_identity_register_encryption_key(public_key: Vec<u8>, key_type: Vec<u8>) -> Vec<u8> {
+    let mut data = IDENTITY_REGISTER_ENCRYPTION_KEY_SELECTOR.to_vec();
+    public_key.encode_to(&mut data);
+    key_type.encode_to(&mut data);
+    data
+}
+
+pub fn encode_identity_rotate_encryption_key(public_key: Vec<u8>, key_type: Vec<u8>) -> Vec<u8> {
+    let mut data = IDENTITY_ROTATE_ENCRYPTION_KEY_SELECTOR.to_vec();
+    public_key.encode_to(&mut data);
+    key_type.encode_to(&mut data);
+    data
+}
+
+pub fn encode_identity_disable_encryption_key() -> Vec<u8> {
+    IDENTITY_DISABLE_ENCRYPTION_KEY_SELECTOR.to_vec()
 }
 
 pub fn encode_identity_grant_delegation(
@@ -339,6 +370,19 @@ pub fn decode_exec_result<T: Decode, E: Decode>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encode_identity_encryption_key_write_selectors_match_metadata() {
+        let register =
+            encode_identity_register_encryption_key(vec![1, 2, 3], b"aws-esdk-custom-v1".to_vec());
+        let rotate =
+            encode_identity_rotate_encryption_key(vec![4, 5, 6], b"aws-esdk-custom-v2".to_vec());
+        let disable = encode_identity_disable_encryption_key();
+
+        assert_eq!(&register[..4], &[0x89, 0x85, 0x48, 0x3c]);
+        assert_eq!(&rotate[..4], &[0x1b, 0x11, 0x67, 0xbb]);
+        assert_eq!(&disable[..4], &[0xc7, 0x7a, 0xba, 0x06]);
+    }
 
     #[test]
     fn encode_identity_get_encryption_key_uses_metadata_selector() {
