@@ -10,6 +10,7 @@ required_files = [
     "trustless-proxy/src/keyring.rs",
     "trustless-proxy/src/local_keystore.rs",
     "trustless-proxy/src/planner.rs",
+    "trustless-proxy/src/preflight.rs",
     "trustless-proxy/src/recipient_keys.rs",
     "trustless-proxy/src/types.rs",
 ]
