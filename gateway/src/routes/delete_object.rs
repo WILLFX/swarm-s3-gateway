@@ -3,7 +3,7 @@ use axum::{
     extract::{Extension, Path, State},
     response::Response,
 };
-use common::types::{AwsPrincipal, ChainBucketRecord};
+use common::types::{AwsPrincipal, ChainBucketRecord, ChainBucketType};
 
 use crate::{
     app_state::AppState,
@@ -38,15 +38,38 @@ pub async fn handle(
     };
 
     if chain_bucket.is_private {
-        return handle_private_delete_object(
-            &state,
-            &principal,
-            &chain_bucket,
-            bucket_id,
-            &bucket,
-            &key,
-        )
-        .await;
+        let bucket_type = match state.registry_client.fetch_bucket_type(bucket_id).await {
+            Ok(value) => value,
+            Err(err) => return chain_error_response(err),
+        };
+
+        match bucket_type {
+            Some(ChainBucketType::TrustlessPrivate) => {
+                return S3ErrorResponse::new(S3ErrorKind::InvalidRequest)
+                    .with_message(
+                        "trustless private buckets cannot be deleted by the gateway; use the local trustless proxy",
+                    )
+                    .with_resource(format!("/{bucket}/{key}"))
+                    .into_response();
+            }
+            Some(ChainBucketType::Public) => {
+                return S3ErrorResponse::new(S3ErrorKind::InternalError)
+                    .with_message("bucket type is public but bucket record is marked private")
+                    .with_resource(format!("/{bucket}/{key}"))
+                    .into_response();
+            }
+            Some(ChainBucketType::TrustedGatewayPrivate) | None => {
+                return handle_private_delete_object(
+                    &state,
+                    &principal,
+                    &chain_bucket,
+                    bucket_id,
+                    &bucket,
+                    &key,
+                )
+                .await;
+            }
+        }
     }
 
     let mut bucket_manifest = match read_bucket_manifest_from_root(&state, &chain_bucket).await {

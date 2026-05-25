@@ -22,7 +22,7 @@ use axum::{
     http::{HeaderMap, header},
     response::Response,
 };
-use common::types::{AwsPrincipal, ChainBucketRecord};
+use common::types::{AwsPrincipal, ChainBucketRecord, ChainBucketType};
 use reqwest::Error as ReqwestError;
 use sha2::{Digest, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -74,21 +74,44 @@ pub async fn handle(
     };
 
     if chain_bucket.is_private {
-        return handle_private_put_object(
-            &state,
-            &principal,
-            &chain_bucket,
-            &bucket,
-            &key,
-            body,
-            content_type,
-            last_modified,
-            size,
-            etag,
-            etag_bytes,
-            bucket_id,
-        )
-        .await;
+        let bucket_type = match state.registry_client.fetch_bucket_type(bucket_id).await {
+            Ok(value) => value,
+            Err(err) => return chain_error_response(err),
+        };
+
+        match bucket_type {
+            Some(ChainBucketType::TrustlessPrivate) => {
+                return S3ErrorResponse::new(S3ErrorKind::InvalidRequest)
+                    .with_message(
+                        "trustless private buckets cannot be written by the gateway; use the local trustless proxy",
+                    )
+                    .with_resource(format!("/{bucket}/{key}"))
+                    .into_response();
+            }
+            Some(ChainBucketType::Public) => {
+                return S3ErrorResponse::new(S3ErrorKind::InternalError)
+                    .with_message("bucket type is public but bucket record is marked private")
+                    .with_resource(format!("/{bucket}/{key}"))
+                    .into_response();
+            }
+            Some(ChainBucketType::TrustedGatewayPrivate) | None => {
+                return handle_private_put_object(
+                    &state,
+                    &principal,
+                    &chain_bucket,
+                    &bucket,
+                    &key,
+                    body,
+                    content_type,
+                    last_modified,
+                    size,
+                    etag,
+                    etag_bytes,
+                    bucket_id,
+                )
+                .await;
+            }
+        }
     }
 
     let object_key_id = sha256_32(key.as_bytes());

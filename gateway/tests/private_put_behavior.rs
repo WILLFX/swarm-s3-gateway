@@ -90,6 +90,7 @@ impl BeeStorage for MockBeeStorage {
 
 struct MockRegistryClient {
     bucket: ChainBucketRecord,
+    bucket_type: Option<ChainBucketType>,
 }
 
 #[async_trait]
@@ -106,7 +107,7 @@ impl RegistryClient for MockRegistryClient {
         &self,
         _bucket_name_hash: [u8; 32],
     ) -> Result<Option<ChainBucketType>> {
-        Ok(None)
+        Ok(self.bucket_type)
     }
 
     async fn fetch_owner_catalog_root(&self, _owner: SubstrateAddress32) -> Result<Vec<u8>> {
@@ -246,6 +247,7 @@ fn build_state(
 ) -> AppState {
     let registry: Arc<dyn RegistryClient> = Arc::new(MockRegistryClient {
         bucket: chain_bucket,
+        bucket_type: Some(ChainBucketType::TrustedGatewayPrivate),
     });
     let unwrapper: Arc<dyn SecretUnwrapper> = Arc::new(MockSecretUnwrapper);
     let bee_client: Arc<dyn BeeStorage> = bee;
@@ -419,6 +421,84 @@ async fn private_put_encrypts_payload_writes_manifests_anchors_and_hides_swarm_r
     assert_eq!(
         object_manifest_record.manifest.encryption_version,
         encryption_version
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn trustless_private_put_fails_before_gateway_payload_manifest_or_anchor_writes() -> Result<()>
+{
+    let master_service_key = [42u8; 32];
+    let owner = [7u8; 32];
+    let bucket = "trustless-bucket".to_string();
+    let key = "secret.txt".to_string();
+    let body = Bytes::from_static(b"trustless private put payload");
+    let encryption_version = 1u32;
+
+    let chain_bucket = ChainBucketRecord {
+        owner,
+        is_private: true,
+        encryption_version,
+        creation_date: 0,
+        bucket_manifest_root: vec![9u8; 32],
+    };
+
+    let bee = Arc::new(MockBeeStorage::default());
+    let anchor = Arc::new(RecordingAnchorClient::default());
+
+    let registry: Arc<dyn RegistryClient> = Arc::new(MockRegistryClient {
+        bucket: chain_bucket,
+        bucket_type: Some(ChainBucketType::TrustlessPrivate),
+    });
+    let unwrapper: Arc<dyn SecretUnwrapper> = Arc::new(MockSecretUnwrapper);
+    let bee_client: Arc<dyn BeeStorage> = bee.clone();
+    let anchor_client: Arc<dyn AnchorClient> = anchor.clone();
+
+    let sigv4_validator = Arc::new(RegistryBackedSigV4Validator {
+        registry: registry.clone(),
+        unwrapper: unwrapper.clone(),
+        expected_service: "s3".to_string(),
+        expected_region: Some("us-east-1".to_string()),
+        allow_unsigned_payload: false,
+    });
+
+    let state = AppState {
+        sigv4_validator,
+        registry_client: registry,
+        secret_unwrapper: unwrapper,
+        bee_client,
+        anchor_client,
+        master_service_key,
+        identity_contract_address: None,
+        bucket_contract_address: None,
+    };
+
+    let principal = AwsPrincipal {
+        access_key_id: "test-access-key".to_string(),
+        owner,
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+
+    let response = put_object::handle(
+        Path((bucket, key)),
+        Extension(principal),
+        State(state),
+        headers,
+        body,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        bee.put_calls().is_empty(),
+        "trustless private PUT must fail before gateway writes encrypted payloads or manifests"
+    );
+    assert!(
+        anchor.submitted().is_none(),
+        "trustless private PUT must fail before gateway anchors object state"
     );
 
     Ok(())
