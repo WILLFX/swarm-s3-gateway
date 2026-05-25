@@ -53,6 +53,9 @@ jobs:
       - name: Check delegation scope surface
         run: ./scripts/check_delegation_scope_surface.py
 
+      - name: Check identity encryption key registry surface
+        run: ./scripts/check_identity_encryption_key_registry_surface.py
+
       - name: Check trustless private access model
         run: ./scripts/check_trustless_private_access_model.py
 

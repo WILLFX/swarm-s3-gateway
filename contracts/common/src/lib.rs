@@ -37,6 +37,17 @@ pub struct DelegationEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, TypeInfo)]
 #[cfg_attr(feature = "std", derive(StorageLayout))]
+pub struct EncryptionKeyRecord {
+    pub owner: AccountId32,
+    pub public_key: Vec<u8>,
+    pub key_type: Vec<u8>,
+    pub key_version: u32,
+    pub enabled: bool,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, TypeInfo)]
+#[cfg_attr(feature = "std", derive(StorageLayout))]
 pub struct BucketRecord {
     pub owner: AccountId32,
     pub is_private: bool,
@@ -63,4 +74,7 @@ pub trait S3IdentityRead {
 
     #[ink(message)]
     fn get_delegation(&self, owner: AccountId32, delegate: AccountId32) -> Option<DelegationEntry>;
+
+    #[ink(message)]
+    fn get_encryption_key(&self, owner: AccountId32) -> Option<EncryptionKeyRecord>;
 }

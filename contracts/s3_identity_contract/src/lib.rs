@@ -4,7 +4,9 @@
 mod s3_identity_contract {
     use ink::prelude::vec::Vec;
     use ink::storage::Mapping;
-    use s3_contracts_common::{AccountId32, DelegationEntry, IdentityRecord, OP_ALL};
+    use s3_contracts_common::{
+        AccountId32, DelegationEntry, EncryptionKeyRecord, IdentityRecord, OP_ALL,
+    };
 
     #[derive(scale::Encode, scale::Decode, scale_info::TypeInfo, Debug, PartialEq, Eq)]
     pub enum Error {
@@ -16,6 +18,11 @@ mod s3_identity_contract {
         InsufficientScope,
         UpgradeFailed,
         KeyVersionOverflow,
+        EncryptionKeyAlreadyExists,
+        EncryptionKeyNotFound,
+        EncryptionKeyAlreadyDisabled,
+        EncryptionPublicKeyEmpty,
+        EncryptionKeyTypeEmpty,
     }
 
     pub type Result<T> = core::result::Result<T, Error>;
@@ -24,6 +31,7 @@ mod s3_identity_contract {
     pub struct S3IdentityContract {
         access_key_map: Mapping<[u8; 32], IdentityRecord>,
         delegation_map: Mapping<(AccountId32, AccountId32), DelegationEntry>,
+        encryption_key_map: Mapping<AccountId32, EncryptionKeyRecord>,
         governance: AccountId,
     }
 
@@ -33,6 +41,7 @@ mod s3_identity_contract {
             Self {
                 access_key_map: Mapping::default(),
                 delegation_map: Mapping::default(),
+                encryption_key_map: Mapping::default(),
                 governance,
             }
         }
@@ -198,6 +207,88 @@ mod s3_identity_contract {
         }
 
         #[ink(message)]
+        pub fn register_encryption_key(
+            &mut self,
+            public_key: Vec<u8>,
+            key_type: Vec<u8>,
+        ) -> Result<()> {
+            Self::ensure_non_empty_encryption_key_material(&public_key, &key_type)?;
+
+            let owner = Self::account_to_bytes(self.env().caller());
+
+            if self.encryption_key_map.get(owner).is_some() {
+                return Err(Error::EncryptionKeyAlreadyExists);
+            }
+
+            let record = EncryptionKeyRecord {
+                owner,
+                public_key,
+                key_type,
+                key_version: 1,
+                enabled: true,
+                updated_at: self.env().block_timestamp(),
+            };
+
+            self.encryption_key_map.insert(owner, &record);
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn rotate_encryption_key(
+            &mut self,
+            public_key: Vec<u8>,
+            key_type: Vec<u8>,
+        ) -> Result<()> {
+            Self::ensure_non_empty_encryption_key_material(&public_key, &key_type)?;
+
+            let owner = Self::account_to_bytes(self.env().caller());
+
+            let mut record = match self.encryption_key_map.get(owner) {
+                Some(record) => record,
+                None => return Err(Error::EncryptionKeyNotFound),
+            };
+
+            let next_version = match record.key_version.checked_add(1) {
+                Some(v) => v,
+                None => return Err(Error::KeyVersionOverflow),
+            };
+
+            record.public_key = public_key;
+            record.key_type = key_type;
+            record.key_version = next_version;
+            record.enabled = true;
+            record.updated_at = self.env().block_timestamp();
+
+            self.encryption_key_map.insert(owner, &record);
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn disable_encryption_key(&mut self) -> Result<()> {
+            let owner = Self::account_to_bytes(self.env().caller());
+
+            let mut record = match self.encryption_key_map.get(owner) {
+                Some(record) => record,
+                None => return Err(Error::EncryptionKeyNotFound),
+            };
+
+            if !record.enabled {
+                return Err(Error::EncryptionKeyAlreadyDisabled);
+            }
+
+            record.enabled = false;
+            record.updated_at = self.env().block_timestamp();
+
+            self.encryption_key_map.insert(owner, &record);
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn get_encryption_key(&self, owner: AccountId32) -> Option<EncryptionKeyRecord> {
+            self.encryption_key_map.get(owner)
+        }
+
+        #[ink(message)]
         pub fn governance(&self) -> AccountId {
             self.governance
         }
@@ -216,6 +307,21 @@ mod s3_identity_contract {
                 Ok(()) => Ok(()),
                 Err(_) => Err(Error::UpgradeFailed),
             }
+        }
+
+        fn ensure_non_empty_encryption_key_material(
+            public_key: &[u8],
+            key_type: &[u8],
+        ) -> Result<()> {
+            if public_key.is_empty() {
+                return Err(Error::EncryptionPublicKeyEmpty);
+            }
+
+            if key_type.is_empty() {
+                return Err(Error::EncryptionKeyTypeEmpty);
+            }
+
+            Ok(())
         }
 
         fn ensure_governance(&self, caller: AccountId) -> Result<()> {
@@ -425,7 +531,10 @@ mod s3_identity_contract {
                 account_bytes(2),
                 s3_contracts_common::OP_PUT_OBJECT
             ));
-            assert!(c.get_delegation(account_bytes(1), account_bytes(2)).is_some());
+            assert!(
+                c.get_delegation(account_bytes(1), account_bytes(2))
+                    .is_some()
+            );
 
             assert_eq!(c.revoke_delegation(account(2)), Ok(()));
 
@@ -434,7 +543,10 @@ mod s3_identity_contract {
                 account_bytes(2),
                 s3_contracts_common::OP_PUT_OBJECT
             ));
-            assert!(c.get_delegation(account_bytes(1), account_bytes(2)).is_none());
+            assert!(
+                c.get_delegation(account_bytes(1), account_bytes(2))
+                    .is_none()
+            );
         }
 
         #[ink::test]
@@ -530,6 +642,171 @@ mod s3_identity_contract {
             assert_eq!(
                 c.rotate_key(hash, vec![9, 9], [8; 12]),
                 Err(Error::NotAuthorized)
+            );
+        }
+
+        #[ink::test]
+        fn register_encryption_key_sets_caller_record() {
+            let governance = account(9);
+            let mut c = S3IdentityContract::new(governance);
+
+            set_timestamp(123);
+            set_caller(account(1));
+
+            assert_eq!(
+                c.register_encryption_key(vec![1, 2, 3], b"aws-esdk-custom-v1".to_vec()),
+                Ok(())
+            );
+
+            let got = c.get_encryption_key(account_bytes(1));
+            assert!(got.is_some());
+
+            if let Some(record) = got {
+                assert_eq!(record.owner, account_bytes(1));
+                assert_eq!(record.public_key, vec![1, 2, 3]);
+                assert_eq!(record.key_type, b"aws-esdk-custom-v1".to_vec());
+                assert_eq!(record.key_version, 1);
+                assert!(record.enabled);
+                assert_eq!(record.updated_at, 123);
+            }
+        }
+
+        #[ink::test]
+        fn register_encryption_key_rejects_duplicate() {
+            let governance = account(9);
+            let mut c = S3IdentityContract::new(governance);
+
+            set_caller(account(1));
+
+            assert_eq!(
+                c.register_encryption_key(vec![1], b"aws-esdk-custom-v1".to_vec()),
+                Ok(())
+            );
+
+            assert_eq!(
+                c.register_encryption_key(vec![2], b"aws-esdk-custom-v1".to_vec()),
+                Err(Error::EncryptionKeyAlreadyExists)
+            );
+        }
+
+        #[ink::test]
+        fn register_encryption_key_rejects_empty_material() {
+            let governance = account(9);
+            let mut c = S3IdentityContract::new(governance);
+
+            set_caller(account(1));
+
+            assert_eq!(
+                c.register_encryption_key(Vec::new(), b"aws-esdk-custom-v1".to_vec()),
+                Err(Error::EncryptionPublicKeyEmpty)
+            );
+
+            assert_eq!(
+                c.register_encryption_key(vec![1], Vec::new()),
+                Err(Error::EncryptionKeyTypeEmpty)
+            );
+        }
+
+        #[ink::test]
+        fn rotate_encryption_key_increments_version_and_reenables() {
+            let governance = account(9);
+            let mut c = S3IdentityContract::new(governance);
+
+            set_timestamp(100);
+            set_caller(account(1));
+
+            assert_eq!(
+                c.register_encryption_key(vec![1], b"aws-esdk-custom-v1".to_vec()),
+                Ok(())
+            );
+
+            assert_eq!(c.disable_encryption_key(), Ok(()));
+
+            set_timestamp(200);
+            assert_eq!(
+                c.rotate_encryption_key(vec![2, 3], b"aws-esdk-custom-v2".to_vec()),
+                Ok(())
+            );
+
+            let got = c.get_encryption_key(account_bytes(1));
+            assert!(got.is_some());
+
+            if let Some(record) = got {
+                assert_eq!(record.public_key, vec![2, 3]);
+                assert_eq!(record.key_type, b"aws-esdk-custom-v2".to_vec());
+                assert_eq!(record.key_version, 2);
+                assert!(record.enabled);
+                assert_eq!(record.updated_at, 200);
+            }
+        }
+
+        #[ink::test]
+        fn rotate_encryption_key_rejects_missing_record() {
+            let governance = account(9);
+            let mut c = S3IdentityContract::new(governance);
+
+            set_caller(account(1));
+
+            assert_eq!(
+                c.rotate_encryption_key(vec![1], b"aws-esdk-custom-v1".to_vec()),
+                Err(Error::EncryptionKeyNotFound)
+            );
+        }
+
+        #[ink::test]
+        fn disable_encryption_key_marks_record_disabled() {
+            let governance = account(9);
+            let mut c = S3IdentityContract::new(governance);
+
+            set_timestamp(100);
+            set_caller(account(1));
+
+            assert_eq!(
+                c.register_encryption_key(vec![1], b"aws-esdk-custom-v1".to_vec()),
+                Ok(())
+            );
+
+            set_timestamp(150);
+            assert_eq!(c.disable_encryption_key(), Ok(()));
+
+            let got = c.get_encryption_key(account_bytes(1));
+            assert!(got.is_some());
+
+            if let Some(record) = got {
+                assert!(!record.enabled);
+                assert_eq!(record.updated_at, 150);
+            }
+
+            assert_eq!(
+                c.disable_encryption_key(),
+                Err(Error::EncryptionKeyAlreadyDisabled)
+            );
+        }
+
+        #[ink::test]
+        fn encryption_key_records_are_account_scoped() {
+            let governance = account(9);
+            let mut c = S3IdentityContract::new(governance);
+
+            set_caller(account(1));
+            assert_eq!(
+                c.register_encryption_key(vec![1], b"aws-esdk-custom-v1".to_vec()),
+                Ok(())
+            );
+
+            set_caller(account(2));
+            assert_eq!(
+                c.register_encryption_key(vec![2], b"aws-esdk-custom-v1".to_vec()),
+                Ok(())
+            );
+
+            assert_eq!(
+                c.get_encryption_key(account_bytes(1)).unwrap().public_key,
+                vec![1]
+            );
+            assert_eq!(
+                c.get_encryption_key(account_bytes(2)).unwrap().public_key,
+                vec![2]
             );
         }
 
