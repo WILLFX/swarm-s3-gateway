@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use common::types::{
-    AccessKeyHash, ChainBucketRecord, ChainEncryptionKeyRecord, ChainRegistryEntry,
-    SubstrateAddress32,
+    AccessKeyHash, ChainBucketRecord, ChainBucketType, ChainEncryptionKeyRecord,
+    ChainRegistryEntry, SubstrateAddress32,
 };
 use subxt::{
     OnlineClient, PolkadotConfig,
@@ -12,10 +12,12 @@ use subxt_signer::sr25519::Keypair;
 
 use crate::{
     contracts_abi::{
-        BucketRecord as ContractBucketRecord, EncryptionKeyRecord as ContractEncryptionKeyRecord,
+        BucketRecord as ContractBucketRecord, BucketType as ContractBucketType,
+        EncryptionKeyRecord as ContractEncryptionKeyRecord,
         IdentityRecord as ContractIdentityRecord, decode_query_result, encode_bucket_get_bucket,
-        encode_bucket_get_owner_catalog_root, encode_bucket_get_owner_nonce,
-        encode_identity_get_encryption_key, encode_identity_get_identity,
+        encode_bucket_get_bucket_type, encode_bucket_get_owner_catalog_root,
+        encode_bucket_get_owner_nonce, encode_identity_get_encryption_key,
+        encode_identity_get_identity,
     },
     s3_runtime::api,
     traits::RegistryClient,
@@ -182,6 +184,29 @@ impl ChainRegistryClient {
         }))
     }
 
+    pub async fn get_bucket_type(
+        &self,
+        bucket_name_hash: [u8; 32],
+    ) -> Result<Option<ChainBucketType>> {
+        let contract = self
+            .get_bucket_contract_address()
+            .await?
+            .ok_or_else(|| anyhow!("bucket contract address is not set in S3Contracts pallet"))?;
+
+        let return_data = self
+            .dry_run_contract_read(
+                contract,
+                encode_bucket_get_bucket_type(bucket_name_hash),
+                "bucket::get_bucket_type",
+            )
+            .await?;
+
+        let maybe_bucket_type: Option<ContractBucketType> =
+            decode_contract_query(&return_data, "bucket::get_bucket_type")?;
+
+        Ok(maybe_bucket_type.map(chain_bucket_type_from_contract))
+    }
+
     pub async fn get_owner_catalog_root(&self, owner: SubstrateAddress32) -> Result<Vec<u8>> {
         let contract = self
             .get_bucket_contract_address()
@@ -332,6 +357,14 @@ impl RegistryClient for ChainRegistryClient {
 
     async fn fetch_owner_catalog_root(&self, owner: SubstrateAddress32) -> anyhow::Result<Vec<u8>> {
         self.get_owner_catalog_root(owner).await
+    }
+}
+
+fn chain_bucket_type_from_contract(bucket_type: ContractBucketType) -> ChainBucketType {
+    match bucket_type {
+        ContractBucketType::Public => ChainBucketType::Public,
+        ContractBucketType::TrustedGatewayPrivate => ChainBucketType::TrustedGatewayPrivate,
+        ContractBucketType::TrustlessPrivate => ChainBucketType::TrustlessPrivate,
     }
 }
 

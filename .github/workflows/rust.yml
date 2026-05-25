@@ -53,6 +53,9 @@ jobs:
       - name: Check delegation scope surface
         run: ./scripts/check_delegation_scope_surface.py
 
+      - name: Check gateway bucket type surface
+        run: ./scripts/check_gateway_bucket_type_surface.py
+
       - name: Check bucket type contract surface
         run: ./scripts/check_bucket_type_contract_surface.py
 

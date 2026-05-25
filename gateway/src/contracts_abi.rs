@@ -41,6 +41,16 @@ pub struct BucketRecord {
     pub bucket_manifest_root: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
+pub enum BucketType {
+    #[codec(index = 0)]
+    Public,
+    #[codec(index = 1)]
+    TrustedGatewayPrivate,
+    #[codec(index = 2)]
+    TrustlessPrivate,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub enum InkLangError {
     #[codec(index = 1)]
@@ -119,6 +129,7 @@ pub const IDENTITY_GRANT_DELEGATION_SELECTOR: [u8; 4] = [0x49, 0x58, 0x95, 0xff]
 pub const IDENTITY_REVOKE_DELEGATION_SELECTOR: [u8; 4] = [0xb2, 0x30, 0x56, 0x5f];
 
 pub const BUCKET_GET_BUCKET_SELECTOR: [u8; 4] = [0x6c, 0x5d, 0xca, 0xd3];
+pub const BUCKET_GET_BUCKET_TYPE_SELECTOR: [u8; 4] = [0x82, 0xc3, 0xd9, 0x39];
 pub const BUCKET_GET_OWNER_NONCE_SELECTOR: [u8; 4] = [0x7a, 0x1c, 0x13, 0x7b];
 pub const BUCKET_GET_OWNER_CATALOG_ROOT_SELECTOR: [u8; 4] = [0x41, 0xe6, 0xc9, 0x81];
 pub const BUCKET_CREATE_BUCKET_SELECTOR: [u8; 4] = [0xbb, 0xb9, 0xf7, 0x40];
@@ -297,6 +308,12 @@ pub fn encode_bucket_get_bucket(bucket_name_hash: BucketNameHash) -> Vec<u8> {
     data
 }
 
+pub fn encode_bucket_get_bucket_type(bucket_name_hash: BucketNameHash) -> Vec<u8> {
+    let mut data = BUCKET_GET_BUCKET_TYPE_SELECTOR.to_vec();
+    bucket_name_hash.encode_to(&mut data);
+    data
+}
+
 pub fn encode_bucket_get_owner_nonce(owner: AccountId32) -> Vec<u8> {
     let mut data = BUCKET_GET_OWNER_NONCE_SELECTOR.to_vec();
     owner.encode_to(&mut data);
@@ -370,6 +387,35 @@ pub fn decode_exec_result<T: Decode, E: Decode>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encode_bucket_get_bucket_type_uses_metadata_selector() {
+        let bucket = [9u8; 32];
+        let encoded = encode_bucket_get_bucket_type(bucket);
+
+        assert_eq!(&encoded[..4], &BUCKET_GET_BUCKET_TYPE_SELECTOR);
+        assert_eq!(&encoded[..4], &[0x82, 0xc3, 0xd9, 0x39]);
+    }
+
+    #[test]
+    fn bucket_type_scale_discriminants_match_contract() {
+        assert_eq!(BucketType::Public.encode(), vec![0]);
+        assert_eq!(BucketType::TrustedGatewayPrivate.encode(), vec![1]);
+        assert_eq!(BucketType::TrustlessPrivate.encode(), vec![2]);
+
+        assert_eq!(
+            BucketType::decode(&mut &[0u8][..]).unwrap(),
+            BucketType::Public
+        );
+        assert_eq!(
+            BucketType::decode(&mut &[1u8][..]).unwrap(),
+            BucketType::TrustedGatewayPrivate
+        );
+        assert_eq!(
+            BucketType::decode(&mut &[2u8][..]).unwrap(),
+            BucketType::TrustlessPrivate
+        );
+    }
 
     #[test]
     fn encode_identity_encryption_key_write_selectors_match_metadata() {
