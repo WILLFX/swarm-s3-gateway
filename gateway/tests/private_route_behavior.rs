@@ -381,6 +381,43 @@ async fn private_get_decrypts_payload_and_omits_swarm_ref_header() -> Result<()>
 }
 
 #[tokio::test]
+async fn trustless_private_head_fails_before_gateway_manifest_or_payload_reads() -> Result<()> {
+    let mut fixture = private_fixture().await?;
+
+    let chain_bucket = ChainBucketRecord {
+        owner: fixture.principal.owner,
+        is_private: true,
+        encryption_version: fixture.encryption_version,
+        creation_date: 0,
+        bucket_manifest_root: vec![9u8; 32],
+    };
+
+    let registry: Arc<dyn RegistryClient> = Arc::new(MockRegistryClient {
+        bucket: chain_bucket,
+        bucket_type: Some(ChainBucketType::TrustlessPrivate),
+    });
+
+    fixture.state.registry_client = registry;
+
+    let response = head_object::handle(
+        Path((fixture.bucket.clone(), fixture.key.clone())),
+        Extension(fixture.principal.clone()),
+        State(fixture.state.clone()),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let calls = fixture.bee.get_calls();
+    assert!(
+        calls.is_empty(),
+        "trustless private HEAD must fail before gateway reads encrypted manifests or payloads"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn private_head_reads_metadata_but_not_payload_and_omits_swarm_ref_header() -> Result<()> {
     let fixture = private_fixture().await?;
 
@@ -403,6 +440,49 @@ async fn private_head_reads_metadata_but_not_payload_and_omits_swarm_ref_header(
     assert!(
         !calls.contains(&fixture.encrypted_payload_reference),
         "private HEAD must not fetch encrypted payload bytes"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn trustless_private_list_fails_before_gateway_manifest_reads() -> Result<()> {
+    let mut fixture = private_fixture().await?;
+
+    let chain_bucket = ChainBucketRecord {
+        owner: fixture.principal.owner,
+        is_private: true,
+        encryption_version: fixture.encryption_version,
+        creation_date: 0,
+        bucket_manifest_root: vec![9u8; 32],
+    };
+
+    let registry: Arc<dyn RegistryClient> = Arc::new(MockRegistryClient {
+        bucket: chain_bucket,
+        bucket_type: Some(ChainBucketType::TrustlessPrivate),
+    });
+
+    fixture.state.registry_client = registry;
+
+    let response = list_objects_v2::handle(
+        Path(fixture.bucket.clone()),
+        Query(ListObjectsV2Query {
+            list_type: Some(2),
+            prefix: None,
+            max_keys: Some(1000),
+            continuation_token: None,
+        }),
+        Extension(fixture.principal.clone()),
+        State(fixture.state.clone()),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let calls = fixture.bee.get_calls();
+    assert!(
+        calls.is_empty(),
+        "trustless private LIST must fail before gateway reads encrypted bucket manifests"
     );
 
     Ok(())

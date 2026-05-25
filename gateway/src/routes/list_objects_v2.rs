@@ -3,7 +3,7 @@ use axum::{
     extract::{Extension, Path, Query, State},
     response::Response,
 };
-use common::types::{AwsPrincipal, ChainBucketRecord};
+use common::types::{AwsPrincipal, ChainBucketRecord, ChainBucketType};
 use serde::Deserialize;
 
 use crate::{
@@ -58,23 +58,46 @@ pub async fn handle(
     let max_keys = query.max_keys.unwrap_or(1000);
 
     let mut objects = if chain_bucket.is_private {
-        match load_private_objects_from_anchored_bucket(
-            &state,
-            &principal,
-            &bucket,
-            &chain_bucket,
-            &prefix,
-        )
-        .await
-        {
-            Ok(objects) => objects,
-            Err(err) => {
-                return S3ErrorResponse::new(S3ErrorKind::InternalError)
-                    .with_message(format!(
-                        "failed to load private anchored bucket listing: {err}"
-                    ))
+        let bucket_type = match state.registry_client.fetch_bucket_type(bucket_id).await {
+            Ok(value) => value,
+            Err(err) => return chain_error_response(err),
+        };
+
+        match bucket_type {
+            Some(ChainBucketType::TrustlessPrivate) => {
+                return S3ErrorResponse::new(S3ErrorKind::InvalidRequest)
+                    .with_message(
+                        "trustless private buckets cannot be listed by the gateway; use the local trustless proxy",
+                    )
                     .with_resource(format!("/{bucket}"))
                     .into_response();
+            }
+            Some(ChainBucketType::Public) => {
+                return S3ErrorResponse::new(S3ErrorKind::InternalError)
+                    .with_message("bucket type is public but bucket record is marked private")
+                    .with_resource(format!("/{bucket}"))
+                    .into_response();
+            }
+            Some(ChainBucketType::TrustedGatewayPrivate) | None => {
+                match load_private_objects_from_anchored_bucket(
+                    &state,
+                    &principal,
+                    &bucket,
+                    &chain_bucket,
+                    &prefix,
+                )
+                .await
+                {
+                    Ok(objects) => objects,
+                    Err(err) => {
+                        return S3ErrorResponse::new(S3ErrorKind::InternalError)
+                            .with_message(format!(
+                                "failed to load private anchored bucket listing: {err}"
+                            ))
+                            .with_resource(format!("/{bucket}"))
+                            .into_response();
+                    }
+                }
             }
         }
     } else {
