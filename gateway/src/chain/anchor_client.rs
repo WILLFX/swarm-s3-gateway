@@ -11,7 +11,8 @@ use tracing::debug;
 use crate::{
     contracts_abi::{
         BucketError, decode_exec_result, encode_bucket_create_bucket_cas,
-        encode_bucket_delete_bucket_cas, encode_bucket_update_bucket_manifest_root_for_delete_cas,
+        encode_bucket_create_trustless_bucket_cas, encode_bucket_delete_bucket_cas,
+        encode_bucket_update_bucket_manifest_root_for_delete_cas,
         encode_bucket_update_bucket_manifest_root_for_put_cas,
     },
     s3_runtime::api,
@@ -135,6 +136,30 @@ impl AnchorClient for ContractAnchorClient {
         );
 
         self.submit_bucket_contract_call(input_data, "bucket::create_bucket_cas")
+            .await
+    }
+
+    async fn create_trustless_bucket_anchor(
+        &self,
+        owner: SubstrateAddress32,
+        bucket_id: [u8; 32],
+        owner_signature: [u8; 64],
+        expected_owner_catalog_root: String,
+        owner_catalog_root: String,
+    ) -> Result<String> {
+        let expected_owner_catalog_root =
+            decode_swarm_reference_or_empty(&expected_owner_catalog_root)?;
+        let owner_catalog_root = decode_swarm_reference_or_empty(&owner_catalog_root)?;
+
+        let input_data = encode_bucket_create_trustless_bucket_cas(
+            owner,
+            bucket_id,
+            owner_signature,
+            expected_owner_catalog_root,
+            owner_catalog_root,
+        );
+
+        self.submit_bucket_contract_call(input_data, "bucket::create_trustless_bucket_cas")
             .await
     }
 

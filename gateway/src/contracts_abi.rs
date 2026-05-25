@@ -135,6 +135,7 @@ pub const BUCKET_GET_OWNER_CATALOG_ROOT_SELECTOR: [u8; 4] = [0x41, 0xe6, 0xc9, 0
 pub const BUCKET_CREATE_BUCKET_SELECTOR: [u8; 4] = [0xbb, 0xb9, 0xf7, 0x40];
 pub const BUCKET_DELETE_BUCKET_SELECTOR: [u8; 4] = [0x36, 0x5e, 0x58, 0xd9];
 pub const BUCKET_CREATE_BUCKET_CAS_SELECTOR: [u8; 4] = [0x7d, 0xe5, 0x66, 0x94];
+pub const BUCKET_CREATE_TRUSTLESS_BUCKET_CAS_SELECTOR: [u8; 4] = [0x0e, 0xe0, 0x6e, 0x35];
 pub const BUCKET_DELETE_BUCKET_CAS_SELECTOR: [u8; 4] = [0x35, 0x3d, 0x92, 0xb3];
 pub const BUCKET_INCREMENT_ENCRYPTION_VERSION_SELECTOR: [u8; 4] = [0x55, 0xb8, 0x5e, 0xd6];
 pub const BUCKET_UPDATE_BUCKET_MANIFEST_ROOT_FOR_PUT_SELECTOR: [u8; 4] = [0x5c, 0x0b, 0x7e, 0xab];
@@ -278,6 +279,22 @@ pub fn encode_bucket_create_bucket_cas(
     data
 }
 
+pub fn encode_bucket_create_trustless_bucket_cas(
+    owner: AccountId32,
+    bucket_name_hash: BucketNameHash,
+    owner_signature: [u8; 64],
+    expected_owner_catalog_root: Vec<u8>,
+    owner_catalog_root: Vec<u8>,
+) -> Vec<u8> {
+    let mut data = BUCKET_CREATE_TRUSTLESS_BUCKET_CAS_SELECTOR.to_vec();
+    owner.encode_to(&mut data);
+    bucket_name_hash.encode_to(&mut data);
+    owner_signature.encode_to(&mut data);
+    expected_owner_catalog_root.encode_to(&mut data);
+    owner_catalog_root.encode_to(&mut data);
+    data
+}
+
 pub fn encode_bucket_delete_bucket_cas(
     bucket_name_hash: BucketNameHash,
     owner_signature: [u8; 64],
@@ -387,6 +404,24 @@ pub fn decode_exec_result<T: Decode, E: Decode>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encode_bucket_create_trustless_bucket_cas_uses_metadata_selector() {
+        let owner = [1u8; 32];
+        let bucket = [2u8; 32];
+        let signature = [3u8; 64];
+
+        let encoded = encode_bucket_create_trustless_bucket_cas(
+            owner,
+            bucket,
+            signature,
+            Vec::new(),
+            b"catalog-v1".to_vec(),
+        );
+
+        assert_eq!(&encoded[..4], &BUCKET_CREATE_TRUSTLESS_BUCKET_CAS_SELECTOR);
+        assert_eq!(&encoded[..4], &[0x0e, 0xe0, 0x6e, 0x35]);
+    }
 
     #[test]
     fn encode_bucket_get_bucket_type_uses_metadata_selector() {
