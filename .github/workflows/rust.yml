@@ -53,6 +53,9 @@ jobs:
       - name: Check delegation scope surface
         run: ./scripts/check_delegation_scope_surface.py
 
+      - name: Check trustless private PUT/DELETE fail-closed
+        run: ./scripts/check_trustless_private_put_delete_fail_closed.py
+
       - name: Check trustless private HEAD/LIST fail-closed
         run: ./scripts/check_trustless_private_head_list_fail_closed.py
 

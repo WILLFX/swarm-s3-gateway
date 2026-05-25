@@ -98,6 +98,7 @@ impl BeeStorage for MockBeeStorage {
 
 struct MockRegistryClient {
     bucket: ChainBucketRecord,
+    bucket_type: Option<ChainBucketType>,
 }
 
 #[async_trait]
@@ -114,7 +115,7 @@ impl RegistryClient for MockRegistryClient {
         &self,
         _bucket_name_hash: [u8; 32],
     ) -> Result<Option<ChainBucketType>> {
-        Ok(None)
+        Ok(self.bucket_type)
     }
 
     async fn fetch_owner_catalog_root(&self, _owner: SubstrateAddress32) -> Result<Vec<u8>> {
@@ -328,6 +329,7 @@ async fn private_delete_fixture() -> Result<PrivateDeleteFixture> {
 
     let registry: Arc<dyn RegistryClient> = Arc::new(MockRegistryClient {
         bucket: chain_bucket,
+        bucket_type: Some(ChainBucketType::TrustedGatewayPrivate),
     });
     let unwrapper: Arc<dyn SecretUnwrapper> = Arc::new(MockSecretUnwrapper);
     let bee_client: Arc<dyn BeeStorage> = bee.clone();
@@ -447,6 +449,54 @@ async fn private_delete_removes_entry_writes_manifest_and_uses_delete_anchor() -
         .expect("non-deleted object entry must remain");
 
     assert_eq!(kept_entry.object_key, fixture.keep_key);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn trustless_private_delete_fails_before_gateway_manifest_or_anchor_writes() -> Result<()> {
+    let mut fixture = private_delete_fixture().await?;
+
+    let chain_bucket = ChainBucketRecord {
+        owner: fixture.owner,
+        is_private: true,
+        encryption_version: fixture.encryption_version,
+        creation_date: 0,
+        bucket_manifest_root: hex::decode(&fixture.bucket_manifest_reference)?,
+    };
+
+    let registry: Arc<dyn RegistryClient> = Arc::new(MockRegistryClient {
+        bucket: chain_bucket,
+        bucket_type: Some(ChainBucketType::TrustlessPrivate),
+    });
+
+    fixture.state.registry_client = registry;
+
+    let response = delete_object::handle(
+        Path((fixture.bucket.clone(), fixture.delete_key.clone())),
+        Extension(fixture.principal.clone()),
+        State(fixture.state.clone()),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        fixture.bee.get_calls().is_empty(),
+        "trustless private DELETE must fail before gateway reads encrypted bucket manifests"
+    );
+    assert!(
+        fixture.bee.put_calls().is_empty(),
+        "trustless private DELETE must fail before gateway writes replacement bucket manifests"
+    );
+    assert!(
+        fixture.anchor.delete_call().is_none(),
+        "trustless private DELETE must fail before gateway anchors delete state"
+    );
+    assert_eq!(
+        fixture.anchor.put_anchor_calls(),
+        0,
+        "trustless private DELETE must not use put anchor path"
+    );
 
     Ok(())
 }
