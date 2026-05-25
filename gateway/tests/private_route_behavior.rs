@@ -94,6 +94,7 @@ impl BeeStorage for MockBeeStorage {
 
 struct MockRegistryClient {
     bucket: ChainBucketRecord,
+    bucket_type: Option<ChainBucketType>,
 }
 
 #[async_trait]
@@ -110,7 +111,7 @@ impl RegistryClient for MockRegistryClient {
         &self,
         _bucket_name_hash: [u8; 32],
     ) -> Result<Option<ChainBucketType>> {
-        Ok(None)
+        Ok(self.bucket_type)
     }
 
     async fn fetch_owner_catalog_root(&self, _owner: SubstrateAddress32) -> Result<Vec<u8>> {
@@ -308,6 +309,7 @@ async fn private_fixture() -> Result<PrivateFixture> {
 
     let registry: Arc<dyn RegistryClient> = Arc::new(MockRegistryClient {
         bucket: chain_bucket,
+        bucket_type: Some(ChainBucketType::TrustedGatewayPrivate),
     });
     let unwrapper: Arc<dyn SecretUnwrapper> = Arc::new(MockSecretUnwrapper);
     let anchor_client: Arc<dyn AnchorClient> = Arc::new(MockAnchorClient);
@@ -442,6 +444,43 @@ async fn private_list_reads_bucket_manifest_only_and_omits_swarm_ref_header() ->
     assert!(
         !calls.contains(&fixture.encrypted_payload_reference),
         "private ListObjectsV2 must not fetch encrypted payload bytes"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn trustless_private_get_fails_before_gateway_manifest_or_payload_reads() -> Result<()> {
+    let mut fixture = private_fixture().await?;
+
+    let chain_bucket = ChainBucketRecord {
+        owner: fixture.principal.owner,
+        is_private: true,
+        encryption_version: fixture.encryption_version,
+        creation_date: 0,
+        bucket_manifest_root: vec![9u8; 32],
+    };
+
+    let registry: Arc<dyn RegistryClient> = Arc::new(MockRegistryClient {
+        bucket: chain_bucket,
+        bucket_type: Some(ChainBucketType::TrustlessPrivate),
+    });
+
+    fixture.state.registry_client = registry;
+
+    let response = get_object::handle(
+        Path((fixture.bucket.clone(), fixture.key.clone())),
+        Extension(fixture.principal.clone()),
+        State(fixture.state.clone()),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let calls = fixture.bee.get_calls();
+    assert!(
+        calls.is_empty(),
+        "trustless private GET must fail before gateway reads encrypted manifests or payloads"
     );
 
     Ok(())
