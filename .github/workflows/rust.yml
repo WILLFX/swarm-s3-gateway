@@ -53,6 +53,9 @@ jobs:
       - name: Check delegation scope surface
         run: ./scripts/check_delegation_scope_surface.py
 
+      - name: Check identity encryption key CLI surface
+        run: ./scripts/check_identity_encryption_key_cli_surface.py
+
       - name: Check gateway encryption key registry read surface
         run: ./scripts/check_gateway_encryption_key_registry_read_surface.py
 
