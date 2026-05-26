@@ -3,6 +3,7 @@ pub mod config;
 pub mod encryption;
 pub mod execution_coordinator;
 pub mod gateway_boundary;
+pub mod handler;
 pub mod keyring;
 pub mod local_keystore;
 pub mod manifest;
@@ -37,6 +38,10 @@ pub use execution_coordinator::{
 pub use gateway_boundary::{
     CiphertextGatewayBoundary, CiphertextGatewayBoundaryError, CiphertextGatewayRequest,
     CiphertextGatewayResponse,
+};
+pub use handler::{
+    LocalTrustlessHandler, LocalTrustlessHandlerCompletion, LocalTrustlessHandlerError,
+    LocalTrustlessHandlerPreparedResponse,
 };
 pub use keyring::{
     KeyringError, TrustlessRecipientKeyring, UnimplementedTrustlessRecipientKeyring,
