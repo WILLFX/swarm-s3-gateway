@@ -11,6 +11,7 @@ pub mod preflight;
 pub mod recipient_keys;
 pub mod references;
 pub mod remote_gateway;
+pub mod s3_surface;
 pub mod types;
 
 pub use aws_esdk::{
@@ -61,6 +62,10 @@ pub use references::{
 };
 pub use remote_gateway::{
     RemoteGatewayClientError, TrustlessRemoteGatewayClient, TrustlessRemoteGatewayExecutor,
+};
+pub use s3_surface::{
+    LocalS3Operation, LocalS3Request, LocalS3Response, LocalS3RouteIntent, LocalS3Surface,
+    LocalS3SurfaceError,
 };
 pub use types::{
     Hex32, RecipientEncryptionKey, RecipientEnvelopeContext, SubstrateAccountId,
