@@ -4,6 +4,7 @@ pub mod gateway_boundary;
 pub mod keyring;
 pub mod local_keystore;
 pub mod manifest;
+pub mod operations;
 pub mod planner;
 pub mod preflight;
 pub mod recipient_keys;
@@ -30,6 +31,10 @@ pub use manifest::{
     TrustlessManifestCipher, TrustlessManifestEntry, TrustlessManifestError,
     TrustlessManifestListResult, TrustlessManifestMutation, TrustlessManifestRead,
     TrustlessManifestWrite,
+};
+pub use operations::{
+    TrustlessDeleteOperationInput, TrustlessDeleteOperationPlan, TrustlessOperationAssembler,
+    TrustlessOperationError, TrustlessPutOperationInput, TrustlessPutOperationPlan,
 };
 pub use planner::{
     LocalTrustlessStep, PlannerError, RemoteGatewayAction, TrustlessProxyOperation,
