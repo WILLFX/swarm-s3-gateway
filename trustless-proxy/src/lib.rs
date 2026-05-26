@@ -1,5 +1,6 @@
 pub mod config;
 pub mod encryption;
+pub mod gateway_boundary;
 pub mod keyring;
 pub mod local_keystore;
 pub mod planner;
@@ -11,6 +12,10 @@ pub use config::{ConfigError, TrustlessProxyConfig};
 pub use encryption::{
     TrustlessDecryptRequest, TrustlessDecryptResult, TrustlessEncryptRequest,
     TrustlessEncryptResult, TrustlessEncryptionBoundary, TrustlessEncryptionError,
+};
+pub use gateway_boundary::{
+    CiphertextGatewayBoundary, CiphertextGatewayBoundaryError, CiphertextGatewayRequest,
+    CiphertextGatewayResponse,
 };
 pub use keyring::{
     KeyringError, TrustlessRecipientKeyring, UnimplementedTrustlessRecipientKeyring,
