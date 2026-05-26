@@ -10,6 +10,7 @@ pub mod planner;
 pub mod preflight;
 pub mod recipient_keys;
 pub mod references;
+pub mod remote_gateway;
 pub mod types;
 
 pub use aws_esdk::{
@@ -57,6 +58,9 @@ pub use recipient_keys::{
 pub use references::{
     EncryptedManifestReference, TrustlessObjectReference, TrustlessObjectReferenceInput,
     TrustlessReferenceError, TrustlessReferenceModel, TrustlessRemoteObjectReference,
+};
+pub use remote_gateway::{
+    RemoteGatewayClientError, TrustlessRemoteGatewayClient, TrustlessRemoteGatewayExecutor,
 };
 pub use types::{
     Hex32, RecipientEncryptionKey, RecipientEnvelopeContext, SubstrateAccountId,
