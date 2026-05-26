@@ -18,6 +18,7 @@ pub mod request_adapter;
 pub mod request_context;
 pub mod response_adapter;
 pub mod router;
+pub mod runtime;
 pub mod s3_surface;
 pub mod service;
 pub mod types;
@@ -97,6 +98,10 @@ pub use response_adapter::{
 pub use router::{
     TrustlessExecutionStage, TrustlessLocalOperationRoute, TrustlessLocalOperationRouter,
     TrustlessRouterError,
+};
+pub use runtime::{
+    LocalTrustlessRuntime, LocalTrustlessRuntimeCompletion, LocalTrustlessRuntimeError,
+    LocalTrustlessRuntimePhase, LocalTrustlessRuntimePreparedResponse,
 };
 pub use s3_surface::{
     LocalS3Operation, LocalS3Request, LocalS3Response, LocalS3RouteIntent, LocalS3Surface,
