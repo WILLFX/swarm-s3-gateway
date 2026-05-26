@@ -116,6 +116,9 @@ jobs:
       - name: Check trustless local proxy handler surface
         run: ./scripts/check_trustless_local_proxy_handler_surface.py
 
+      - name: Check trustless local proxy runtime surface
+        run: ./scripts/check_trustless_local_proxy_runtime_surface.py
+
       - name: Check trustless private delete-bucket fail-closed
         run: ./scripts/check_trustless_private_delete_bucket_fail_closed.py
 
