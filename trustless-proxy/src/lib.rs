@@ -6,6 +6,7 @@ pub mod keyring;
 pub mod local_keystore;
 pub mod manifest;
 pub mod operations;
+pub mod pipeline;
 pub mod planner;
 pub mod preflight;
 pub mod recipient_keys;
@@ -45,6 +46,9 @@ pub use manifest::{
 pub use operations::{
     TrustlessDeleteOperationInput, TrustlessDeleteOperationPlan, TrustlessOperationAssembler,
     TrustlessOperationError, TrustlessPutOperationInput, TrustlessPutOperationPlan,
+};
+pub use pipeline::{
+    TrustlessLocalPipeline, TrustlessPipelineError, TrustlessPipelineInput, TrustlessPipelinePlan,
 };
 pub use planner::{
     LocalTrustlessStep, PlannerError, RemoteGatewayAction, TrustlessProxyOperation,
