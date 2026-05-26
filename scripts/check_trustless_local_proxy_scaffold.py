@@ -12,6 +12,7 @@ required_files = [
     "trustless-proxy/src/execution_coordinator.rs",
     "trustless-proxy/src/gateway_boundary.rs",
     "trustless-proxy/src/handler.rs",
+    "trustless-proxy/src/http_mapping.rs",
     "trustless-proxy/src/keyring.rs",
     "trustless-proxy/src/local_keystore.rs",
     "trustless-proxy/src/manifest.rs",
