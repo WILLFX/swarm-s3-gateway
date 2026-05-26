@@ -4,7 +4,7 @@ use crate::local_keystore::{
     LocalKeyRequest, LocalKeystoreError, LocalKeystoreResolver, LocalPrivateKeySelection,
     LocalPrivateKeySelector,
 };
-use crate::planner::{LocalTrustlessStep, PlannerError, TrustlessRoutePlan, TrustlessRoutePlanner};
+use crate::planner::{PlannerError, TrustlessRoutePlan, TrustlessRoutePlanner};
 use crate::recipient_keys::{
     RecipientEnvelopeBuilder, RecipientKeyError, RecipientKeyRequest, RecipientKeyResolver,
 };
