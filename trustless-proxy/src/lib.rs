@@ -9,6 +9,7 @@ pub mod operations;
 pub mod planner;
 pub mod preflight;
 pub mod recipient_keys;
+pub mod references;
 pub mod types;
 
 pub use aws_esdk::{
@@ -52,6 +53,10 @@ pub use preflight::{
 pub use recipient_keys::{
     RecipientEnvelopeBuilder, RecipientKeyError, RecipientKeyRecord, RecipientKeyRequest,
     RecipientKeyResolver,
+};
+pub use references::{
+    EncryptedManifestReference, TrustlessObjectReference, TrustlessObjectReferenceInput,
+    TrustlessReferenceError, TrustlessReferenceModel, TrustlessRemoteObjectReference,
 };
 pub use types::{
     Hex32, RecipientEncryptionKey, RecipientEnvelopeContext, SubstrateAccountId,
