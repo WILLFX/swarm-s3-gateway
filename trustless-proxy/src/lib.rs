@@ -1,6 +1,7 @@
 pub mod aws_esdk;
 pub mod config;
 pub mod encryption;
+pub mod execution_coordinator;
 pub mod gateway_boundary;
 pub mod keyring;
 pub mod local_keystore;
@@ -25,6 +26,10 @@ pub use config::{ConfigError, TrustlessProxyConfig};
 pub use encryption::{
     TrustlessDecryptRequest, TrustlessDecryptResult, TrustlessEncryptRequest,
     TrustlessEncryptResult, TrustlessEncryptionBoundary, TrustlessEncryptionError,
+};
+pub use execution_coordinator::{
+    TrustlessExecutionBoundaryRequirements, TrustlessExecutionCoordinator,
+    TrustlessExecutionCoordinatorError, TrustlessExecutionResult,
 };
 pub use gateway_boundary::{
     CiphertextGatewayBoundary, CiphertextGatewayBoundaryError, CiphertextGatewayRequest,
