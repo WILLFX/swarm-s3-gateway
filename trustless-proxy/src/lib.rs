@@ -15,6 +15,7 @@ pub mod references;
 pub mod remote_gateway;
 pub mod request_adapter;
 pub mod request_context;
+pub mod response_adapter;
 pub mod router;
 pub mod s3_surface;
 pub mod service;
@@ -83,6 +84,10 @@ pub use request_adapter::{
 pub use request_context::{
     TrustlessRequestContext, TrustlessRequestContextBuilder, TrustlessRequestContextError,
     TrustlessRequestContextInput,
+};
+pub use response_adapter::{
+    LocalTrustlessResponseAdapter, LocalTrustlessResponseAdapterError,
+    LocalTrustlessResponseEnvelope, LocalTrustlessResponseState,
 };
 pub use router::{
     TrustlessExecutionStage, TrustlessLocalOperationRoute, TrustlessLocalOperationRouter,
