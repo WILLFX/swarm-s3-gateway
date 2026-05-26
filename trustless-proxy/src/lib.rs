@@ -16,6 +16,7 @@ pub mod remote_gateway;
 pub mod request_context;
 pub mod router;
 pub mod s3_surface;
+pub mod service;
 pub mod types;
 
 pub use aws_esdk::{
@@ -85,6 +86,10 @@ pub use router::{
 pub use s3_surface::{
     LocalS3Operation, LocalS3Request, LocalS3Response, LocalS3RouteIntent, LocalS3Surface,
     LocalS3SurfaceError,
+};
+pub use service::{
+    TrustlessLocalService, TrustlessLocalServiceError, TrustlessLocalServiceNextAction,
+    TrustlessLocalServicePreparedOperation,
 };
 pub use types::{
     Hex32, RecipientEncryptionKey, RecipientEnvelopeContext, SubstrateAccountId,
