@@ -18,6 +18,7 @@ required_files = [
     "trustless-proxy/src/preflight.rs",
     "trustless-proxy/src/recipient_keys.rs",
     "trustless-proxy/src/references.rs",
+    "trustless-proxy/src/remote_gateway.rs",
     "trustless-proxy/src/types.rs",
 ]
 
