@@ -7,6 +7,7 @@ required_files = [
     "trustless-proxy/src/lib.rs",
     "trustless-proxy/src/main.rs",
     "trustless-proxy/src/config.rs",
+    "trustless-proxy/src/encryption.rs",
     "trustless-proxy/src/keyring.rs",
     "trustless-proxy/src/local_keystore.rs",
     "trustless-proxy/src/planner.rs",

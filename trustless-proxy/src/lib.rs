@@ -1,4 +1,5 @@
 pub mod config;
+pub mod encryption;
 pub mod keyring;
 pub mod local_keystore;
 pub mod planner;
@@ -7,6 +8,10 @@ pub mod recipient_keys;
 pub mod types;
 
 pub use config::{ConfigError, TrustlessProxyConfig};
+pub use encryption::{
+    TrustlessDecryptRequest, TrustlessDecryptResult, TrustlessEncryptRequest,
+    TrustlessEncryptResult, TrustlessEncryptionBoundary, TrustlessEncryptionError,
+};
 pub use keyring::{
     KeyringError, TrustlessRecipientKeyring, UnimplementedTrustlessRecipientKeyring,
 };
