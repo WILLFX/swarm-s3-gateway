@@ -1,3 +1,4 @@
+pub mod aws_esdk;
 pub mod config;
 pub mod encryption;
 pub mod gateway_boundary;
@@ -10,6 +11,10 @@ pub mod preflight;
 pub mod recipient_keys;
 pub mod types;
 
+pub use aws_esdk::{
+    AwsEsdkKeyringConfig, AwsEsdkRecipientEnvelopeDescriptor, AwsEsdkRecipientEnvelopePlan,
+    AwsEsdkTrustlessRecipientKeyring,
+};
 pub use config::{ConfigError, TrustlessProxyConfig};
 pub use encryption::{
     TrustlessDecryptRequest, TrustlessDecryptResult, TrustlessEncryptRequest,
