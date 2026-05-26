@@ -35,6 +35,33 @@ pub enum KeyringError {
         "trustless recipient AWS Encryption SDK for Rust keyring decryption is not implemented yet"
     )]
     DecryptNotImplemented,
+
+    #[error("AWS Encryption SDK for Rust adapter is not wired yet")]
+    AwsEsdkAdapterNotWired,
+
+    #[error("plaintext payload is required for trustless keyring encryption")]
+    MissingPlaintextPayload,
+
+    #[error("ciphertext payload is required for trustless keyring decryption")]
+    MissingCiphertextPayload,
+
+    #[error("recipient envelope bucket id is required")]
+    MissingBucketId,
+
+    #[error("recipient envelope object key id is required")]
+    MissingObjectKeyId,
+
+    #[error("at least one recipient envelope is required")]
+    MissingRecipientEnvelopes,
+
+    #[error("recipient envelope is disabled: {0}")]
+    DisabledRecipientEnvelope(String),
+
+    #[error("recipient public encryption key is empty: {0}")]
+    EmptyRecipientPublicKey(String),
+
+    #[error("recipient encryption key type is empty: {0}")]
+    EmptyRecipientKeyType(String),
 }
 
 #[derive(Debug, Default, Clone, Copy)]
