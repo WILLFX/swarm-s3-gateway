@@ -4,6 +4,7 @@ pub mod encryption;
 pub mod execution_coordinator;
 pub mod gateway_boundary;
 pub mod handler;
+pub mod http_handler;
 pub mod http_mapping;
 pub mod keyring;
 pub mod local_keystore;
@@ -44,6 +45,10 @@ pub use gateway_boundary::{
 pub use handler::{
     LocalTrustlessHandler, LocalTrustlessHandlerCompletion, LocalTrustlessHandlerError,
     LocalTrustlessHandlerPreparedResponse,
+};
+pub use http_handler::{
+    LocalTrustlessHttpHandler, LocalTrustlessHttpHandlerCompletion, LocalTrustlessHttpHandlerError,
+    LocalTrustlessHttpHandlerPreparedResponse,
 };
 pub use http_mapping::{
     LocalTrustlessHttpMapper, LocalTrustlessHttpMappingError, LocalTrustlessHttpMethod,
