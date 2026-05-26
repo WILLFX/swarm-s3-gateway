@@ -9,6 +9,7 @@ required_files = [
     "trustless-proxy/src/aws_esdk.rs",
     "trustless-proxy/src/config.rs",
     "trustless-proxy/src/encryption.rs",
+    "trustless-proxy/src/execution_coordinator.rs",
     "trustless-proxy/src/gateway_boundary.rs",
     "trustless-proxy/src/keyring.rs",
     "trustless-proxy/src/local_keystore.rs",
