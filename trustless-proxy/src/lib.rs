@@ -3,6 +3,7 @@ pub mod encryption;
 pub mod gateway_boundary;
 pub mod keyring;
 pub mod local_keystore;
+pub mod manifest;
 pub mod planner;
 pub mod preflight;
 pub mod recipient_keys;
@@ -23,6 +24,12 @@ pub use keyring::{
 pub use local_keystore::{
     LocalKeyRequest, LocalKeystoreError, LocalKeystoreRecord, LocalKeystoreResolver,
     LocalPrivateKeySelection, LocalPrivateKeySelector,
+};
+pub use manifest::{
+    EncryptedTrustlessManifest, TrustlessManifest, TrustlessManifestBoundary,
+    TrustlessManifestCipher, TrustlessManifestEntry, TrustlessManifestError,
+    TrustlessManifestListResult, TrustlessManifestMutation, TrustlessManifestRead,
+    TrustlessManifestWrite,
 };
 pub use planner::{
     LocalTrustlessStep, PlannerError, RemoteGatewayAction, TrustlessProxyOperation,
