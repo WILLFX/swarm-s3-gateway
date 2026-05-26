@@ -11,6 +11,7 @@ pub mod preflight;
 pub mod recipient_keys;
 pub mod references;
 pub mod remote_gateway;
+pub mod request_context;
 pub mod s3_surface;
 pub mod types;
 
@@ -62,6 +63,10 @@ pub use references::{
 };
 pub use remote_gateway::{
     RemoteGatewayClientError, TrustlessRemoteGatewayClient, TrustlessRemoteGatewayExecutor,
+};
+pub use request_context::{
+    TrustlessRequestContext, TrustlessRequestContextBuilder, TrustlessRequestContextError,
+    TrustlessRequestContextInput,
 };
 pub use s3_surface::{
     LocalS3Operation, LocalS3Request, LocalS3Response, LocalS3RouteIntent, LocalS3Surface,
