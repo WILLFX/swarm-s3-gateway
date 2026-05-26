@@ -17,6 +17,7 @@ required_files = [
     "trustless-proxy/src/planner.rs",
     "trustless-proxy/src/preflight.rs",
     "trustless-proxy/src/recipient_keys.rs",
+    "trustless-proxy/src/references.rs",
     "trustless-proxy/src/types.rs",
 ]
 
