@@ -19,6 +19,7 @@ required_files = [
     "trustless-proxy/src/recipient_keys.rs",
     "trustless-proxy/src/references.rs",
     "trustless-proxy/src/remote_gateway.rs",
+    "trustless-proxy/src/s3_surface.rs",
     "trustless-proxy/src/types.rs",
 ]
 
