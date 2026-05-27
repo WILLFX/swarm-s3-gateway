@@ -30,6 +30,7 @@ required_files = [
     "trustless-proxy/src/router.rs",
     "trustless-proxy/src/runtime.rs",
     "trustless-proxy/src/s3_surface.rs",
+    "trustless-proxy/src/server.rs",
     "trustless-proxy/src/service.rs",
     "trustless-proxy/src/types.rs",
 ]

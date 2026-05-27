@@ -121,6 +121,9 @@ jobs:
 
       - name: Check trustless local proxy HTTP mapping surface
         run: ./scripts/check_trustless_local_proxy_http_mapping_surface.py
+      - name: Check trustless local proxy server surface
+        run: ./scripts/check_trustless_local_proxy_server_surface.py
+
 
       - name: Check trustless local proxy HTTP handler surface
         run: ./scripts/check_trustless_local_proxy_http_handler_surface.py
