@@ -1,4 +1,5 @@
 pub mod aws_esdk;
+pub mod chain_recipient_key_adapter;
 pub mod cli;
 pub mod config;
 pub mod encryption;
@@ -33,6 +34,10 @@ pub mod types;
 pub use aws_esdk::{
     AwsEsdkKeyringConfig, AwsEsdkRecipientEnvelopeDescriptor, AwsEsdkRecipientEnvelopePlan,
     AwsEsdkTrustlessRecipientKeyring,
+};
+pub use chain_recipient_key_adapter::{
+    ChainRecipientAccountMapping, ChainRecipientEncryptionKeyLookup, ChainRecipientKeyAdapterError,
+    ChainRecipientKeyReader, chain_record_to_identity_record,
 };
 pub use cli::{
     LocalTrustlessCli, LocalTrustlessCliCommand, LocalTrustlessCliError, LocalTrustlessCliInput,

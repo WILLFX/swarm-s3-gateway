@@ -12170,6 +12170,7 @@ name = "trustless-proxy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "common",
  "hex",
  "serde",
  "serde_json",
