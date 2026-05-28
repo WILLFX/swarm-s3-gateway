@@ -9,6 +9,7 @@ pub mod http_handler;
 pub mod http_mapping;
 pub mod keyring;
 pub mod local_keystore;
+pub mod local_keystore_file;
 pub mod manifest;
 pub mod manifest_codec;
 pub mod operations;
@@ -67,6 +68,9 @@ pub use keyring::{
 pub use local_keystore::{
     LocalKeyRequest, LocalKeystoreError, LocalKeystoreRecord, LocalKeystoreResolver,
     LocalPrivateKeySelection, LocalPrivateKeySelector,
+};
+pub use local_keystore_file::{
+    LocalKeystoreFile, LocalKeystoreFileDocument, LocalKeystoreFileError, LocalKeystoreFileRecord,
 };
 pub use manifest::{
     EncryptedTrustlessManifest, TrustlessManifest, TrustlessManifestBoundary,
