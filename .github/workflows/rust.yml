@@ -132,6 +132,9 @@ jobs:
         run: ./scripts/check_trustless_local_proxy_http_handler_surface.py
       - name: Check trustless manifest JSON codec surface
         run: ./scripts/check_trustless_manifest_json_codec_surface.py
+      - name: Check trustless local keystore file surface
+        run: ./scripts/check_trustless_local_keystore_file_surface.py
+
 
 
       - name: Check trustless private delete-bucket fail-closed

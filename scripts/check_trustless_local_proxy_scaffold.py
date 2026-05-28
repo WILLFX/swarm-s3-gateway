@@ -17,6 +17,7 @@ required_files = [
     "trustless-proxy/src/http_mapping.rs",
     "trustless-proxy/src/keyring.rs",
     "trustless-proxy/src/local_keystore.rs",
+    "trustless-proxy/src/local_keystore_file.rs",
     "trustless-proxy/src/manifest.rs",
     "trustless-proxy/src/manifest_codec.rs",
     "trustless-proxy/src/operations.rs",
