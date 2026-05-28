@@ -9,6 +9,7 @@ pub mod http_mapping;
 pub mod keyring;
 pub mod local_keystore;
 pub mod manifest;
+pub mod manifest_codec;
 pub mod operations;
 pub mod pipeline;
 pub mod planner;
@@ -68,6 +69,7 @@ pub use manifest::{
     TrustlessManifestListResult, TrustlessManifestMutation, TrustlessManifestRead,
     TrustlessManifestWrite,
 };
+pub use manifest_codec::{TrustlessManifestJsonCodec, TrustlessManifestJsonCodecError};
 pub use operations::{
     TrustlessDeleteOperationInput, TrustlessDeleteOperationPlan, TrustlessOperationAssembler,
     TrustlessOperationError, TrustlessPutOperationInput, TrustlessPutOperationPlan,
