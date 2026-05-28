@@ -33,6 +33,9 @@ pub enum RemoteGatewayClientError {
     #[error("remote gateway response claimed plaintext access")]
     GatewayPlaintextAccessRejected,
 
+    #[error("remote gateway HTTP client failed: {0}")]
+    Http(String),
+
     #[error(transparent)]
     Boundary(CiphertextGatewayBoundaryError),
 }

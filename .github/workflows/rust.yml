@@ -138,6 +138,9 @@ jobs:
         run: ./scripts/check_trustless_identity_recipient_resolver_surface.py
       - name: Check trustless chain recipient key adapter surface
         run: ./scripts/check_trustless_chain_recipient_key_adapter_surface.py
+      - name: Check trustless remote gateway HTTP client surface
+        run: ./scripts/check_trustless_remote_gateway_http_client_surface.py
+
 
 
 
