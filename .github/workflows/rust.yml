@@ -134,6 +134,9 @@ jobs:
         run: ./scripts/check_trustless_manifest_json_codec_surface.py
       - name: Check trustless local keystore file surface
         run: ./scripts/check_trustless_local_keystore_file_surface.py
+      - name: Check trustless identity recipient resolver surface
+        run: ./scripts/check_trustless_identity_recipient_resolver_surface.py
+
 
 
 

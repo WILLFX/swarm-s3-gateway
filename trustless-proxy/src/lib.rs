@@ -7,6 +7,7 @@ pub mod gateway_boundary;
 pub mod handler;
 pub mod http_handler;
 pub mod http_mapping;
+pub mod identity_recipient_resolver;
 pub mod keyring;
 pub mod local_keystore;
 pub mod local_keystore_file;
@@ -61,6 +62,11 @@ pub use http_handler::{
 pub use http_mapping::{
     LocalTrustlessHttpMapper, LocalTrustlessHttpMappingError, LocalTrustlessHttpMethod,
     LocalTrustlessHttpRequest, LocalTrustlessHttpRequestContext, LocalTrustlessHttpResponse,
+};
+pub use identity_recipient_resolver::{
+    IdentityContractEncryptionKeyRecord, IdentityContractRecipientKeyResolver,
+    IdentityRecipientKeyReader, IdentityRecipientKeyResolverConfig,
+    IdentityRecipientKeyResolverError, identity_record_to_recipient_key_record,
 };
 pub use keyring::{
     KeyringError, TrustlessRecipientKeyring, UnimplementedTrustlessRecipientKeyring,
