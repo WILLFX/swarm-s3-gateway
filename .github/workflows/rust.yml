@@ -127,6 +127,9 @@ jobs:
 
       - name: Check trustless local proxy HTTP handler surface
         run: ./scripts/check_trustless_local_proxy_http_handler_surface.py
+      - name: Check trustless manifest JSON codec surface
+        run: ./scripts/check_trustless_manifest_json_codec_surface.py
+
 
       - name: Check trustless private delete-bucket fail-closed
         run: ./scripts/check_trustless_private_delete_bucket_fail_closed.py
