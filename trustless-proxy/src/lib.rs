@@ -1,4 +1,5 @@
 pub mod aws_esdk;
+pub mod cli;
 pub mod config;
 pub mod encryption;
 pub mod execution_coordinator;
@@ -30,6 +31,10 @@ pub mod types;
 pub use aws_esdk::{
     AwsEsdkKeyringConfig, AwsEsdkRecipientEnvelopeDescriptor, AwsEsdkRecipientEnvelopePlan,
     AwsEsdkTrustlessRecipientKeyring,
+};
+pub use cli::{
+    LocalTrustlessCli, LocalTrustlessCliCommand, LocalTrustlessCliError, LocalTrustlessCliInput,
+    LocalTrustlessCliPreparedCommand,
 };
 pub use config::{ConfigError, TrustlessProxyConfig};
 pub use encryption::{
