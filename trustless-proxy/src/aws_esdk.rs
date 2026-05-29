@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::keyring::{KeyringError, TrustlessRecipientKeyring};
 use crate::types::{RecipientEncryptionKey, RecipientEnvelopeContext, SubstrateAccountId};
 
@@ -34,14 +36,72 @@ pub struct AwsEsdkRecipientEnvelopePlan {
     pub manual_algorithm_selection: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AwsEsdkTrustlessRecipientKeyring {
-    config: AwsEsdkKeyringConfig,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwsEsdkEncryptionContext {
+    pub entries: BTreeMap<String, String>,
 }
 
-impl AwsEsdkTrustlessRecipientKeyring {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwsEsdkEncryptInput {
+    pub keyring_name: &'static str,
+    pub commitment_policy: &'static str,
+    pub encryption_context: AwsEsdkEncryptionContext,
+    pub envelope_plan: AwsEsdkRecipientEnvelopePlan,
+    pub plaintext: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwsEsdkDecryptInput {
+    pub keyring_name: &'static str,
+    pub commitment_policy: &'static str,
+    pub encryption_context: AwsEsdkEncryptionContext,
+    pub envelope_plan: AwsEsdkRecipientEnvelopePlan,
+    pub ciphertext: Vec<u8>,
+}
+
+pub trait AwsEsdkByteCryptoAdapter {
+    fn encrypt(&self, input: AwsEsdkEncryptInput) -> Result<Vec<u8>, KeyringError>;
+
+    fn decrypt(&self, input: AwsEsdkDecryptInput) -> Result<Vec<u8>, KeyringError>;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct UnwiredAwsEsdkByteCryptoAdapter;
+
+impl AwsEsdkByteCryptoAdapter for UnwiredAwsEsdkByteCryptoAdapter {
+    fn encrypt(&self, _input: AwsEsdkEncryptInput) -> Result<Vec<u8>, KeyringError> {
+        Err(KeyringError::AwsEsdkAdapterNotWired)
+    }
+
+    fn decrypt(&self, _input: AwsEsdkDecryptInput) -> Result<Vec<u8>, KeyringError> {
+        Err(KeyringError::AwsEsdkAdapterNotWired)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AwsEsdkTrustlessRecipientKeyring<A = UnwiredAwsEsdkByteCryptoAdapter> {
+    config: AwsEsdkKeyringConfig,
+    adapter: A,
+}
+
+impl Default for AwsEsdkTrustlessRecipientKeyring<UnwiredAwsEsdkByteCryptoAdapter> {
+    fn default() -> Self {
+        Self::new(AwsEsdkKeyringConfig::default())
+    }
+}
+
+impl AwsEsdkTrustlessRecipientKeyring<UnwiredAwsEsdkByteCryptoAdapter> {
     pub fn new(config: AwsEsdkKeyringConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            adapter: UnwiredAwsEsdkByteCryptoAdapter,
+        }
+    }
+}
+
+impl<A> AwsEsdkTrustlessRecipientKeyring<A> {
+    pub fn with_adapter(config: AwsEsdkKeyringConfig, adapter: A) -> Self {
+        Self { config, adapter }
     }
 
     pub fn recipient_envelope_plan(
@@ -77,7 +137,10 @@ impl AwsEsdkTrustlessRecipientKeyring {
     }
 }
 
-impl TrustlessRecipientKeyring for AwsEsdkTrustlessRecipientKeyring {
+impl<A> TrustlessRecipientKeyring for AwsEsdkTrustlessRecipientKeyring<A>
+where
+    A: AwsEsdkByteCryptoAdapter,
+{
     fn keyring_name(&self) -> &'static str {
         self.config.keyring_name
     }
@@ -91,9 +154,16 @@ impl TrustlessRecipientKeyring for AwsEsdkTrustlessRecipientKeyring {
             return Err(KeyringError::MissingPlaintextPayload);
         }
 
-        self.recipient_envelope_plan(context)?;
+        let envelope_plan = self.recipient_envelope_plan(context)?;
+        let encryption_context = aws_esdk_encryption_context(context)?;
 
-        Err(KeyringError::AwsEsdkAdapterNotWired)
+        self.adapter.encrypt(AwsEsdkEncryptInput {
+            keyring_name: self.keyring_name(),
+            commitment_policy: self.commitment_policy(),
+            encryption_context,
+            envelope_plan,
+            plaintext: plaintext.to_vec(),
+        })
     }
 
     fn decrypt_with_local_recipient_key(
@@ -105,10 +175,36 @@ impl TrustlessRecipientKeyring for AwsEsdkTrustlessRecipientKeyring {
             return Err(KeyringError::MissingCiphertextPayload);
         }
 
-        self.recipient_envelope_plan(context)?;
+        let envelope_plan = self.recipient_envelope_plan(context)?;
+        let encryption_context = aws_esdk_encryption_context(context)?;
 
-        Err(KeyringError::AwsEsdkAdapterNotWired)
+        self.adapter.decrypt(AwsEsdkDecryptInput {
+            keyring_name: self.keyring_name(),
+            commitment_policy: self.commitment_policy(),
+            encryption_context,
+            envelope_plan,
+            ciphertext: ciphertext.to_vec(),
+        })
     }
+}
+
+fn aws_esdk_encryption_context(
+    context: &RecipientEnvelopeContext,
+) -> Result<AwsEsdkEncryptionContext, KeyringError> {
+    let bucket_id = require_non_empty(&context.bucket_id, KeyringError::MissingBucketId)?;
+    let object_key_id =
+        require_non_empty(&context.object_key_id, KeyringError::MissingObjectKeyId)?;
+
+    let mut entries = BTreeMap::new();
+    entries.insert("trustless.domain".to_owned(), "object".to_owned());
+    entries.insert("trustless.bucket_id".to_owned(), bucket_id);
+    entries.insert("trustless.object_key_id".to_owned(), object_key_id);
+    entries.insert(
+        "trustless.policy_version".to_owned(),
+        context.policy_version.to_string(),
+    );
+
+    Ok(AwsEsdkEncryptionContext { entries })
 }
 
 fn validate_recipient(
@@ -302,6 +398,105 @@ mod tests {
         assert_eq!(
             keyring.decrypt_with_local_recipient_key(b"", &context()),
             Err(KeyringError::MissingCiphertextPayload)
+        );
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct MockAwsEsdkAdapter {
+        encrypt_input: std::rc::Rc<std::cell::RefCell<Option<AwsEsdkEncryptInput>>>,
+        decrypt_input: std::rc::Rc<std::cell::RefCell<Option<AwsEsdkDecryptInput>>>,
+    }
+
+    impl AwsEsdkByteCryptoAdapter for MockAwsEsdkAdapter {
+        fn encrypt(&self, input: AwsEsdkEncryptInput) -> Result<Vec<u8>, KeyringError> {
+            *self.encrypt_input.borrow_mut() = Some(input);
+            Ok(b"aws-esdk-ciphertext".to_vec())
+        }
+
+        fn decrypt(&self, input: AwsEsdkDecryptInput) -> Result<Vec<u8>, KeyringError> {
+            *self.decrypt_input.borrow_mut() = Some(input);
+            Ok(b"aws-esdk-plaintext".to_vec())
+        }
+    }
+
+    #[test]
+    fn aws_esdk_keyring_delegates_encrypt_to_adapter_with_bound_context() {
+        let adapter = MockAwsEsdkAdapter::default();
+        let seen_encrypt = adapter.encrypt_input.clone();
+        let keyring = AwsEsdkTrustlessRecipientKeyring::with_adapter(
+            AwsEsdkKeyringConfig::default(),
+            adapter,
+        );
+
+        let ciphertext = keyring
+            .encrypt_with_recipient_envelopes(b"plaintext", &context())
+            .unwrap();
+
+        assert_eq!(ciphertext, b"aws-esdk-ciphertext".to_vec());
+
+        let input = seen_encrypt.borrow().clone().unwrap();
+        assert_eq!(input.keyring_name, "aws-esdk-trustless-recipient-keyring");
+        assert_eq!(input.commitment_policy, "require-encrypt-require-decrypt");
+        assert_eq!(input.plaintext, b"plaintext".to_vec());
+        assert_eq!(input.envelope_plan.recipients.len(), 2);
+        assert_eq!(
+            input.encryption_context.entries.get("trustless.domain"),
+            Some(&"object".to_owned())
+        );
+        assert_eq!(
+            input.encryption_context.entries.get("trustless.bucket_id"),
+            Some(&hex::encode([1u8; 32]))
+        );
+        assert_eq!(
+            input
+                .encryption_context
+                .entries
+                .get("trustless.object_key_id"),
+            Some(&hex::encode([2u8; 32]))
+        );
+        assert_eq!(
+            input
+                .encryption_context
+                .entries
+                .get("trustless.policy_version"),
+            Some(&"7".to_owned())
+        );
+    }
+
+    #[test]
+    fn aws_esdk_keyring_delegates_decrypt_to_adapter_with_bound_context() {
+        let adapter = MockAwsEsdkAdapter::default();
+        let seen_decrypt = adapter.decrypt_input.clone();
+        let keyring = AwsEsdkTrustlessRecipientKeyring::with_adapter(
+            AwsEsdkKeyringConfig::default(),
+            adapter,
+        );
+
+        let plaintext = keyring
+            .decrypt_with_local_recipient_key(b"ciphertext", &context())
+            .unwrap();
+
+        assert_eq!(plaintext, b"aws-esdk-plaintext".to_vec());
+
+        let input = seen_decrypt.borrow().clone().unwrap();
+        assert_eq!(input.keyring_name, "aws-esdk-trustless-recipient-keyring");
+        assert_eq!(input.commitment_policy, "require-encrypt-require-decrypt");
+        assert_eq!(input.ciphertext, b"ciphertext".to_vec());
+        assert_eq!(input.envelope_plan.recipients.len(), 2);
+        assert_eq!(
+            input.encryption_context.entries.get("trustless.domain"),
+            Some(&"object".to_owned())
+        );
+        assert_eq!(
+            input.encryption_context.entries.get("trustless.bucket_id"),
+            Some(&hex::encode([1u8; 32]))
+        );
+        assert_eq!(
+            input
+                .encryption_context
+                .entries
+                .get("trustless.object_key_id"),
+            Some(&hex::encode([2u8; 32]))
         );
     }
 }
