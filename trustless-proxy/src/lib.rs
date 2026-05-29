@@ -21,6 +21,7 @@ pub mod preflight;
 pub mod recipient_keys;
 pub mod references;
 pub mod remote_gateway;
+pub mod remote_gateway_http;
 pub mod request_adapter;
 pub mod request_context;
 pub mod response_adapter;
@@ -115,6 +116,10 @@ pub use references::{
 };
 pub use remote_gateway::{
     RemoteGatewayClientError, TrustlessRemoteGatewayClient, TrustlessRemoteGatewayExecutor,
+};
+pub use remote_gateway_http::{
+    RemoteGatewayHttpClient, RemoteGatewayHttpClientConfig, RemoteGatewayHttpClientError,
+    RemoteGatewayHttpTransport, ReqwestRemoteGatewayHttpTransport,
 };
 pub use request_adapter::{
     LocalTrustlessRequestAdapter, LocalTrustlessRequestAdapterError, LocalTrustlessRequestInput,
