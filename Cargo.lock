@@ -12905,6 +12905,7 @@ dependencies = [
 name = "trustless-proxy"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "aws-esdk",
  "common",
@@ -12916,6 +12917,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
