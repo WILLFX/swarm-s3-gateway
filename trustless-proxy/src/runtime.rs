@@ -470,6 +470,179 @@ impl LocalTrustlessRuntime {
         Self::execute_prepared_delete_operation_remote_request(prepared, plan, executor)
     }
 
+    pub fn build_prepared_put_operation_plan_with_configured_aws_esdk<C, RK, LK>(
+        prepared: &LocalTrustlessRuntimePreparedResponse,
+        current_manifest: TrustlessManifest,
+        manifest_entry: TrustlessManifestEntry,
+        manifest_envelope_context: RecipientEnvelopeContext,
+        config: &TrustlessProxyConfig,
+        preflight_builder: &TrustlessOperationPreflightBuilder<RK, LK>,
+        manifest_cipher: C,
+    ) -> Result<TrustlessPutOperationPlan, LocalTrustlessRuntimeError>
+    where
+        C: TrustlessManifestCipher,
+        RK: RecipientKeyResolver,
+        LK: LocalKeystoreResolver,
+    {
+        validate_prepared_remote_execution(prepared)?;
+        require_prepared_operation(prepared, LocalS3Operation::PutObject)?;
+
+        let plaintext = prepared
+            .handler_response
+            .request_preparation
+            .prepared_operation
+            .pipeline_plan
+            .request_context
+            .plaintext_body
+            .clone()
+            .filter(|body| !body.is_empty())
+            .ok_or(LocalTrustlessRuntimeError::MissingPreparedPutPlaintextBody)?;
+
+        let preflight =
+            preflight_builder.preflight_put_object(prepared_preflight_request(prepared).clone())?;
+
+        let keyring = Self::build_aws_esdk_raw_rsa_keyring_from_local_selection(
+            config,
+            preflight.local_private_key.clone(),
+        )?;
+
+        let assembler = TrustlessOperationAssembler::new(keyring, manifest_cipher);
+
+        Ok(assembler.prepare_put(TrustlessPutOperationInput {
+            plaintext,
+            preflight,
+            current_manifest,
+            manifest_entry,
+            manifest_envelope_context,
+        })?)
+    }
+
+    pub fn build_prepared_delete_operation_plan_with_configured_aws_esdk<C, RK, LK>(
+        prepared: &LocalTrustlessRuntimePreparedResponse,
+        current_manifest: TrustlessManifest,
+        manifest_envelope_context: RecipientEnvelopeContext,
+        config: &TrustlessProxyConfig,
+        preflight_builder: &TrustlessOperationPreflightBuilder<RK, LK>,
+        manifest_cipher: C,
+    ) -> Result<TrustlessDeleteOperationPlan, LocalTrustlessRuntimeError>
+    where
+        C: TrustlessManifestCipher,
+        RK: RecipientKeyResolver,
+        LK: LocalKeystoreResolver,
+    {
+        validate_prepared_remote_execution(prepared)?;
+        require_prepared_operation(prepared, LocalS3Operation::DeleteObject)?;
+
+        let preflight_request = prepared_preflight_request(prepared);
+        let object_key_id = preflight_request
+            .object_key_id
+            .clone()
+            .filter(|object_key_id| !object_key_id.trim().is_empty())
+            .ok_or(LocalTrustlessRuntimeError::PreparedRemoteRequestMissingObjectKeyId)?;
+
+        let preflight = preflight_builder.preflight_delete_object(preflight_request.clone())?;
+
+        let keyring = Self::build_aws_esdk_raw_rsa_keyring_from_local_selection(
+            config,
+            preflight.local_private_key.clone(),
+        )?;
+
+        let assembler = TrustlessOperationAssembler::new(keyring, manifest_cipher);
+
+        Ok(assembler.prepare_delete(TrustlessDeleteOperationInput {
+            preflight,
+            current_manifest,
+            object_key_id,
+            manifest_envelope_context,
+        })?)
+    }
+
+    pub fn execute_prepared_put_operation_with_configured_aws_esdk<C, RK, LK, G>(
+        prepared: &LocalTrustlessRuntimePreparedResponse,
+        current_manifest: TrustlessManifest,
+        manifest_entry: TrustlessManifestEntry,
+        manifest_envelope_context: RecipientEnvelopeContext,
+        config: &TrustlessProxyConfig,
+        preflight_builder: &TrustlessOperationPreflightBuilder<RK, LK>,
+        manifest_cipher: C,
+        executor: &TrustlessRemoteGatewayExecutor<G>,
+    ) -> Result<CiphertextGatewayResponse, LocalTrustlessRuntimeError>
+    where
+        C: TrustlessManifestCipher,
+        RK: RecipientKeyResolver,
+        LK: LocalKeystoreResolver,
+        G: TrustlessRemoteGatewayClient,
+    {
+        let plan = Self::build_prepared_put_operation_plan_with_configured_aws_esdk(
+            prepared,
+            current_manifest,
+            manifest_entry,
+            manifest_envelope_context,
+            config,
+            preflight_builder,
+            manifest_cipher,
+        )?;
+
+        Self::execute_prepared_put_operation_remote_request(prepared, plan, executor)
+    }
+
+    pub fn execute_prepared_delete_operation_with_configured_aws_esdk<C, RK, LK, G>(
+        prepared: &LocalTrustlessRuntimePreparedResponse,
+        current_manifest: TrustlessManifest,
+        manifest_envelope_context: RecipientEnvelopeContext,
+        config: &TrustlessProxyConfig,
+        preflight_builder: &TrustlessOperationPreflightBuilder<RK, LK>,
+        manifest_cipher: C,
+        executor: &TrustlessRemoteGatewayExecutor<G>,
+    ) -> Result<CiphertextGatewayResponse, LocalTrustlessRuntimeError>
+    where
+        C: TrustlessManifestCipher,
+        RK: RecipientKeyResolver,
+        LK: LocalKeystoreResolver,
+        G: TrustlessRemoteGatewayClient,
+    {
+        let plan = Self::build_prepared_delete_operation_plan_with_configured_aws_esdk(
+            prepared,
+            current_manifest,
+            manifest_envelope_context,
+            config,
+            preflight_builder,
+            manifest_cipher,
+        )?;
+
+        Self::execute_prepared_delete_operation_remote_request(prepared, plan, executor)
+    }
+
+    pub fn complete_prepared_get_response_with_configured_aws_esdk<C, RK, LK>(
+        prepared: LocalTrustlessRuntimePreparedResponse,
+        response: CiphertextGatewayResponse,
+        envelope_context: RecipientEnvelopeContext,
+        config: &TrustlessProxyConfig,
+        preflight_builder: &TrustlessOperationPreflightBuilder<RK, LK>,
+        manifest_cipher: C,
+    ) -> Result<LocalTrustlessRuntimeCompletion, LocalTrustlessRuntimeError>
+    where
+        C: TrustlessManifestCipher,
+        RK: RecipientKeyResolver,
+        LK: LocalKeystoreResolver,
+    {
+        validate_prepared_remote_execution(&prepared)?;
+        require_prepared_operation(&prepared, LocalS3Operation::GetObject)?;
+
+        let preflight = preflight_builder
+            .preflight_get_object(prepared_preflight_request(&prepared).clone())?;
+
+        let keyring = Self::build_aws_esdk_raw_rsa_keyring_from_local_selection(
+            config,
+            preflight.local_private_key.clone(),
+        )?;
+
+        let assembler = TrustlessOperationAssembler::new(keyring, manifest_cipher);
+        let decrypted = assembler.complete_get_response(preflight, response, envelope_context)?;
+
+        Self::complete_get_with_plaintext(prepared, decrypted.plaintext)
+    }
+
     pub fn put_operation_plan_remote_payload(
         plan: TrustlessPutOperationPlan,
     ) -> Result<LocalTrustlessRuntimeRemotePayload, LocalTrustlessRuntimeError> {
@@ -849,9 +1022,13 @@ fn validate_prepared_remote_execution(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_keystore::{LocalKeystoreError, LocalKeystoreRecord};
+    use crate::manifest::TrustlessManifestError;
+    use crate::recipient_keys::{RecipientKeyError, RecipientKeyRecord};
     use crate::request_adapter::LocalTrustlessRequestInput;
     use crate::response_adapter::LocalTrustlessResponseState;
     use crate::service::TrustlessLocalServiceNextAction;
+    use crate::types::{RecipientEncryptionKey, SubstrateAccountId};
 
     fn request_input(operation: LocalS3Operation) -> LocalTrustlessRequestInput {
         LocalTrustlessRequestInput {
@@ -1301,6 +1478,415 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, LocalTrustlessRuntimeError::Keyring(_)));
+    }
+
+    #[derive(Debug, Default)]
+    struct RealEsdkRuntimeMockRecipientKeyResolver {
+        records: std::collections::BTreeMap<SubstrateAccountId, RecipientKeyRecord>,
+    }
+
+    impl RealEsdkRuntimeMockRecipientKeyResolver {
+        fn with_record(mut self, record: RecipientKeyRecord) -> Self {
+            self.records.insert(record.account.clone(), record);
+            self
+        }
+    }
+
+    impl RecipientKeyResolver for RealEsdkRuntimeMockRecipientKeyResolver {
+        fn resolve_recipient_key(
+            &self,
+            account: &SubstrateAccountId,
+        ) -> Result<Option<RecipientKeyRecord>, RecipientKeyError> {
+            Ok(self.records.get(account).cloned())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RealEsdkRuntimeMockLocalKeystoreResolver {
+        records: std::collections::BTreeMap<(SubstrateAccountId, String), Vec<LocalKeystoreRecord>>,
+    }
+
+    impl RealEsdkRuntimeMockLocalKeystoreResolver {
+        fn with_record(mut self, record: LocalKeystoreRecord) -> Self {
+            self.records
+                .entry((record.account.clone(), record.key_type.clone()))
+                .or_default()
+                .push(record);
+            self
+        }
+    }
+
+    impl LocalKeystoreResolver for RealEsdkRuntimeMockLocalKeystoreResolver {
+        fn list_local_private_keys(
+            &self,
+            account: &SubstrateAccountId,
+            key_type: &str,
+        ) -> Result<Vec<LocalKeystoreRecord>, LocalKeystoreError> {
+            Ok(self
+                .records
+                .get(&(account.clone(), key_type.to_owned()))
+                .cloned()
+                .unwrap_or_default())
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct RealEsdkRuntimeMockManifestCipher;
+
+    impl TrustlessManifestCipher for RealEsdkRuntimeMockManifestCipher {
+        fn decrypt_manifest(
+            &self,
+            ciphertext: &[u8],
+            _context: &RecipientEnvelopeContext,
+        ) -> Result<TrustlessManifest, TrustlessManifestError> {
+            if ciphertext != b"runtime-encrypted-manifest" {
+                return Err(TrustlessManifestError::Cipher(
+                    "unexpected runtime encrypted manifest".to_owned(),
+                ));
+            }
+
+            Ok(real_esdk_runtime_manifest())
+        }
+
+        fn encrypt_manifest(
+            &self,
+            manifest: &TrustlessManifest,
+            _context: &RecipientEnvelopeContext,
+        ) -> Result<Vec<u8>, TrustlessManifestError> {
+            Ok(format!(
+                "runtime-encrypted-manifest:{}:{}",
+                manifest.bucket_id, manifest.manifest_version
+            )
+            .into_bytes())
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct RealEsdkRuntimeMockRemoteGatewayClient {
+        response: CiphertextGatewayResponse,
+        seen_request: std::rc::Rc<std::cell::RefCell<Option<CiphertextGatewayRequest>>>,
+    }
+
+    impl TrustlessRemoteGatewayClient for RealEsdkRuntimeMockRemoteGatewayClient {
+        fn execute_ciphertext_request(
+            &self,
+            request: CiphertextGatewayRequest,
+        ) -> Result<CiphertextGatewayResponse, RemoteGatewayClientError> {
+            *self.seen_request.borrow_mut() = Some(request);
+            Ok(self.response.clone())
+        }
+    }
+
+    fn real_esdk_runtime_run_openssl(args: &[&str], cwd: &std::path::Path) {
+        let output = std::process::Command::new("openssl")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("failed to invoke openssl for runtime AWS ESDK Raw RSA test keys");
+
+        assert!(
+            output.status.success(),
+            "openssl {:?} failed\nstdout:\n{}\nstderr:\n{}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn real_esdk_runtime_generate_test_rsa_pem_pair() -> (Vec<u8>, Vec<u8>) {
+        let dir = tempfile::tempdir().expect("failed to create temp dir for RSA test keys");
+        let private_key = dir.path().join("private.pem");
+        let public_key = dir.path().join("public.pem");
+
+        real_esdk_runtime_run_openssl(
+            &[
+                "genpkey",
+                "-algorithm",
+                "RSA",
+                "-pkeyopt",
+                "rsa_keygen_bits:2048",
+                "-out",
+                private_key.file_name().unwrap().to_str().unwrap(),
+            ],
+            dir.path(),
+        );
+
+        real_esdk_runtime_run_openssl(
+            &[
+                "rsa",
+                "-in",
+                private_key.file_name().unwrap().to_str().unwrap(),
+                "-pubout",
+                "-out",
+                public_key.file_name().unwrap().to_str().unwrap(),
+            ],
+            dir.path(),
+        );
+
+        (
+            std::fs::read(private_key).unwrap(),
+            std::fs::read(public_key).unwrap(),
+        )
+    }
+
+    fn real_esdk_runtime_recipient_record(
+        account: &str,
+        public_key_pem: &[u8],
+    ) -> RecipientKeyRecord {
+        RecipientKeyRecord {
+            account: account.to_owned(),
+            public_key: String::from_utf8(public_key_pem.to_vec())
+                .expect("test public key PEM must be UTF-8"),
+            key_type: "aws-esdk-rust-recipient-key".to_owned(),
+            key_version: 1,
+            enabled: true,
+        }
+    }
+
+    fn real_esdk_runtime_recipient_encryption_key(
+        account: &str,
+        public_key_pem: &[u8],
+    ) -> RecipientEncryptionKey {
+        RecipientEncryptionKey {
+            account: account.to_owned(),
+            public_key: String::from_utf8(public_key_pem.to_vec())
+                .expect("test public key PEM must be UTF-8"),
+            key_type: "aws-esdk-rust-recipient-key".to_owned(),
+            key_version: 1,
+            enabled: true,
+        }
+    }
+
+    fn real_esdk_runtime_local_record(
+        config: &TrustlessProxyConfig,
+        private_key_pem: &[u8],
+    ) -> LocalKeystoreRecord {
+        let selection = local_private_key_selection(b"placeholder".to_vec());
+        let encrypted_private_key_blob = config
+            .local_private_key_unlocker()
+            .seal_private_key_for_storage(&selection, private_key_pem)
+            .unwrap();
+
+        LocalKeystoreRecord {
+            account: selection.account,
+            key_type: selection.key_type,
+            key_version: selection.key_version,
+            encrypted_private_key_blob,
+            enabled: true,
+            storage_label: selection.storage_label,
+        }
+    }
+
+    fn real_esdk_runtime_preflight_builder(
+        config: &TrustlessProxyConfig,
+        private_key_pem: &[u8],
+        public_key_pem: &[u8],
+    ) -> TrustlessOperationPreflightBuilder<
+        RealEsdkRuntimeMockRecipientKeyResolver,
+        RealEsdkRuntimeMockLocalKeystoreResolver,
+    > {
+        TrustlessOperationPreflightBuilder::new(
+            RealEsdkRuntimeMockRecipientKeyResolver::default()
+                .with_record(real_esdk_runtime_recipient_record("alice", public_key_pem))
+                .with_record(real_esdk_runtime_recipient_record("bob", public_key_pem)),
+            RealEsdkRuntimeMockLocalKeystoreResolver::default()
+                .with_record(real_esdk_runtime_local_record(config, private_key_pem)),
+        )
+    }
+
+    fn real_esdk_runtime_envelope_context(public_key_pem: &[u8]) -> RecipientEnvelopeContext {
+        RecipientEnvelopeContext {
+            bucket_id: hex::encode([1u8; 32]),
+            object_key_id: hex::encode([2u8; 32]),
+            policy_version: 1,
+            recipients: vec![
+                real_esdk_runtime_recipient_encryption_key("alice", public_key_pem),
+                real_esdk_runtime_recipient_encryption_key("bob", public_key_pem),
+            ],
+        }
+    }
+
+    fn real_esdk_runtime_manifest() -> TrustlessManifest {
+        TrustlessManifest {
+            bucket_id: hex::encode([1u8; 32]),
+            manifest_version: 1,
+            entries: Vec::new(),
+        }
+    }
+
+    fn real_esdk_runtime_manifest_entry() -> TrustlessManifestEntry {
+        TrustlessManifestEntry {
+            object_key: "secret.txt".to_owned(),
+            object_key_id: hex::encode([2u8; 32]),
+            ciphertext_ref: "bee://runtime-ciphertext-ref".to_owned(),
+            ciphertext_size: 64,
+            content_type: Some("text/plain".to_owned()),
+            etag: Some("runtime-etag".to_owned()),
+        }
+    }
+
+    #[test]
+    fn runtime_executes_put_with_configured_aws_esdk_keyring_and_ciphertext_only_remote() {
+        let (private_key_pem, public_key_pem) = real_esdk_runtime_generate_test_rsa_pem_pair();
+        let config = trustless_proxy_config();
+        let preflight_builder =
+            real_esdk_runtime_preflight_builder(&config, &private_key_pem, &public_key_pem);
+
+        let prepared = LocalTrustlessRuntime::prepare_request(LocalTrustlessRequestInput {
+            plaintext_body: Some(b"runtime real AWS ESDK plaintext".to_vec()),
+            ..request_input(LocalS3Operation::PutObject)
+        })
+        .unwrap();
+
+        let seen_request = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let executor =
+            TrustlessRemoteGatewayExecutor::new(RealEsdkRuntimeMockRemoteGatewayClient {
+                response: CiphertextGatewayResponse {
+                    action: RemoteGatewayAction::PutCiphertextObject,
+                    ciphertext_payload: None,
+                    encrypted_manifest_payload: None,
+                    metadata_only: true,
+                    gateway_plaintext_access: false,
+                },
+                seen_request: seen_request.clone(),
+            });
+
+        let response =
+            LocalTrustlessRuntime::execute_prepared_put_operation_with_configured_aws_esdk(
+                &prepared,
+                real_esdk_runtime_manifest(),
+                real_esdk_runtime_manifest_entry(),
+                real_esdk_runtime_envelope_context(&public_key_pem),
+                &config,
+                &preflight_builder,
+                RealEsdkRuntimeMockManifestCipher,
+                &executor,
+            )
+            .unwrap();
+
+        assert_eq!(response.action, RemoteGatewayAction::PutCiphertextObject);
+        assert!(!response.gateway_plaintext_access);
+
+        let request = seen_request.borrow().clone().unwrap();
+        assert_eq!(request.action, RemoteGatewayAction::PutCiphertextObject);
+        assert!(!request.plaintext_payload_present);
+        assert!(request.encrypted_manifest_payload.is_none());
+
+        let ciphertext = request.ciphertext_payload.unwrap();
+        assert!(!ciphertext.is_empty());
+        assert_ne!(ciphertext, b"runtime real AWS ESDK plaintext".to_vec());
+        assert!(!String::from_utf8_lossy(&ciphertext).contains("runtime real AWS ESDK plaintext"));
+    }
+
+    #[test]
+    fn runtime_completes_get_with_configured_aws_esdk_keyring_and_local_plaintext_only() {
+        let (private_key_pem, public_key_pem) = real_esdk_runtime_generate_test_rsa_pem_pair();
+        let config = trustless_proxy_config();
+        let preflight_builder =
+            real_esdk_runtime_preflight_builder(&config, &private_key_pem, &public_key_pem);
+
+        let selection = local_private_key_selection(
+            config
+                .local_private_key_unlocker()
+                .seal_private_key_for_storage(
+                    &local_private_key_selection(b"placeholder".to_vec()),
+                    &private_key_pem,
+                )
+                .unwrap(),
+        );
+
+        let keyring = LocalTrustlessRuntime::build_aws_esdk_raw_rsa_keyring_from_local_selection(
+            &config, selection,
+        )
+        .unwrap();
+
+        let envelope_context = real_esdk_runtime_envelope_context(&public_key_pem);
+        let plaintext = b"runtime configured GET plaintext stays local".to_vec();
+
+        let ciphertext = keyring
+            .encrypt_with_recipient_envelopes(&plaintext, &envelope_context)
+            .unwrap();
+
+        let prepared =
+            LocalTrustlessRuntime::prepare_request(request_input(LocalS3Operation::GetObject))
+                .unwrap();
+
+        let completion =
+            LocalTrustlessRuntime::complete_prepared_get_response_with_configured_aws_esdk(
+                prepared,
+                CiphertextGatewayResponse {
+                    action: RemoteGatewayAction::GetCiphertextObject,
+                    ciphertext_payload: Some(ciphertext),
+                    encrypted_manifest_payload: None,
+                    metadata_only: false,
+                    gateway_plaintext_access: false,
+                },
+                envelope_context,
+                &config,
+                &preflight_builder,
+                RealEsdkRuntimeMockManifestCipher,
+            )
+            .unwrap();
+
+        assert_eq!(completion.operation, LocalS3Operation::GetObject);
+        assert_eq!(completion.response_envelope.body, Some(plaintext));
+        assert!(completion.response_envelope.plaintext_returned_locally);
+        assert!(!completion.gateway_plaintext_access);
+    }
+
+    #[test]
+    fn runtime_executes_delete_with_configured_aws_esdk_keyring_boundary() {
+        let (private_key_pem, public_key_pem) = real_esdk_runtime_generate_test_rsa_pem_pair();
+        let config = trustless_proxy_config();
+        let preflight_builder =
+            real_esdk_runtime_preflight_builder(&config, &private_key_pem, &public_key_pem);
+
+        let prepared =
+            LocalTrustlessRuntime::prepare_request(request_input(LocalS3Operation::DeleteObject))
+                .unwrap();
+
+        let seen_request = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let executor =
+            TrustlessRemoteGatewayExecutor::new(RealEsdkRuntimeMockRemoteGatewayClient {
+                response: CiphertextGatewayResponse {
+                    action: RemoteGatewayAction::DeleteCiphertextObject,
+                    ciphertext_payload: None,
+                    encrypted_manifest_payload: None,
+                    metadata_only: true,
+                    gateway_plaintext_access: false,
+                },
+                seen_request: seen_request.clone(),
+            });
+
+        let response =
+            LocalTrustlessRuntime::execute_prepared_delete_operation_with_configured_aws_esdk(
+                &prepared,
+                TrustlessManifest {
+                    entries: vec![real_esdk_runtime_manifest_entry()],
+                    ..real_esdk_runtime_manifest()
+                },
+                real_esdk_runtime_envelope_context(&public_key_pem),
+                &config,
+                &preflight_builder,
+                RealEsdkRuntimeMockManifestCipher,
+                &executor,
+            )
+            .unwrap();
+
+        assert_eq!(response.action, RemoteGatewayAction::DeleteCiphertextObject);
+        assert!(!response.gateway_plaintext_access);
+
+        let request = seen_request.borrow().clone().unwrap();
+        assert_eq!(request.action, RemoteGatewayAction::DeleteCiphertextObject);
+        assert!(request.ciphertext_payload.is_none());
+        assert!(!request.plaintext_payload_present);
+
+        let encrypted_manifest = request.encrypted_manifest_payload.unwrap();
+        assert!(!encrypted_manifest.is_empty());
+        assert!(
+            !String::from_utf8_lossy(&encrypted_manifest)
+                .contains("runtime configured GET plaintext stays local")
+        );
     }
 
     #[test]
@@ -1859,13 +2445,10 @@ mod tests {
     }
     use std::collections::BTreeMap;
 
-    use crate::local_keystore::{LocalKeystoreError, LocalKeystoreRecord, LocalKeystoreResolver};
-    use crate::manifest::{
-        TrustlessManifest, TrustlessManifestCipher, TrustlessManifestEntry, TrustlessManifestError,
-    };
+    use crate::local_keystore::LocalKeystoreResolver;
+    use crate::manifest::{TrustlessManifest, TrustlessManifestCipher, TrustlessManifestEntry};
     use crate::operations::TrustlessOperationAssembler;
-    use crate::recipient_keys::{RecipientKeyError, RecipientKeyRecord, RecipientKeyResolver};
-    use crate::types::SubstrateAccountId;
+    use crate::recipient_keys::RecipientKeyResolver;
 
     #[derive(Debug, Default)]
     struct RuntimeMockRecipientKeyResolver {
