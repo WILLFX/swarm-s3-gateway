@@ -7,3 +7,4 @@ pub mod list_bucket;
 pub mod list_objects_v2;
 pub mod private_object_read;
 pub mod put_object;
+pub mod trustless_ciphertext_gateway;
