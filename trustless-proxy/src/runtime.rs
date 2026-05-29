@@ -13,9 +13,18 @@ use crate::handler::{
     LocalTrustlessHandler, LocalTrustlessHandlerCompletion, LocalTrustlessHandlerError,
     LocalTrustlessHandlerPreparedResponse,
 };
-use crate::operations::{TrustlessDeleteOperationPlan, TrustlessPutOperationPlan};
+use crate::keyring::TrustlessRecipientKeyring;
+use crate::local_keystore::LocalKeystoreResolver;
+use crate::manifest::{TrustlessManifest, TrustlessManifestCipher, TrustlessManifestEntry};
+use crate::operations::{
+    TrustlessDeleteOperationInput, TrustlessDeleteOperationPlan, TrustlessOperationAssembler,
+    TrustlessOperationError, TrustlessPutOperationInput, TrustlessPutOperationPlan,
+};
 use crate::planner::{PlannerError, RemoteGatewayAction, TrustlessRoutePlanner};
-use crate::preflight::TrustlessPreflightRequest;
+use crate::preflight::{
+    PreflightError, TrustlessOperationPreflightBuilder, TrustlessPreflightRequest,
+};
+use crate::recipient_keys::RecipientKeyResolver;
 use crate::remote_gateway::{
     RemoteGatewayClientError, TrustlessRemoteGatewayClient, TrustlessRemoteGatewayExecutor,
 };
@@ -74,11 +83,26 @@ pub enum LocalTrustlessRuntimeError {
     #[error(transparent)]
     Planner(PlannerError),
 
+    #[error(transparent)]
+    Preflight(PreflightError),
+
+    #[error(transparent)]
+    Operation(TrustlessOperationError),
+
     #[error("gateway plaintext access is not allowed")]
     GatewayPlaintextAccessRejected,
 
     #[error("prepared runtime response does not require remote gateway execution")]
     PreparedResponseDoesNotRequireRemoteGateway,
+
+    #[error("prepared runtime operation mismatch, expected {expected:?}, got {actual:?}")]
+    UnexpectedPreparedOperation {
+        expected: LocalS3Operation,
+        actual: LocalS3Operation,
+    },
+
+    #[error("prepared PUT operation is missing local plaintext body")]
+    MissingPreparedPutPlaintextBody,
 
     #[error("prepared PUT remote request requires ciphertext payload")]
     MissingPutCiphertextPayload,
@@ -132,6 +156,18 @@ impl From<CiphertextGatewayBoundaryError> for LocalTrustlessRuntimeError {
 impl From<PlannerError> for LocalTrustlessRuntimeError {
     fn from(error: PlannerError) -> Self {
         Self::Planner(error)
+    }
+}
+
+impl From<PreflightError> for LocalTrustlessRuntimeError {
+    fn from(error: PreflightError) -> Self {
+        Self::Preflight(error)
+    }
+}
+
+impl From<TrustlessOperationError> for LocalTrustlessRuntimeError {
+    fn from(error: TrustlessOperationError) -> Self {
+        Self::Operation(error)
     }
 }
 
@@ -283,6 +319,133 @@ impl LocalTrustlessRuntime {
                 Err(LocalTrustlessRuntimeError::PreparedResponseDoesNotRequireRemoteGateway)
             }
         }
+    }
+
+    pub fn build_prepared_put_operation_plan<K, C, RK, LK>(
+        prepared: &LocalTrustlessRuntimePreparedResponse,
+        current_manifest: TrustlessManifest,
+        manifest_entry: TrustlessManifestEntry,
+        manifest_envelope_context: RecipientEnvelopeContext,
+        preflight_builder: &TrustlessOperationPreflightBuilder<RK, LK>,
+        assembler: &TrustlessOperationAssembler<K, C>,
+    ) -> Result<TrustlessPutOperationPlan, LocalTrustlessRuntimeError>
+    where
+        K: TrustlessRecipientKeyring,
+        C: TrustlessManifestCipher,
+        RK: RecipientKeyResolver,
+        LK: LocalKeystoreResolver,
+    {
+        validate_prepared_remote_execution(prepared)?;
+        require_prepared_operation(prepared, LocalS3Operation::PutObject)?;
+
+        let plaintext = prepared
+            .handler_response
+            .request_preparation
+            .prepared_operation
+            .pipeline_plan
+            .request_context
+            .plaintext_body
+            .clone()
+            .filter(|body| !body.is_empty())
+            .ok_or(LocalTrustlessRuntimeError::MissingPreparedPutPlaintextBody)?;
+
+        let preflight =
+            preflight_builder.preflight_put_object(prepared_preflight_request(prepared).clone())?;
+
+        Ok(assembler.prepare_put(TrustlessPutOperationInput {
+            plaintext,
+            preflight,
+            current_manifest,
+            manifest_entry,
+            manifest_envelope_context,
+        })?)
+    }
+
+    pub fn build_prepared_delete_operation_plan<K, C, RK, LK>(
+        prepared: &LocalTrustlessRuntimePreparedResponse,
+        current_manifest: TrustlessManifest,
+        manifest_envelope_context: RecipientEnvelopeContext,
+        preflight_builder: &TrustlessOperationPreflightBuilder<RK, LK>,
+        assembler: &TrustlessOperationAssembler<K, C>,
+    ) -> Result<TrustlessDeleteOperationPlan, LocalTrustlessRuntimeError>
+    where
+        K: TrustlessRecipientKeyring,
+        C: TrustlessManifestCipher,
+        RK: RecipientKeyResolver,
+        LK: LocalKeystoreResolver,
+    {
+        validate_prepared_remote_execution(prepared)?;
+        require_prepared_operation(prepared, LocalS3Operation::DeleteObject)?;
+
+        let preflight_request = prepared_preflight_request(prepared);
+        let object_key_id = preflight_request
+            .object_key_id
+            .clone()
+            .filter(|object_key_id| !object_key_id.trim().is_empty())
+            .ok_or(LocalTrustlessRuntimeError::PreparedRemoteRequestMissingObjectKeyId)?;
+
+        let preflight = preflight_builder.preflight_delete_object(preflight_request.clone())?;
+
+        Ok(assembler.prepare_delete(TrustlessDeleteOperationInput {
+            preflight,
+            current_manifest,
+            object_key_id,
+            manifest_envelope_context,
+        })?)
+    }
+
+    pub fn execute_prepared_put_operation<K, C, RK, LK, G>(
+        prepared: &LocalTrustlessRuntimePreparedResponse,
+        current_manifest: TrustlessManifest,
+        manifest_entry: TrustlessManifestEntry,
+        manifest_envelope_context: RecipientEnvelopeContext,
+        preflight_builder: &TrustlessOperationPreflightBuilder<RK, LK>,
+        assembler: &TrustlessOperationAssembler<K, C>,
+        executor: &TrustlessRemoteGatewayExecutor<G>,
+    ) -> Result<CiphertextGatewayResponse, LocalTrustlessRuntimeError>
+    where
+        K: TrustlessRecipientKeyring,
+        C: TrustlessManifestCipher,
+        RK: RecipientKeyResolver,
+        LK: LocalKeystoreResolver,
+        G: TrustlessRemoteGatewayClient,
+    {
+        let plan = Self::build_prepared_put_operation_plan(
+            prepared,
+            current_manifest,
+            manifest_entry,
+            manifest_envelope_context,
+            preflight_builder,
+            assembler,
+        )?;
+
+        Self::execute_prepared_put_operation_remote_request(prepared, plan, executor)
+    }
+
+    pub fn execute_prepared_delete_operation<K, C, RK, LK, G>(
+        prepared: &LocalTrustlessRuntimePreparedResponse,
+        current_manifest: TrustlessManifest,
+        manifest_envelope_context: RecipientEnvelopeContext,
+        preflight_builder: &TrustlessOperationPreflightBuilder<RK, LK>,
+        assembler: &TrustlessOperationAssembler<K, C>,
+        executor: &TrustlessRemoteGatewayExecutor<G>,
+    ) -> Result<CiphertextGatewayResponse, LocalTrustlessRuntimeError>
+    where
+        K: TrustlessRecipientKeyring,
+        C: TrustlessManifestCipher,
+        RK: RecipientKeyResolver,
+        LK: LocalKeystoreResolver,
+        G: TrustlessRemoteGatewayClient,
+    {
+        let plan = Self::build_prepared_delete_operation_plan(
+            prepared,
+            current_manifest,
+            manifest_envelope_context,
+            preflight_builder,
+            assembler,
+        )?;
+
+        Self::execute_prepared_delete_operation_remote_request(prepared, plan, executor)
     }
 
     pub fn put_operation_plan_remote_payload(
@@ -459,6 +622,32 @@ impl LocalTrustlessRuntime {
             gateway_plaintext_access: false,
         })
     }
+}
+
+fn require_prepared_operation(
+    prepared: &LocalTrustlessRuntimePreparedResponse,
+    expected: LocalS3Operation,
+) -> Result<(), LocalTrustlessRuntimeError> {
+    if prepared.operation != expected {
+        return Err(LocalTrustlessRuntimeError::UnexpectedPreparedOperation {
+            expected,
+            actual: prepared.operation,
+        });
+    }
+
+    Ok(())
+}
+
+fn prepared_preflight_request(
+    prepared: &LocalTrustlessRuntimePreparedResponse,
+) -> &TrustlessPreflightRequest {
+    &prepared
+        .handler_response
+        .request_preparation
+        .prepared_operation
+        .pipeline_plan
+        .request_context
+        .preflight_request
 }
 
 fn put_operation_plan_payload(
@@ -1527,6 +1716,352 @@ mod tests {
         assert_eq!(
             err,
             LocalTrustlessRuntimeError::GatewayPlaintextAccessRejected
+        );
+    }
+    use std::collections::BTreeMap;
+
+    use crate::local_keystore::{LocalKeystoreError, LocalKeystoreRecord, LocalKeystoreResolver};
+    use crate::manifest::{
+        TrustlessManifest, TrustlessManifestCipher, TrustlessManifestEntry, TrustlessManifestError,
+    };
+    use crate::operations::TrustlessOperationAssembler;
+    use crate::recipient_keys::{RecipientKeyError, RecipientKeyRecord, RecipientKeyResolver};
+    use crate::types::SubstrateAccountId;
+
+    #[derive(Debug, Default)]
+    struct RuntimeMockRecipientKeyResolver {
+        records: BTreeMap<SubstrateAccountId, RecipientKeyRecord>,
+    }
+
+    impl RuntimeMockRecipientKeyResolver {
+        fn with_record(mut self, record: RecipientKeyRecord) -> Self {
+            self.records.insert(record.account.clone(), record);
+            self
+        }
+    }
+
+    impl RecipientKeyResolver for RuntimeMockRecipientKeyResolver {
+        fn resolve_recipient_key(
+            &self,
+            account: &SubstrateAccountId,
+        ) -> Result<Option<RecipientKeyRecord>, RecipientKeyError> {
+            Ok(self.records.get(account).cloned())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RuntimeMockLocalKeystoreResolver {
+        records: BTreeMap<(SubstrateAccountId, String), Vec<LocalKeystoreRecord>>,
+    }
+
+    impl RuntimeMockLocalKeystoreResolver {
+        fn with_record(mut self, record: LocalKeystoreRecord) -> Self {
+            self.records
+                .entry((record.account.clone(), record.key_type.clone()))
+                .or_default()
+                .push(record);
+            self
+        }
+    }
+
+    impl LocalKeystoreResolver for RuntimeMockLocalKeystoreResolver {
+        fn list_local_private_keys(
+            &self,
+            account: &SubstrateAccountId,
+            key_type: &str,
+        ) -> Result<Vec<LocalKeystoreRecord>, LocalKeystoreError> {
+            Ok(self
+                .records
+                .get(&(account.clone(), key_type.to_owned()))
+                .cloned()
+                .unwrap_or_default())
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct RuntimeMockKeyring;
+
+    impl crate::keyring::TrustlessRecipientKeyring for RuntimeMockKeyring {
+        fn keyring_name(&self) -> &'static str {
+            "runtime-mock-keyring"
+        }
+
+        fn encrypt_with_recipient_envelopes(
+            &self,
+            plaintext: &[u8],
+            _context: &RecipientEnvelopeContext,
+        ) -> Result<Vec<u8>, crate::keyring::KeyringError> {
+            let mut ciphertext = b"ciphertext:".to_vec();
+            ciphertext.extend_from_slice(plaintext);
+            Ok(ciphertext)
+        }
+
+        fn decrypt_with_local_recipient_key(
+            &self,
+            ciphertext: &[u8],
+            _context: &RecipientEnvelopeContext,
+        ) -> Result<Vec<u8>, crate::keyring::KeyringError> {
+            let prefix = b"ciphertext:";
+            ciphertext
+                .strip_prefix(prefix)
+                .map(Vec::from)
+                .ok_or(crate::keyring::KeyringError::DecryptNotImplemented)
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct RuntimeMockManifestCipher;
+
+    impl TrustlessManifestCipher for RuntimeMockManifestCipher {
+        fn decrypt_manifest(
+            &self,
+            _ciphertext: &[u8],
+            _context: &RecipientEnvelopeContext,
+        ) -> Result<TrustlessManifest, TrustlessManifestError> {
+            Ok(runtime_manifest())
+        }
+
+        fn encrypt_manifest(
+            &self,
+            manifest: &TrustlessManifest,
+            _context: &RecipientEnvelopeContext,
+        ) -> Result<Vec<u8>, TrustlessManifestError> {
+            Ok(format!(
+                "encrypted-runtime-manifest:{}:{}",
+                manifest.bucket_id, manifest.manifest_version
+            )
+            .into_bytes())
+        }
+    }
+
+    fn runtime_recipient_record(account: &str) -> RecipientKeyRecord {
+        RecipientKeyRecord {
+            account: account.to_owned(),
+            public_key: format!("{account}-public-key"),
+            key_type: "aws-esdk-rust-recipient-key".to_owned(),
+            key_version: 1,
+            enabled: true,
+        }
+    }
+
+    fn runtime_local_record(version: u32) -> LocalKeystoreRecord {
+        LocalKeystoreRecord {
+            account: "alice".to_owned(),
+            key_type: "aws-esdk-rust-recipient-key".to_owned(),
+            key_version: version,
+            encrypted_private_key_blob: vec![1, 2, 3, version as u8],
+            enabled: true,
+            storage_label: format!("local-keystore/alice/{version}"),
+        }
+    }
+
+    fn runtime_preflight_builder() -> TrustlessOperationPreflightBuilder<
+        RuntimeMockRecipientKeyResolver,
+        RuntimeMockLocalKeystoreResolver,
+    > {
+        TrustlessOperationPreflightBuilder::new(
+            RuntimeMockRecipientKeyResolver::default()
+                .with_record(runtime_recipient_record("alice"))
+                .with_record(runtime_recipient_record("bob")),
+            RuntimeMockLocalKeystoreResolver::default().with_record(runtime_local_record(7)),
+        )
+    }
+
+    fn runtime_assembler()
+    -> TrustlessOperationAssembler<RuntimeMockKeyring, RuntimeMockManifestCipher> {
+        TrustlessOperationAssembler::new(RuntimeMockKeyring, RuntimeMockManifestCipher)
+    }
+
+    fn runtime_manifest_entry(object_key: &str, object_key_id: &str) -> TrustlessManifestEntry {
+        TrustlessManifestEntry {
+            object_key: object_key.to_owned(),
+            object_key_id: object_key_id.to_owned(),
+            ciphertext_ref: format!("swarm://ciphertext/{object_key_id}"),
+            ciphertext_size: 128,
+            content_type: Some("text/plain".to_owned()),
+            etag: Some(format!("etag-{object_key_id}")),
+        }
+    }
+
+    fn runtime_manifest() -> TrustlessManifest {
+        TrustlessManifest {
+            bucket_id: hex::encode([1u8; 32]),
+            manifest_version: 1,
+            entries: vec![runtime_manifest_entry(
+                "secret.txt",
+                &hex::encode([2u8; 32]),
+            )],
+        }
+    }
+
+    fn runtime_empty_manifest() -> TrustlessManifest {
+        TrustlessManifest {
+            bucket_id: hex::encode([1u8; 32]),
+            manifest_version: 1,
+            entries: Vec::new(),
+        }
+    }
+
+    fn runtime_envelope_context() -> RecipientEnvelopeContext {
+        RecipientEnvelopeContext {
+            bucket_id: hex::encode([1u8; 32]),
+            object_key_id: hex::encode([2u8; 32]),
+            policy_version: 1,
+            recipients: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn runtime_builds_put_and_delete_operation_plans_from_prepared_state() {
+        let put_prepared = LocalTrustlessRuntime::prepare_request(LocalTrustlessRequestInput {
+            plaintext_body: Some(b"secret".to_vec()),
+            ..request_input(LocalS3Operation::PutObject)
+        })
+        .unwrap();
+
+        let put_plan = LocalTrustlessRuntime::build_prepared_put_operation_plan(
+            &put_prepared,
+            runtime_empty_manifest(),
+            runtime_manifest_entry("secret.txt", &hex::encode([2u8; 32])),
+            runtime_envelope_context(),
+            &runtime_preflight_builder(),
+            &runtime_assembler(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            put_plan.object_request.action,
+            RemoteGatewayAction::PutCiphertextObject
+        );
+        assert_eq!(
+            put_plan.object_request.ciphertext_payload,
+            Some(b"ciphertext:secret".to_vec())
+        );
+        assert!(put_plan.remote_payloads_are_ciphertext_only);
+        assert!(!put_plan.gateway_plaintext_access);
+        assert!(!put_plan.encrypted_manifest.ciphertext.is_empty());
+
+        let delete_prepared =
+            LocalTrustlessRuntime::prepare_request(request_input(LocalS3Operation::DeleteObject))
+                .unwrap();
+
+        let delete_plan = LocalTrustlessRuntime::build_prepared_delete_operation_plan(
+            &delete_prepared,
+            runtime_manifest(),
+            runtime_envelope_context(),
+            &runtime_preflight_builder(),
+            &runtime_assembler(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            delete_plan.delete_request.action,
+            RemoteGatewayAction::DeleteCiphertextObject
+        );
+        assert!(delete_plan.delete_request.ciphertext_payload.is_none());
+        assert!(
+            delete_plan
+                .delete_request
+                .encrypted_manifest_payload
+                .is_some()
+        );
+        assert!(delete_plan.remote_payloads_are_ciphertext_only);
+        assert!(!delete_plan.gateway_plaintext_access);
+    }
+
+    #[test]
+    fn runtime_executes_put_operation_from_prepared_state_through_executor() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use crate::gateway_boundary::{CiphertextGatewayRequest, CiphertextGatewayResponse};
+        use crate::remote_gateway::{
+            RemoteGatewayClientError, TrustlessRemoteGatewayClient, TrustlessRemoteGatewayExecutor,
+        };
+
+        #[derive(Debug, Clone)]
+        struct MockRemoteGatewayClient {
+            response: CiphertextGatewayResponse,
+            seen_request: Rc<RefCell<Option<CiphertextGatewayRequest>>>,
+        }
+
+        impl TrustlessRemoteGatewayClient for MockRemoteGatewayClient {
+            fn execute_ciphertext_request(
+                &self,
+                request: CiphertextGatewayRequest,
+            ) -> Result<CiphertextGatewayResponse, RemoteGatewayClientError> {
+                *self.seen_request.borrow_mut() = Some(request);
+                Ok(self.response.clone())
+            }
+        }
+
+        let prepared = LocalTrustlessRuntime::prepare_request(LocalTrustlessRequestInput {
+            plaintext_body: Some(b"secret".to_vec()),
+            ..request_input(LocalS3Operation::PutObject)
+        })
+        .unwrap();
+
+        let seen_request = Rc::new(RefCell::new(None));
+        let executor = TrustlessRemoteGatewayExecutor::new(MockRemoteGatewayClient {
+            response: CiphertextGatewayResponse {
+                action: RemoteGatewayAction::PutCiphertextObject,
+                ciphertext_payload: None,
+                encrypted_manifest_payload: None,
+                metadata_only: true,
+                gateway_plaintext_access: false,
+            },
+            seen_request: seen_request.clone(),
+        });
+
+        let response = LocalTrustlessRuntime::execute_prepared_put_operation(
+            &prepared,
+            runtime_empty_manifest(),
+            runtime_manifest_entry("secret.txt", &hex::encode([2u8; 32])),
+            runtime_envelope_context(),
+            &runtime_preflight_builder(),
+            &runtime_assembler(),
+            &executor,
+        )
+        .unwrap();
+
+        assert_eq!(response.action, RemoteGatewayAction::PutCiphertextObject);
+        assert!(response.metadata_only);
+        assert!(!response.gateway_plaintext_access);
+
+        let seen_request = seen_request.borrow().clone().unwrap();
+        assert_eq!(
+            seen_request.action,
+            RemoteGatewayAction::PutCiphertextObject
+        );
+        assert_eq!(
+            seen_request.ciphertext_payload,
+            Some(b"ciphertext:secret".to_vec())
+        );
+        assert!(!seen_request.plaintext_payload_present);
+    }
+
+    #[test]
+    fn runtime_rejects_wrong_prepared_operation_for_end_to_end_orchestration() {
+        let get_prepared =
+            LocalTrustlessRuntime::prepare_request(request_input(LocalS3Operation::GetObject))
+                .unwrap();
+
+        let err = LocalTrustlessRuntime::build_prepared_put_operation_plan(
+            &get_prepared,
+            runtime_empty_manifest(),
+            runtime_manifest_entry("secret.txt", &hex::encode([2u8; 32])),
+            runtime_envelope_context(),
+            &runtime_preflight_builder(),
+            &runtime_assembler(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            LocalTrustlessRuntimeError::UnexpectedPreparedOperation {
+                expected: LocalS3Operation::PutObject,
+                actual: LocalS3Operation::GetObject,
+            }
         );
     }
 }
