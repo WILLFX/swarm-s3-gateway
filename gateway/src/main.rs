@@ -3,7 +3,7 @@ use axum::{
     Router,
     extract::DefaultBodyLimit,
     middleware,
-    routing::{get, put},
+    routing::{get, post, put},
 };
 use gateway::{
     app_state::build_production_state, auth, request_limits::max_request_body_bytes_from_env,
@@ -30,6 +30,10 @@ async fn main() -> Result<()> {
     );
 
     let authenticated_routes = Router::new()
+        .route(
+            "/trustless/v1/ciphertext-gateway",
+            post(routes::trustless_ciphertext_gateway::handle),
+        )
         .route("/", get(routes::list_bucket::handle))
         .route(
             "/{bucket}",
