@@ -13,7 +13,8 @@ use crate::handler::{
     LocalTrustlessHandler, LocalTrustlessHandlerCompletion, LocalTrustlessHandlerError,
     LocalTrustlessHandlerPreparedResponse,
 };
-use crate::planner::{PlannerError, TrustlessRoutePlanner};
+use crate::operations::{TrustlessDeleteOperationPlan, TrustlessPutOperationPlan};
+use crate::planner::{PlannerError, RemoteGatewayAction, TrustlessRoutePlanner};
 use crate::preflight::TrustlessPreflightRequest;
 use crate::remote_gateway::{
     RemoteGatewayClientError, TrustlessRemoteGatewayClient, TrustlessRemoteGatewayExecutor,
@@ -87,6 +88,15 @@ pub enum LocalTrustlessRuntimeError {
 
     #[error("prepared remote request payload is not valid for operation {operation:?}")]
     UnexpectedRemotePayloadForOperation { operation: LocalS3Operation },
+
+    #[error("operation plan does not keep remote payloads ciphertext-only")]
+    OperationPlanAllowsNonCiphertextRemotePayload,
+
+    #[error("operation plan remote action mismatch, expected {expected:?}, got {actual:?}")]
+    OperationPlanRemoteActionMismatch {
+        expected: RemoteGatewayAction,
+        actual: RemoteGatewayAction,
+    },
 
     #[error("prepared remote request is missing object key id")]
     PreparedRemoteRequestMissingObjectKeyId,
@@ -275,6 +285,76 @@ impl LocalTrustlessRuntime {
         }
     }
 
+    pub fn put_operation_plan_remote_payload(
+        plan: TrustlessPutOperationPlan,
+    ) -> Result<LocalTrustlessRuntimeRemotePayload, LocalTrustlessRuntimeError> {
+        put_operation_plan_payload(plan)
+    }
+
+    pub fn delete_operation_plan_remote_payload(
+        plan: TrustlessDeleteOperationPlan,
+    ) -> Result<LocalTrustlessRuntimeRemotePayload, LocalTrustlessRuntimeError> {
+        delete_operation_plan_payload(plan)
+    }
+
+    pub fn build_prepared_put_operation_remote_request(
+        prepared: &LocalTrustlessRuntimePreparedResponse,
+        plan: TrustlessPutOperationPlan,
+    ) -> Result<CiphertextGatewayRequest, LocalTrustlessRuntimeError> {
+        let payload = Self::put_operation_plan_remote_payload(plan)?;
+        Self::build_prepared_remote_request(prepared, payload)
+    }
+
+    pub fn build_prepared_delete_operation_remote_request(
+        prepared: &LocalTrustlessRuntimePreparedResponse,
+        plan: TrustlessDeleteOperationPlan,
+    ) -> Result<CiphertextGatewayRequest, LocalTrustlessRuntimeError> {
+        let payload = Self::delete_operation_plan_remote_payload(plan)?;
+        Self::build_prepared_remote_request(prepared, payload)
+    }
+
+    pub fn execute_prepared_put_operation_remote_request<C>(
+        prepared: &LocalTrustlessRuntimePreparedResponse,
+        plan: TrustlessPutOperationPlan,
+        executor: &TrustlessRemoteGatewayExecutor<C>,
+    ) -> Result<CiphertextGatewayResponse, LocalTrustlessRuntimeError>
+    where
+        C: TrustlessRemoteGatewayClient,
+    {
+        let request = Self::build_prepared_put_operation_remote_request(prepared, plan)?;
+        Self::execute_prepared_remote_request(prepared, request, executor)
+    }
+
+    pub fn execute_prepared_delete_operation_remote_request<C>(
+        prepared: &LocalTrustlessRuntimePreparedResponse,
+        plan: TrustlessDeleteOperationPlan,
+        executor: &TrustlessRemoteGatewayExecutor<C>,
+    ) -> Result<CiphertextGatewayResponse, LocalTrustlessRuntimeError>
+    where
+        C: TrustlessRemoteGatewayClient,
+    {
+        let request = Self::build_prepared_delete_operation_remote_request(prepared, plan)?;
+        Self::execute_prepared_remote_request(prepared, request, executor)
+    }
+
+    pub fn execute_prepared_put_operation_remote_http_request(
+        prepared: &LocalTrustlessRuntimePreparedResponse,
+        plan: TrustlessPutOperationPlan,
+        config: &TrustlessProxyConfig,
+    ) -> Result<CiphertextGatewayResponse, LocalTrustlessRuntimeError> {
+        let request = Self::build_prepared_put_operation_remote_request(prepared, plan)?;
+        Self::execute_prepared_remote_http_request(prepared, request, config)
+    }
+
+    pub fn execute_prepared_delete_operation_remote_http_request(
+        prepared: &LocalTrustlessRuntimePreparedResponse,
+        plan: TrustlessDeleteOperationPlan,
+        config: &TrustlessProxyConfig,
+    ) -> Result<CiphertextGatewayResponse, LocalTrustlessRuntimeError> {
+        let request = Self::build_prepared_delete_operation_remote_request(prepared, plan)?;
+        Self::execute_prepared_remote_http_request(prepared, request, config)
+    }
+
     pub fn execute_assembled_prepared_remote_request<C>(
         prepared: &LocalTrustlessRuntimePreparedResponse,
         payload: LocalTrustlessRuntimeRemotePayload,
@@ -379,6 +459,95 @@ impl LocalTrustlessRuntime {
             gateway_plaintext_access: false,
         })
     }
+}
+
+fn put_operation_plan_payload(
+    plan: TrustlessPutOperationPlan,
+) -> Result<LocalTrustlessRuntimeRemotePayload, LocalTrustlessRuntimeError> {
+    validate_operation_plan_remote_boundary(
+        RemoteGatewayAction::PutCiphertextObject,
+        plan.object_request.action,
+        plan.remote_payloads_are_ciphertext_only,
+        plan.gateway_plaintext_access
+            || plan.object_request.plaintext_payload_present
+            || plan.encrypted_manifest.gateway_plaintext_access,
+    )?;
+
+    if plan.object_request.encrypted_manifest_payload.is_some() {
+        return Err(
+            LocalTrustlessRuntimeError::UnexpectedRemotePayloadForOperation {
+                operation: LocalS3Operation::PutObject,
+            },
+        );
+    }
+
+    let Some(ciphertext) = plan.object_request.ciphertext_payload else {
+        return Err(LocalTrustlessRuntimeError::MissingPutCiphertextPayload);
+    };
+
+    if ciphertext.is_empty() {
+        return Err(LocalTrustlessRuntimeError::MissingPutCiphertextPayload);
+    }
+
+    Ok(LocalTrustlessRuntimeRemotePayload::PutCiphertext(
+        ciphertext,
+    ))
+}
+
+fn delete_operation_plan_payload(
+    plan: TrustlessDeleteOperationPlan,
+) -> Result<LocalTrustlessRuntimeRemotePayload, LocalTrustlessRuntimeError> {
+    validate_operation_plan_remote_boundary(
+        RemoteGatewayAction::DeleteCiphertextObject,
+        plan.delete_request.action,
+        plan.remote_payloads_are_ciphertext_only,
+        plan.gateway_plaintext_access
+            || plan.delete_request.plaintext_payload_present
+            || plan.encrypted_manifest.gateway_plaintext_access,
+    )?;
+
+    if plan.delete_request.ciphertext_payload.is_some() {
+        return Err(
+            LocalTrustlessRuntimeError::UnexpectedRemotePayloadForOperation {
+                operation: LocalS3Operation::DeleteObject,
+            },
+        );
+    }
+
+    let Some(encrypted_manifest) = plan.delete_request.encrypted_manifest_payload else {
+        return Err(LocalTrustlessRuntimeError::MissingDeleteEncryptedManifestPayload);
+    };
+
+    if encrypted_manifest.is_empty() {
+        return Err(LocalTrustlessRuntimeError::MissingDeleteEncryptedManifestPayload);
+    }
+
+    Ok(LocalTrustlessRuntimeRemotePayload::DeleteEncryptedManifest(
+        encrypted_manifest,
+    ))
+}
+
+fn validate_operation_plan_remote_boundary(
+    expected: RemoteGatewayAction,
+    actual: RemoteGatewayAction,
+    remote_payloads_are_ciphertext_only: bool,
+    gateway_plaintext_access: bool,
+) -> Result<(), LocalTrustlessRuntimeError> {
+    if gateway_plaintext_access {
+        return Err(LocalTrustlessRuntimeError::GatewayPlaintextAccessRejected);
+    }
+
+    if !remote_payloads_are_ciphertext_only {
+        return Err(LocalTrustlessRuntimeError::OperationPlanAllowsNonCiphertextRemotePayload);
+    }
+
+    if actual != expected {
+        return Err(
+            LocalTrustlessRuntimeError::OperationPlanRemoteActionMismatch { expected, actual },
+        );
+    }
+
+    Ok(())
 }
 
 fn require_no_remote_payload(
@@ -1070,6 +1239,294 @@ mod tests {
             )
             .unwrap_err(),
             LocalTrustlessRuntimeError::MissingDeleteEncryptedManifestPayload
+        );
+    }
+    #[test]
+    fn runtime_builds_put_and_delete_remote_requests_from_operation_plans() {
+        use crate::gateway_boundary::CiphertextGatewayRequest;
+        use crate::manifest::EncryptedTrustlessManifest;
+        use crate::operations::{TrustlessDeleteOperationPlan, TrustlessPutOperationPlan};
+        use crate::planner::RemoteGatewayAction;
+
+        fn envelope_context() -> RecipientEnvelopeContext {
+            RecipientEnvelopeContext {
+                bucket_id: hex::encode([1u8; 32]),
+                object_key_id: hex::encode([2u8; 32]),
+                policy_version: 1,
+                recipients: Vec::new(),
+            }
+        }
+
+        fn encrypted_manifest(ciphertext: &[u8]) -> EncryptedTrustlessManifest {
+            EncryptedTrustlessManifest {
+                ciphertext: ciphertext.to_vec(),
+                envelope_context: envelope_context(),
+                gateway_plaintext_access: false,
+            }
+        }
+
+        let put_prepared = LocalTrustlessRuntime::prepare_request(LocalTrustlessRequestInput {
+            plaintext_body: Some(b"secret".to_vec()),
+            ..request_input(LocalS3Operation::PutObject)
+        })
+        .unwrap();
+
+        let put_request = LocalTrustlessRuntime::build_prepared_put_operation_remote_request(
+            &put_prepared,
+            TrustlessPutOperationPlan {
+                object_request: CiphertextGatewayRequest {
+                    bucket: "bucket".to_owned(),
+                    key: Some("secret.txt".to_owned()),
+                    action: RemoteGatewayAction::PutCiphertextObject,
+                    ciphertext_payload: Some(b"real-ciphertext".to_vec()),
+                    encrypted_manifest_payload: None,
+                    plaintext_payload_present: false,
+                },
+                encrypted_manifest: encrypted_manifest(b"encrypted-manifest-after-put"),
+                remote_payloads_are_ciphertext_only: true,
+                gateway_plaintext_access: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(put_request.action, RemoteGatewayAction::PutCiphertextObject);
+        assert_eq!(
+            put_request.ciphertext_payload,
+            Some(b"real-ciphertext".to_vec())
+        );
+        assert!(put_request.encrypted_manifest_payload.is_none());
+        assert!(!put_request.plaintext_payload_present);
+
+        let delete_prepared =
+            LocalTrustlessRuntime::prepare_request(request_input(LocalS3Operation::DeleteObject))
+                .unwrap();
+
+        let delete_request = LocalTrustlessRuntime::build_prepared_delete_operation_remote_request(
+            &delete_prepared,
+            TrustlessDeleteOperationPlan {
+                delete_request: CiphertextGatewayRequest {
+                    bucket: "bucket".to_owned(),
+                    key: Some("secret.txt".to_owned()),
+                    action: RemoteGatewayAction::DeleteCiphertextObject,
+                    ciphertext_payload: None,
+                    encrypted_manifest_payload: Some(b"real-encrypted-manifest".to_vec()),
+                    plaintext_payload_present: false,
+                },
+                encrypted_manifest: encrypted_manifest(b"real-encrypted-manifest"),
+                remote_payloads_are_ciphertext_only: true,
+                gateway_plaintext_access: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            delete_request.action,
+            RemoteGatewayAction::DeleteCiphertextObject
+        );
+        assert!(delete_request.ciphertext_payload.is_none());
+        assert_eq!(
+            delete_request.encrypted_manifest_payload,
+            Some(b"real-encrypted-manifest".to_vec())
+        );
+        assert!(!delete_request.plaintext_payload_present);
+    }
+
+    #[test]
+    fn runtime_executes_put_operation_plan_through_remote_executor() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use crate::gateway_boundary::{CiphertextGatewayRequest, CiphertextGatewayResponse};
+        use crate::manifest::EncryptedTrustlessManifest;
+        use crate::operations::TrustlessPutOperationPlan;
+        use crate::planner::RemoteGatewayAction;
+        use crate::remote_gateway::{
+            RemoteGatewayClientError, TrustlessRemoteGatewayClient, TrustlessRemoteGatewayExecutor,
+        };
+
+        #[derive(Debug, Clone)]
+        struct MockRemoteGatewayClient {
+            response: CiphertextGatewayResponse,
+            seen_request: Rc<RefCell<Option<CiphertextGatewayRequest>>>,
+        }
+
+        impl TrustlessRemoteGatewayClient for MockRemoteGatewayClient {
+            fn execute_ciphertext_request(
+                &self,
+                request: CiphertextGatewayRequest,
+            ) -> Result<CiphertextGatewayResponse, RemoteGatewayClientError> {
+                *self.seen_request.borrow_mut() = Some(request);
+                Ok(self.response.clone())
+            }
+        }
+
+        let prepared = LocalTrustlessRuntime::prepare_request(LocalTrustlessRequestInput {
+            plaintext_body: Some(b"secret".to_vec()),
+            ..request_input(LocalS3Operation::PutObject)
+        })
+        .unwrap();
+
+        let seen_request = Rc::new(RefCell::new(None));
+        let executor = TrustlessRemoteGatewayExecutor::new(MockRemoteGatewayClient {
+            response: CiphertextGatewayResponse {
+                action: RemoteGatewayAction::PutCiphertextObject,
+                ciphertext_payload: None,
+                encrypted_manifest_payload: None,
+                metadata_only: true,
+                gateway_plaintext_access: false,
+            },
+            seen_request: seen_request.clone(),
+        });
+
+        let response = LocalTrustlessRuntime::execute_prepared_put_operation_remote_request(
+            &prepared,
+            TrustlessPutOperationPlan {
+                object_request: CiphertextGatewayRequest {
+                    bucket: "bucket".to_owned(),
+                    key: Some("secret.txt".to_owned()),
+                    action: RemoteGatewayAction::PutCiphertextObject,
+                    ciphertext_payload: Some(b"real-ciphertext".to_vec()),
+                    encrypted_manifest_payload: None,
+                    plaintext_payload_present: false,
+                },
+                encrypted_manifest: EncryptedTrustlessManifest {
+                    ciphertext: b"encrypted-manifest-after-put".to_vec(),
+                    envelope_context: RecipientEnvelopeContext {
+                        bucket_id: hex::encode([1u8; 32]),
+                        object_key_id: hex::encode([2u8; 32]),
+                        policy_version: 1,
+                        recipients: Vec::new(),
+                    },
+                    gateway_plaintext_access: false,
+                },
+                remote_payloads_are_ciphertext_only: true,
+                gateway_plaintext_access: false,
+            },
+            &executor,
+        )
+        .unwrap();
+
+        assert_eq!(response.action, RemoteGatewayAction::PutCiphertextObject);
+        assert!(response.metadata_only);
+        assert!(!response.gateway_plaintext_access);
+
+        let seen_request = seen_request.borrow().clone().unwrap();
+        assert_eq!(
+            seen_request.action,
+            RemoteGatewayAction::PutCiphertextObject
+        );
+        assert_eq!(
+            seen_request.ciphertext_payload,
+            Some(b"real-ciphertext".to_vec())
+        );
+        assert!(seen_request.encrypted_manifest_payload.is_none());
+        assert!(!seen_request.plaintext_payload_present);
+    }
+
+    #[test]
+    fn runtime_rejects_invalid_operation_plan_remote_boundaries() {
+        use crate::gateway_boundary::CiphertextGatewayRequest;
+        use crate::manifest::EncryptedTrustlessManifest;
+        use crate::operations::{TrustlessDeleteOperationPlan, TrustlessPutOperationPlan};
+        use crate::planner::RemoteGatewayAction;
+
+        fn envelope_context() -> RecipientEnvelopeContext {
+            RecipientEnvelopeContext {
+                bucket_id: hex::encode([1u8; 32]),
+                object_key_id: hex::encode([2u8; 32]),
+                policy_version: 1,
+                recipients: Vec::new(),
+            }
+        }
+
+        fn encrypted_manifest(gateway_plaintext_access: bool) -> EncryptedTrustlessManifest {
+            EncryptedTrustlessManifest {
+                ciphertext: b"encrypted-manifest".to_vec(),
+                envelope_context: envelope_context(),
+                gateway_plaintext_access,
+            }
+        }
+
+        let put_prepared = LocalTrustlessRuntime::prepare_request(LocalTrustlessRequestInput {
+            plaintext_body: Some(b"secret".to_vec()),
+            ..request_input(LocalS3Operation::PutObject)
+        })
+        .unwrap();
+
+        let err = LocalTrustlessRuntime::build_prepared_put_operation_remote_request(
+            &put_prepared,
+            TrustlessPutOperationPlan {
+                object_request: CiphertextGatewayRequest {
+                    bucket: "bucket".to_owned(),
+                    key: Some("secret.txt".to_owned()),
+                    action: RemoteGatewayAction::DeleteCiphertextObject,
+                    ciphertext_payload: Some(b"real-ciphertext".to_vec()),
+                    encrypted_manifest_payload: None,
+                    plaintext_payload_present: false,
+                },
+                encrypted_manifest: encrypted_manifest(false),
+                remote_payloads_are_ciphertext_only: true,
+                gateway_plaintext_access: false,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            LocalTrustlessRuntimeError::OperationPlanRemoteActionMismatch {
+                expected: RemoteGatewayAction::PutCiphertextObject,
+                actual: RemoteGatewayAction::DeleteCiphertextObject,
+            }
+        );
+
+        let err = LocalTrustlessRuntime::build_prepared_put_operation_remote_request(
+            &put_prepared,
+            TrustlessPutOperationPlan {
+                object_request: CiphertextGatewayRequest {
+                    bucket: "bucket".to_owned(),
+                    key: Some("secret.txt".to_owned()),
+                    action: RemoteGatewayAction::PutCiphertextObject,
+                    ciphertext_payload: Some(b"real-ciphertext".to_vec()),
+                    encrypted_manifest_payload: None,
+                    plaintext_payload_present: false,
+                },
+                encrypted_manifest: encrypted_manifest(false),
+                remote_payloads_are_ciphertext_only: false,
+                gateway_plaintext_access: false,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            LocalTrustlessRuntimeError::OperationPlanAllowsNonCiphertextRemotePayload
+        );
+
+        let delete_prepared =
+            LocalTrustlessRuntime::prepare_request(request_input(LocalS3Operation::DeleteObject))
+                .unwrap();
+
+        let err = LocalTrustlessRuntime::build_prepared_delete_operation_remote_request(
+            &delete_prepared,
+            TrustlessDeleteOperationPlan {
+                delete_request: CiphertextGatewayRequest {
+                    bucket: "bucket".to_owned(),
+                    key: Some("secret.txt".to_owned()),
+                    action: RemoteGatewayAction::DeleteCiphertextObject,
+                    ciphertext_payload: None,
+                    encrypted_manifest_payload: Some(b"encrypted-manifest".to_vec()),
+                    plaintext_payload_present: false,
+                },
+                encrypted_manifest: encrypted_manifest(true),
+                remote_payloads_are_ciphertext_only: true,
+                gateway_plaintext_access: false,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            LocalTrustlessRuntimeError::GatewayPlaintextAccessRejected
         );
     }
 }
