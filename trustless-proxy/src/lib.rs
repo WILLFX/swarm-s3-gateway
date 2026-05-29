@@ -78,8 +78,10 @@ pub use keyring::{
     KeyringError, TrustlessRecipientKeyring, UnimplementedTrustlessRecipientKeyring,
 };
 pub use local_keystore::{
-    LocalKeyRequest, LocalKeystoreError, LocalKeystoreRecord, LocalKeystoreResolver,
-    LocalPrivateKeySelection, LocalPrivateKeySelector,
+    FailClosedLocalPrivateKeyUnlocker, LocalKeyRequest, LocalKeystoreError, LocalKeystoreRecord,
+    LocalKeystoreResolver, LocalPrivateKeySelection, LocalPrivateKeySelector,
+    LocalPrivateKeyUnlock, LocalPrivateKeyUnlockRequest, LocalPrivateKeyUnlocker,
+    validate_local_private_key_unlock,
 };
 pub use local_keystore_file::{
     LocalKeystoreFile, LocalKeystoreFileDocument, LocalKeystoreFileError, LocalKeystoreFileRecord,

@@ -27,6 +27,20 @@ pub struct LocalPrivateKeySelection {
     pub storage_label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalPrivateKeyUnlockRequest {
+    pub selection: LocalPrivateKeySelection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalPrivateKeyUnlock {
+    pub account: SubstrateAccountId,
+    pub key_type: String,
+    pub key_version: u32,
+    pub private_key_pem: Vec<u8>,
+    pub storage_label: String,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum LocalKeystoreError {
     #[error("local account is required")]
@@ -43,6 +57,27 @@ pub enum LocalKeystoreError {
 
     #[error("local private key storage label is empty: {0}")]
     EmptyStorageLabel(SubstrateAccountId),
+
+    #[error("local private key unlocker is not implemented")]
+    UnlockNotImplemented,
+
+    #[error("local private key unlock returned empty PEM for account: {0}")]
+    EmptyUnlockedPrivateKeyPem(SubstrateAccountId),
+
+    #[error("local private key unlock account mismatch, expected {expected}, got {actual}")]
+    UnlockedPrivateKeyAccountMismatch {
+        expected: SubstrateAccountId,
+        actual: SubstrateAccountId,
+    },
+
+    #[error("local private key unlock key type mismatch, expected {expected}, got {actual}")]
+    UnlockedPrivateKeyTypeMismatch { expected: String, actual: String },
+
+    #[error("local private key unlock key version mismatch, expected {expected}, got {actual}")]
+    UnlockedPrivateKeyVersionMismatch { expected: u32, actual: u32 },
+
+    #[error("local private key unlock storage label mismatch, expected {expected}, got {actual}")]
+    UnlockedPrivateKeyStorageLabelMismatch { expected: String, actual: String },
 }
 
 pub trait LocalKeystoreResolver {
@@ -51,6 +86,25 @@ pub trait LocalKeystoreResolver {
         account: &SubstrateAccountId,
         key_type: &str,
     ) -> Result<Vec<LocalKeystoreRecord>, LocalKeystoreError>;
+}
+
+pub trait LocalPrivateKeyUnlocker {
+    fn unlock_private_key(
+        &self,
+        request: LocalPrivateKeyUnlockRequest,
+    ) -> Result<LocalPrivateKeyUnlock, LocalKeystoreError>;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FailClosedLocalPrivateKeyUnlocker;
+
+impl LocalPrivateKeyUnlocker for FailClosedLocalPrivateKeyUnlocker {
+    fn unlock_private_key(
+        &self,
+        _request: LocalPrivateKeyUnlockRequest,
+    ) -> Result<LocalPrivateKeyUnlock, LocalKeystoreError> {
+        Err(LocalKeystoreError::UnlockNotImplemented)
+    }
 }
 
 pub struct LocalPrivateKeySelector<R> {
@@ -99,6 +153,47 @@ where
             storage_label: record.storage_label,
         })
     }
+}
+
+pub fn validate_local_private_key_unlock(
+    selection: &LocalPrivateKeySelection,
+    unlocked: LocalPrivateKeyUnlock,
+) -> Result<LocalPrivateKeyUnlock, LocalKeystoreError> {
+    if unlocked.account != selection.account {
+        return Err(LocalKeystoreError::UnlockedPrivateKeyAccountMismatch {
+            expected: selection.account.clone(),
+            actual: unlocked.account,
+        });
+    }
+
+    if unlocked.key_type != selection.key_type {
+        return Err(LocalKeystoreError::UnlockedPrivateKeyTypeMismatch {
+            expected: selection.key_type.clone(),
+            actual: unlocked.key_type,
+        });
+    }
+
+    if unlocked.key_version != selection.key_version {
+        return Err(LocalKeystoreError::UnlockedPrivateKeyVersionMismatch {
+            expected: selection.key_version,
+            actual: unlocked.key_version,
+        });
+    }
+
+    if unlocked.storage_label != selection.storage_label {
+        return Err(LocalKeystoreError::UnlockedPrivateKeyStorageLabelMismatch {
+            expected: selection.storage_label.clone(),
+            actual: unlocked.storage_label,
+        });
+    }
+
+    if unlocked.private_key_pem.is_empty() {
+        return Err(LocalKeystoreError::EmptyUnlockedPrivateKeyPem(
+            selection.account.clone(),
+        ));
+    }
+
+    Ok(unlocked)
 }
 
 fn require_non_empty(
@@ -276,5 +371,63 @@ mod tests {
 
         assert_eq!(selection.encrypted_private_key_blob, vec![1, 2, 3, 1]);
         assert_eq!(selection.storage_label, "local-keystore/alice/1");
+    }
+
+    #[test]
+    fn fail_closed_unlocker_rejects_before_private_key_exposure() {
+        let request = LocalPrivateKeyUnlockRequest {
+            selection: LocalPrivateKeySelector::new(
+                MockLocalKeystoreResolver::default().with_record(record(1)),
+            )
+            .select_enabled_key(request())
+            .unwrap(),
+        };
+
+        assert_eq!(
+            FailClosedLocalPrivateKeyUnlocker.unlock_private_key(request),
+            Err(LocalKeystoreError::UnlockNotImplemented)
+        );
+    }
+
+    #[test]
+    fn unlock_validation_rejects_mismatched_or_empty_plaintext_pem() {
+        let selection = LocalPrivateKeySelector::new(
+            MockLocalKeystoreResolver::default().with_record(record(1)),
+        )
+        .select_enabled_key(request())
+        .unwrap();
+
+        assert_eq!(
+            validate_local_private_key_unlock(
+                &selection,
+                LocalPrivateKeyUnlock {
+                    account: "mallory".to_owned(),
+                    key_type: selection.key_type.clone(),
+                    key_version: selection.key_version,
+                    private_key_pem: b"pem".to_vec(),
+                    storage_label: selection.storage_label.clone(),
+                },
+            ),
+            Err(LocalKeystoreError::UnlockedPrivateKeyAccountMismatch {
+                expected: "alice".to_owned(),
+                actual: "mallory".to_owned(),
+            })
+        );
+
+        assert_eq!(
+            validate_local_private_key_unlock(
+                &selection,
+                LocalPrivateKeyUnlock {
+                    account: selection.account.clone(),
+                    key_type: selection.key_type.clone(),
+                    key_version: selection.key_version,
+                    private_key_pem: Vec::new(),
+                    storage_label: selection.storage_label.clone(),
+                },
+            ),
+            Err(LocalKeystoreError::EmptyUnlockedPrivateKeyPem(
+                "alice".to_owned()
+            ))
+        );
     }
 }
