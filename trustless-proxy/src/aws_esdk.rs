@@ -894,4 +894,133 @@ mod tests {
             KeyringError::AwsEsdkMissingLocalKeyName
         );
     }
+
+    fn run_openssl(args: &[&str], cwd: &std::path::Path) {
+        let output = std::process::Command::new("openssl")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("failed to invoke openssl for AWS ESDK Raw RSA test key generation");
+
+        assert!(
+            output.status.success(),
+            "openssl {:?} failed\nstdout:\n{}\nstderr:\n{}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn generate_test_rsa_pem_pair() -> (Vec<u8>, Vec<u8>) {
+        let dir = tempfile::tempdir().expect("failed to create temp dir for RSA test keys");
+        let private_key = dir.path().join("private.pem");
+        let public_key = dir.path().join("public.pem");
+
+        run_openssl(
+            &[
+                "genpkey",
+                "-algorithm",
+                "RSA",
+                "-pkeyopt",
+                "rsa_keygen_bits:2048",
+                "-out",
+                private_key
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .expect("private key filename must be UTF-8"),
+            ],
+            dir.path(),
+        );
+
+        run_openssl(
+            &[
+                "rsa",
+                "-in",
+                private_key
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .expect("private key filename must be UTF-8"),
+                "-pubout",
+                "-out",
+                public_key
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .expect("public key filename must be UTF-8"),
+            ],
+            dir.path(),
+        );
+
+        let private_key_pem =
+            std::fs::read(&private_key).expect("failed to read generated private key PEM");
+        let public_key_pem =
+            std::fs::read(&public_key).expect("failed to read generated public key PEM");
+
+        assert!(
+            String::from_utf8_lossy(&private_key_pem).contains("PRIVATE KEY"),
+            "generated private key must be PEM encoded"
+        );
+        assert!(
+            String::from_utf8_lossy(&public_key_pem).contains("PUBLIC KEY"),
+            "generated public key must be PEM encoded"
+        );
+
+        (private_key_pem, public_key_pem)
+    }
+
+    fn real_single_recipient_context(public_key_pem: &[u8]) -> RecipientEnvelopeContext {
+        RecipientEnvelopeContext {
+            bucket_id: hex::encode([1u8; 32]),
+            object_key_id: hex::encode([2u8; 32]),
+            policy_version: 7,
+            recipients: vec![RecipientEncryptionKey {
+                account: "alice".to_owned(),
+                public_key: String::from_utf8(public_key_pem.to_vec())
+                    .expect("generated public key PEM must be UTF-8"),
+                key_type: "aws-esdk-rust-recipient-key".to_owned(),
+                key_version: 1,
+                enabled: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn real_aws_esdk_raw_rsa_adapter_encrypts_and_decrypts_with_generated_pem_pair() {
+        let (private_key_pem, public_key_pem) = generate_test_rsa_pem_pair();
+        let context = real_single_recipient_context(&public_key_pem);
+        let local_key_name = "alice:aws-esdk-rust-recipient-key:1".to_owned();
+
+        let adapter =
+            RealAwsEsdkRawRsaByteCryptoAdapter::new(AwsEsdkRawRsaByteCryptoAdapterConfig {
+                local_key_name: Some(local_key_name),
+                local_private_key_pem: Some(private_key_pem),
+                ..AwsEsdkRawRsaByteCryptoAdapterConfig::default()
+            });
+
+        let keyring = AwsEsdkTrustlessRecipientKeyring::with_adapter(
+            AwsEsdkKeyringConfig::default(),
+            adapter,
+        );
+
+        let plaintext = b"trustless plaintext stays local".to_vec();
+
+        let ciphertext = keyring
+            .encrypt_with_recipient_envelopes(&plaintext, &context)
+            .unwrap();
+
+        assert!(!ciphertext.is_empty());
+        assert_ne!(ciphertext, plaintext);
+        assert!(
+            !String::from_utf8_lossy(&ciphertext).contains("trustless plaintext stays local"),
+            "ciphertext must not expose plaintext"
+        );
+
+        let decrypted = keyring
+            .decrypt_with_local_recipient_key(&ciphertext, &context)
+            .unwrap();
+
+        assert_eq!(decrypted, plaintext);
+    }
 }
