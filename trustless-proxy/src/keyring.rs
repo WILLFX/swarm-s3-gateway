@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+use crate::local_keystore::LocalKeystoreError;
 use crate::types::RecipientEnvelopeContext;
 
 /// Boundary for the future AWS Encryption SDK for Rust custom keyring.
@@ -47,6 +48,9 @@ pub enum KeyringError {
 
     #[error("AWS Encryption SDK decryption response did not contain plaintext")]
     AwsEsdkMissingPlaintextOutput,
+
+    #[error(transparent)]
+    LocalKeystore(#[from] LocalKeystoreError),
 
     #[error("AWS ESDK Raw RSA key namespace is required")]
     AwsEsdkMissingKeyNamespace,

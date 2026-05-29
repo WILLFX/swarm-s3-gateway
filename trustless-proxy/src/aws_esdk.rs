@@ -1,6 +1,10 @@
 use std::{collections::BTreeMap, fmt, future::Future};
 
 use crate::keyring::{KeyringError, TrustlessRecipientKeyring};
+use crate::local_keystore::{
+    LocalPrivateKeySelection, LocalPrivateKeyUnlockRequest, LocalPrivateKeyUnlocker,
+    validate_local_private_key_unlock,
+};
 use crate::types::{RecipientEncryptionKey, RecipientEnvelopeContext, SubstrateAccountId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +118,44 @@ impl Default for AwsEsdkRawRsaByteCryptoAdapterConfig {
             local_private_key_pem: None,
             padding_scheme: AwsEsdkRawRsaPaddingScheme::OaepSha256Mgf1,
         }
+    }
+}
+
+impl AwsEsdkRawRsaByteCryptoAdapterConfig {
+    pub fn from_local_private_key_selection<U>(
+        selection: LocalPrivateKeySelection,
+        unlocker: &U,
+    ) -> Result<Self, KeyringError>
+    where
+        U: LocalPrivateKeyUnlocker,
+    {
+        Self::from_local_private_key_selection_with_namespace(
+            selection,
+            Self::default().key_namespace,
+            unlocker,
+        )
+    }
+
+    pub fn from_local_private_key_selection_with_namespace<U>(
+        selection: LocalPrivateKeySelection,
+        key_namespace: impl Into<String>,
+        unlocker: &U,
+    ) -> Result<Self, KeyringError>
+    where
+        U: LocalPrivateKeyUnlocker,
+    {
+        let unlocked = unlocker.unlock_private_key(LocalPrivateKeyUnlockRequest {
+            selection: selection.clone(),
+        })?;
+
+        let unlocked = validate_local_private_key_unlock(&selection, unlocked)?;
+
+        Ok(Self {
+            key_namespace: key_namespace.into(),
+            local_key_name: Some(raw_rsa_local_key_name(&selection)),
+            local_private_key_pem: Some(unlocked.private_key_pem),
+            padding_scheme: AwsEsdkRawRsaPaddingScheme::default(),
+        })
     }
 }
 
@@ -474,6 +516,13 @@ fn raw_rsa_recipient_key_name(recipient: &AwsEsdkRecipientEnvelopeDescriptor) ->
     )
 }
 
+fn raw_rsa_local_key_name(selection: &LocalPrivateKeySelection) -> String {
+    format!(
+        "{}:{}:{}",
+        selection.account, selection.key_type, selection.key_version
+    )
+}
+
 fn ensure_returned_context_contains_expected(
     returned_context: Option<std::collections::HashMap<String, String>>,
     expected_context: &BTreeMap<String, String>,
@@ -558,6 +607,7 @@ fn require_non_empty(value: &str, error: KeyringError) -> Result<String, Keyring
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_keystore::{LocalKeystoreError, LocalPrivateKeyUnlock};
 
     fn recipient(account: &str) -> RecipientEncryptionKey {
         RecipientEncryptionKey {
@@ -1015,6 +1065,132 @@ mod tests {
         assert!(
             !String::from_utf8_lossy(&ciphertext).contains("trustless plaintext stays local"),
             "ciphertext must not expose plaintext"
+        );
+
+        let decrypted = keyring
+            .decrypt_with_local_recipient_key(&ciphertext, &context)
+            .unwrap();
+
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[derive(Debug, Clone)]
+    struct MockLocalPrivateKeyUnlocker {
+        unlocked: LocalPrivateKeyUnlock,
+    }
+
+    impl LocalPrivateKeyUnlocker for MockLocalPrivateKeyUnlocker {
+        fn unlock_private_key(
+            &self,
+            _request: LocalPrivateKeyUnlockRequest,
+        ) -> Result<LocalPrivateKeyUnlock, LocalKeystoreError> {
+            Ok(self.unlocked.clone())
+        }
+    }
+
+    fn local_private_key_selection() -> LocalPrivateKeySelection {
+        LocalPrivateKeySelection {
+            account: "alice".to_owned(),
+            key_type: "aws-esdk-rust-recipient-key".to_owned(),
+            key_version: 1,
+            encrypted_private_key_blob: b"encrypted-private-key-blob".to_vec(),
+            storage_label: "local-keystore/alice/1".to_owned(),
+        }
+    }
+
+    fn unlocked_private_key(private_key_pem: Vec<u8>) -> LocalPrivateKeyUnlock {
+        let selection = local_private_key_selection();
+
+        LocalPrivateKeyUnlock {
+            account: selection.account,
+            key_type: selection.key_type,
+            key_version: selection.key_version,
+            private_key_pem,
+            storage_label: selection.storage_label,
+        }
+    }
+
+    #[test]
+    fn raw_rsa_config_builds_from_local_keystore_unlock_output_without_debug_leak() {
+        let unlocker = MockLocalPrivateKeyUnlocker {
+            unlocked: unlocked_private_key(
+                b"-----BEGIN PRIVATE KEY-----\nredacted\n-----END PRIVATE KEY-----\n".to_vec(),
+            ),
+        };
+
+        let config = AwsEsdkRawRsaByteCryptoAdapterConfig::from_local_private_key_selection(
+            local_private_key_selection(),
+            &unlocker,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.local_key_name,
+            Some("alice:aws-esdk-rust-recipient-key:1".to_owned())
+        );
+        assert_eq!(
+            config.local_private_key_pem,
+            Some(b"-----BEGIN PRIVATE KEY-----\nredacted\n-----END PRIVATE KEY-----\n".to_vec())
+        );
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("<redacted:"));
+        assert!(!debug.contains("BEGIN PRIVATE KEY"));
+        assert!(!debug.contains("redacted\n-----END"));
+    }
+
+    #[test]
+    fn raw_rsa_config_rejects_bad_local_keystore_unlock_output() {
+        let unlocker = MockLocalPrivateKeyUnlocker {
+            unlocked: LocalPrivateKeyUnlock {
+                account: "mallory".to_owned(),
+                ..unlocked_private_key(b"pem".to_vec())
+            },
+        };
+
+        assert_eq!(
+            AwsEsdkRawRsaByteCryptoAdapterConfig::from_local_private_key_selection(
+                local_private_key_selection(),
+                &unlocker,
+            )
+            .unwrap_err(),
+            KeyringError::LocalKeystore(LocalKeystoreError::UnlockedPrivateKeyAccountMismatch {
+                expected: "alice".to_owned(),
+                actual: "mallory".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn real_aws_esdk_raw_rsa_adapter_roundtrip_uses_local_keystore_unlock_output() {
+        let (private_key_pem, public_key_pem) = generate_test_rsa_pem_pair();
+        let context = real_single_recipient_context(&public_key_pem);
+
+        let unlocker = MockLocalPrivateKeyUnlocker {
+            unlocked: unlocked_private_key(private_key_pem),
+        };
+
+        let config = AwsEsdkRawRsaByteCryptoAdapterConfig::from_local_private_key_selection(
+            local_private_key_selection(),
+            &unlocker,
+        )
+        .unwrap();
+
+        let keyring = AwsEsdkTrustlessRecipientKeyring::with_adapter(
+            AwsEsdkKeyringConfig::default(),
+            RealAwsEsdkRawRsaByteCryptoAdapter::new(config),
+        );
+
+        let plaintext = b"local keystore unlock feeds AWS ESDK Raw RSA".to_vec();
+
+        let ciphertext = keyring
+            .encrypt_with_recipient_envelopes(&plaintext, &context)
+            .unwrap();
+
+        assert_ne!(ciphertext, plaintext);
+        assert!(
+            !String::from_utf8_lossy(&ciphertext)
+                .contains("local keystore unlock feeds AWS ESDK Raw RSA")
         );
 
         let decrypted = keyring
