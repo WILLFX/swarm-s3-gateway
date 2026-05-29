@@ -33,8 +33,11 @@ pub mod service;
 pub mod types;
 
 pub use aws_esdk::{
-    AwsEsdkKeyringConfig, AwsEsdkRecipientEnvelopeDescriptor, AwsEsdkRecipientEnvelopePlan,
-    AwsEsdkTrustlessRecipientKeyring,
+    AwsEsdkByteCryptoAdapter, AwsEsdkDecryptInput, AwsEsdkEncryptInput, AwsEsdkEncryptionContext,
+    AwsEsdkKeyringConfig, AwsEsdkRawRsaByteCryptoAdapterConfig, AwsEsdkRawRsaPaddingScheme,
+    AwsEsdkRecipientEnvelopeDescriptor, AwsEsdkRecipientEnvelopePlan,
+    AwsEsdkTrustlessRecipientKeyring, RealAwsEsdkRawRsaByteCryptoAdapter,
+    UnwiredAwsEsdkByteCryptoAdapter,
 };
 pub use chain_recipient_key_adapter::{
     ChainRecipientAccountMapping, ChainRecipientEncryptionKeyLookup, ChainRecipientKeyAdapterError,

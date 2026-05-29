@@ -1,12 +1,18 @@
 use std::env;
+use std::fmt;
 use std::path::PathBuf;
 
 use thiserror::Error;
 
+use crate::local_keystore::AesGcmLocalPrivateKeyUnlocker;
+
 const DEFAULT_LISTEN_HOST: &str = "127.0.0.1";
 const DEFAULT_LISTEN_PORT: u16 = 9090;
+const DEFAULT_AWS_ESDK_KEY_NAMESPACE: &str = "swarm-s3-trustless-recipient";
+const LOCAL_PRIVATE_KEY_UNLOCK_KEY_HEX_ENV: &str =
+    "TRUSTLESS_PROXY_LOCAL_PRIVATE_KEY_UNLOCK_KEY_HEX";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TrustlessProxyConfig {
     pub listen_host: String,
     pub listen_port: u16,
@@ -14,6 +20,23 @@ pub struct TrustlessProxyConfig {
     pub chain_rpc_url: String,
     pub local_account: String,
     pub keystore_path: PathBuf,
+    pub local_private_key_unlock_key: [u8; 32],
+    pub aws_esdk_key_namespace: String,
+}
+
+impl fmt::Debug for TrustlessProxyConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TrustlessProxyConfig")
+            .field("listen_host", &self.listen_host)
+            .field("listen_port", &self.listen_port)
+            .field("remote_gateway_url", &self.remote_gateway_url)
+            .field("chain_rpc_url", &self.chain_rpc_url)
+            .field("local_account", &self.local_account)
+            .field("keystore_path", &self.keystore_path)
+            .field("local_private_key_unlock_key", &"<redacted>")
+            .field("aws_esdk_key_namespace", &self.aws_esdk_key_namespace)
+            .finish()
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -23,6 +46,11 @@ pub enum ConfigError {
 
     #[error("TRUSTLESS_PROXY_LISTEN_PORT must be an integer from 1 to 65535")]
     InvalidListenPort,
+
+    #[error(
+        "TRUSTLESS_PROXY_LOCAL_PRIVATE_KEY_UNLOCK_KEY_HEX must be 32 bytes encoded as 64 hex characters"
+    )]
+    InvalidLocalPrivateKeyUnlockKeyHex,
 }
 
 impl TrustlessProxyConfig {
@@ -44,7 +72,19 @@ impl TrustlessProxyConfig {
             chain_rpc_url: required_env(&read_env, "TRUSTLESS_PROXY_CHAIN_RPC_URL")?,
             local_account: required_env(&read_env, "TRUSTLESS_PROXY_LOCAL_ACCOUNT")?,
             keystore_path: PathBuf::from(required_env(&read_env, "TRUSTLESS_PROXY_KEYSTORE_PATH")?),
+            local_private_key_unlock_key: parse_local_private_key_unlock_key_hex(required_env(
+                &read_env,
+                LOCAL_PRIVATE_KEY_UNLOCK_KEY_HEX_ENV,
+            )?)?,
+            aws_esdk_key_namespace: read_env("TRUSTLESS_PROXY_AWS_ESDK_KEY_NAMESPACE")
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| DEFAULT_AWS_ESDK_KEY_NAMESPACE.to_owned()),
         })
+    }
+
+    pub fn local_private_key_unlocker(&self) -> AesGcmLocalPrivateKeyUnlocker {
+        AesGcmLocalPrivateKeyUnlocker::new(self.local_private_key_unlock_key)
     }
 }
 
@@ -56,6 +96,15 @@ where
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .ok_or(ConfigError::MissingRequiredEnv(name))
+}
+
+fn parse_local_private_key_unlock_key_hex(value: String) -> Result<[u8; 32], ConfigError> {
+    let bytes =
+        hex::decode(value.trim()).map_err(|_| ConfigError::InvalidLocalPrivateKeyUnlockKeyHex)?;
+
+    bytes
+        .try_into()
+        .map_err(|_| ConfigError::InvalidLocalPrivateKeyUnlockKeyHex)
 }
 
 fn parse_port(value: Option<String>) -> Result<u16, ConfigError> {
@@ -92,6 +141,7 @@ mod tests {
             "TRUSTLESS_PROXY_KEYSTORE_PATH" => {
                 Some("./.local/trustless-proxy-keystore.json".to_owned())
             }
+            "TRUSTLESS_PROXY_LOCAL_PRIVATE_KEY_UNLOCK_KEY_HEX" => Some(hex::encode([7u8; 32])),
             _ => None,
         }
     }
@@ -109,6 +159,15 @@ mod tests {
             config.keystore_path,
             PathBuf::from("./.local/trustless-proxy-keystore.json")
         );
+        assert_eq!(config.local_private_key_unlock_key, [7u8; 32]);
+        assert_eq!(
+            config.aws_esdk_key_namespace,
+            "swarm-s3-trustless-recipient"
+        );
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains(&hex::encode([7u8; 32])));
     }
 
     #[test]
@@ -139,6 +198,44 @@ mod tests {
             err,
             ConfigError::MissingRequiredEnv("TRUSTLESS_PROXY_REMOTE_GATEWAY_URL")
         );
+    }
+
+    #[test]
+    fn config_accepts_explicit_aws_esdk_key_namespace() {
+        let config = TrustlessProxyConfig::from_env_reader(|name| match name {
+            "TRUSTLESS_PROXY_AWS_ESDK_KEY_NAMESPACE" => {
+                Some("custom-trustless-namespace".to_owned())
+            }
+            other => env_value(other),
+        })
+        .unwrap();
+
+        assert_eq!(config.aws_esdk_key_namespace, "custom-trustless-namespace");
+    }
+
+    #[test]
+    fn config_rejects_invalid_local_private_key_unlock_key_hex() {
+        let err = TrustlessProxyConfig::from_env_reader(|name| {
+            if name == "TRUSTLESS_PROXY_LOCAL_PRIVATE_KEY_UNLOCK_KEY_HEX" {
+                Some("not-hex".to_owned())
+            } else {
+                env_value(name)
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(err, ConfigError::InvalidLocalPrivateKeyUnlockKeyHex);
+
+        let err = TrustlessProxyConfig::from_env_reader(|name| {
+            if name == "TRUSTLESS_PROXY_LOCAL_PRIVATE_KEY_UNLOCK_KEY_HEX" {
+                Some(hex::encode([1u8; 31]))
+            } else {
+                env_value(name)
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(err, ConfigError::InvalidLocalPrivateKeyUnlockKeyHex);
     }
 
     #[test]
