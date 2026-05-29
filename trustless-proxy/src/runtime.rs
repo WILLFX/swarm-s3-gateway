@@ -1,9 +1,18 @@
 use thiserror::Error;
 
+use crate::config::TrustlessProxyConfig;
+use crate::execution_coordinator::{
+    TrustlessExecutionCoordinator, TrustlessExecutionCoordinatorError,
+};
+use crate::gateway_boundary::{CiphertextGatewayRequest, CiphertextGatewayResponse};
 use crate::handler::{
     LocalTrustlessHandler, LocalTrustlessHandlerCompletion, LocalTrustlessHandlerError,
     LocalTrustlessHandlerPreparedResponse,
 };
+use crate::remote_gateway::{
+    RemoteGatewayClientError, TrustlessRemoteGatewayClient, TrustlessRemoteGatewayExecutor,
+};
+use crate::remote_gateway_http::RemoteGatewayHttpClient;
 use crate::request_adapter::LocalTrustlessRequestInput;
 use crate::response_adapter::{LocalTrustlessResponseEnvelope, LocalTrustlessResponseState};
 use crate::s3_surface::LocalS3Operation;
@@ -38,8 +47,17 @@ pub enum LocalTrustlessRuntimeError {
     #[error(transparent)]
     Handler(LocalTrustlessHandlerError),
 
+    #[error(transparent)]
+    RemoteGateway(RemoteGatewayClientError),
+
+    #[error(transparent)]
+    ExecutionCoordinator(TrustlessExecutionCoordinatorError),
+
     #[error("gateway plaintext access is not allowed")]
     GatewayPlaintextAccessRejected,
+
+    #[error("prepared runtime response does not require remote gateway execution")]
+    PreparedResponseDoesNotRequireRemoteGateway,
 
     #[error("prepared runtime response is not a pending GET local decrypt")]
     PreparedResponseIsNotPendingGetDecrypt,
@@ -48,6 +66,18 @@ pub enum LocalTrustlessRuntimeError {
 impl From<LocalTrustlessHandlerError> for LocalTrustlessRuntimeError {
     fn from(error: LocalTrustlessHandlerError) -> Self {
         Self::Handler(error)
+    }
+}
+
+impl From<RemoteGatewayClientError> for LocalTrustlessRuntimeError {
+    fn from(error: RemoteGatewayClientError) -> Self {
+        Self::RemoteGateway(error)
+    }
+}
+
+impl From<TrustlessExecutionCoordinatorError> for LocalTrustlessRuntimeError {
+    fn from(error: TrustlessExecutionCoordinatorError) -> Self {
+        Self::ExecutionCoordinator(error)
     }
 }
 
@@ -77,6 +107,45 @@ impl LocalTrustlessRuntime {
             remote_gateway_required,
             gateway_plaintext_access: false,
         })
+    }
+
+    pub fn execute_prepared_remote_request<C>(
+        prepared: &LocalTrustlessRuntimePreparedResponse,
+        request: CiphertextGatewayRequest,
+        executor: &TrustlessRemoteGatewayExecutor<C>,
+    ) -> Result<CiphertextGatewayResponse, LocalTrustlessRuntimeError>
+    where
+        C: TrustlessRemoteGatewayClient,
+    {
+        validate_prepared_remote_execution(prepared)?;
+
+        let response = executor.execute(request)?;
+        let response = TrustlessExecutionCoordinator::validate_remote_gateway_response(
+            &prepared
+                .handler_response
+                .request_preparation
+                .prepared_operation
+                .pipeline_plan,
+            response,
+        )?;
+
+        if response.gateway_plaintext_access {
+            return Err(LocalTrustlessRuntimeError::GatewayPlaintextAccessRejected);
+        }
+
+        Ok(response)
+    }
+
+    pub fn execute_prepared_remote_http_request(
+        prepared: &LocalTrustlessRuntimePreparedResponse,
+        request: CiphertextGatewayRequest,
+        config: &TrustlessProxyConfig,
+    ) -> Result<CiphertextGatewayResponse, LocalTrustlessRuntimeError> {
+        let client = RemoteGatewayHttpClient::new(config.remote_gateway_url.clone())
+            .map_err(RemoteGatewayClientError::from)?;
+        let executor = TrustlessRemoteGatewayExecutor::new(client);
+
+        Self::execute_prepared_remote_request(prepared, request, &executor)
     }
 
     pub fn complete_get_with_plaintext(
@@ -123,6 +192,30 @@ impl LocalTrustlessRuntime {
             gateway_plaintext_access: false,
         })
     }
+}
+
+fn validate_prepared_remote_execution(
+    prepared: &LocalTrustlessRuntimePreparedResponse,
+) -> Result<(), LocalTrustlessRuntimeError> {
+    if prepared.gateway_plaintext_access
+        || prepared.handler_response.gateway_plaintext_access
+        || prepared.response_envelope.gateway_plaintext_access
+    {
+        return Err(LocalTrustlessRuntimeError::GatewayPlaintextAccessRejected);
+    }
+
+    if !prepared.remote_gateway_required
+        || !prepared.response_envelope.remote_gateway_required
+        || !prepared
+            .handler_response
+            .request_preparation
+            .prepared_operation
+            .remote_gateway_required
+    {
+        return Err(LocalTrustlessRuntimeError::PreparedResponseDoesNotRequireRemoteGateway);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -301,5 +394,240 @@ mod tests {
             err,
             LocalTrustlessRuntimeError::PreparedResponseIsNotPendingGetDecrypt
         );
+    }
+
+    #[test]
+    fn runtime_executes_prepared_remote_request_through_executor() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use crate::gateway_boundary::{CiphertextGatewayRequest, CiphertextGatewayResponse};
+        use crate::planner::RemoteGatewayAction;
+        use crate::remote_gateway::{
+            RemoteGatewayClientError, TrustlessRemoteGatewayClient, TrustlessRemoteGatewayExecutor,
+        };
+
+        #[derive(Debug, Clone)]
+        struct MockRemoteGatewayClient {
+            response: CiphertextGatewayResponse,
+            seen_request: Rc<RefCell<Option<CiphertextGatewayRequest>>>,
+        }
+
+        impl TrustlessRemoteGatewayClient for MockRemoteGatewayClient {
+            fn execute_ciphertext_request(
+                &self,
+                request: CiphertextGatewayRequest,
+            ) -> Result<CiphertextGatewayResponse, RemoteGatewayClientError> {
+                *self.seen_request.borrow_mut() = Some(request);
+                Ok(self.response.clone())
+            }
+        }
+
+        let prepared =
+            LocalTrustlessRuntime::prepare_request(request_input(LocalS3Operation::GetObject))
+                .unwrap();
+
+        let seen_request = Rc::new(RefCell::new(None));
+        let executor = TrustlessRemoteGatewayExecutor::new(MockRemoteGatewayClient {
+            response: CiphertextGatewayResponse {
+                action: RemoteGatewayAction::GetCiphertextObject,
+                ciphertext_payload: Some(b"ciphertext".to_vec()),
+                encrypted_manifest_payload: None,
+                metadata_only: false,
+                gateway_plaintext_access: false,
+            },
+            seen_request: seen_request.clone(),
+        });
+
+        let response = LocalTrustlessRuntime::execute_prepared_remote_request(
+            &prepared,
+            CiphertextGatewayRequest {
+                bucket: "bucket".to_owned(),
+                key: Some("secret.txt".to_owned()),
+                action: RemoteGatewayAction::GetCiphertextObject,
+                ciphertext_payload: None,
+                encrypted_manifest_payload: None,
+                plaintext_payload_present: false,
+            },
+            &executor,
+        )
+        .unwrap();
+
+        assert_eq!(response.action, RemoteGatewayAction::GetCiphertextObject);
+        assert_eq!(response.ciphertext_payload, Some(b"ciphertext".to_vec()));
+        assert!(!response.gateway_plaintext_access);
+
+        let seen_request = seen_request.borrow().clone().unwrap();
+        assert_eq!(
+            seen_request.action,
+            RemoteGatewayAction::GetCiphertextObject
+        );
+        assert!(!seen_request.plaintext_payload_present);
+        assert!(seen_request.ciphertext_payload.is_none());
+        assert!(seen_request.encrypted_manifest_payload.is_none());
+    }
+
+    #[test]
+    fn runtime_rejects_remote_response_action_mismatch() {
+        use crate::gateway_boundary::{CiphertextGatewayRequest, CiphertextGatewayResponse};
+        use crate::planner::RemoteGatewayAction;
+        use crate::remote_gateway::{
+            RemoteGatewayClientError, TrustlessRemoteGatewayClient, TrustlessRemoteGatewayExecutor,
+        };
+
+        #[derive(Debug, Clone)]
+        struct MockRemoteGatewayClient {
+            response: CiphertextGatewayResponse,
+        }
+
+        impl TrustlessRemoteGatewayClient for MockRemoteGatewayClient {
+            fn execute_ciphertext_request(
+                &self,
+                _request: CiphertextGatewayRequest,
+            ) -> Result<CiphertextGatewayResponse, RemoteGatewayClientError> {
+                Ok(self.response.clone())
+            }
+        }
+
+        let prepared =
+            LocalTrustlessRuntime::prepare_request(request_input(LocalS3Operation::GetObject))
+                .unwrap();
+
+        let executor = TrustlessRemoteGatewayExecutor::new(MockRemoteGatewayClient {
+            response: CiphertextGatewayResponse {
+                action: RemoteGatewayAction::PutCiphertextObject,
+                ciphertext_payload: None,
+                encrypted_manifest_payload: None,
+                metadata_only: true,
+                gateway_plaintext_access: false,
+            },
+        });
+
+        let err = LocalTrustlessRuntime::execute_prepared_remote_request(
+            &prepared,
+            CiphertextGatewayRequest {
+                bucket: "bucket".to_owned(),
+                key: Some("secret.txt".to_owned()),
+                action: RemoteGatewayAction::GetCiphertextObject,
+                ciphertext_payload: None,
+                encrypted_manifest_payload: None,
+                plaintext_payload_present: false,
+            },
+            &executor,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            LocalTrustlessRuntimeError::ExecutionCoordinator(
+                TrustlessExecutionCoordinatorError::RemoteActionMismatch { .. }
+            )
+        ));
+    }
+
+    #[test]
+    fn runtime_rejects_remote_execution_when_prepared_response_does_not_require_gateway() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use crate::gateway_boundary::{CiphertextGatewayRequest, CiphertextGatewayResponse};
+        use crate::planner::RemoteGatewayAction;
+        use crate::remote_gateway::{
+            RemoteGatewayClientError, TrustlessRemoteGatewayClient, TrustlessRemoteGatewayExecutor,
+        };
+
+        #[derive(Debug, Clone)]
+        struct MockRemoteGatewayClient {
+            seen_request: Rc<RefCell<Option<CiphertextGatewayRequest>>>,
+        }
+
+        impl TrustlessRemoteGatewayClient for MockRemoteGatewayClient {
+            fn execute_ciphertext_request(
+                &self,
+                request: CiphertextGatewayRequest,
+            ) -> Result<CiphertextGatewayResponse, RemoteGatewayClientError> {
+                *self.seen_request.borrow_mut() = Some(request);
+                Ok(CiphertextGatewayResponse {
+                    action: RemoteGatewayAction::CreateTrustlessBucket,
+                    ciphertext_payload: None,
+                    encrypted_manifest_payload: None,
+                    metadata_only: true,
+                    gateway_plaintext_access: false,
+                })
+            }
+        }
+
+        let prepared = LocalTrustlessRuntime::prepare_request(LocalTrustlessRequestInput {
+            operation: LocalS3Operation::CreateTrustlessBucket,
+            key: None,
+            object_key_id: None,
+            ..request_input(LocalS3Operation::CreateTrustlessBucket)
+        })
+        .unwrap();
+
+        let seen_request = Rc::new(RefCell::new(None));
+        let executor = TrustlessRemoteGatewayExecutor::new(MockRemoteGatewayClient {
+            seen_request: seen_request.clone(),
+        });
+
+        let err = LocalTrustlessRuntime::execute_prepared_remote_request(
+            &prepared,
+            CiphertextGatewayRequest {
+                bucket: "bucket".to_owned(),
+                key: None,
+                action: RemoteGatewayAction::CreateTrustlessBucket,
+                ciphertext_payload: None,
+                encrypted_manifest_payload: None,
+                plaintext_payload_present: false,
+            },
+            &executor,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            LocalTrustlessRuntimeError::PreparedResponseDoesNotRequireRemoteGateway
+        );
+        assert!(seen_request.borrow().is_none());
+    }
+
+    #[test]
+    fn runtime_builds_remote_http_client_from_config_and_rejects_invalid_gateway_url() {
+        use std::path::PathBuf;
+
+        use crate::config::TrustlessProxyConfig;
+        use crate::gateway_boundary::CiphertextGatewayRequest;
+        use crate::planner::RemoteGatewayAction;
+        use crate::remote_gateway::RemoteGatewayClientError;
+
+        let prepared =
+            LocalTrustlessRuntime::prepare_request(request_input(LocalS3Operation::GetObject))
+                .unwrap();
+
+        let err = LocalTrustlessRuntime::execute_prepared_remote_http_request(
+            &prepared,
+            CiphertextGatewayRequest {
+                bucket: "bucket".to_owned(),
+                key: Some("secret.txt".to_owned()),
+                action: RemoteGatewayAction::GetCiphertextObject,
+                ciphertext_payload: None,
+                encrypted_manifest_payload: None,
+                plaintext_payload_present: false,
+            },
+            &TrustlessProxyConfig {
+                listen_host: "127.0.0.1".to_owned(),
+                listen_port: 9090,
+                remote_gateway_url: "not-a-url".to_owned(),
+                chain_rpc_url: "ws://127.0.0.1:9944".to_owned(),
+                local_account: "alice".to_owned(),
+                keystore_path: PathBuf::from("./keystore.json"),
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            LocalTrustlessRuntimeError::RemoteGateway(RemoteGatewayClientError::Http(_))
+        ));
     }
 }
