@@ -601,4 +601,163 @@ mod tests {
 
         assert!(matches!(err, RemoteGatewayClientError::Http(_)));
     }
+
+    #[test]
+    fn http_client_wire_contract_matches_gateway_ciphertext_endpoint_for_all_actions() {
+        let cases = vec![
+            (
+                RemoteGatewayAction::PutCiphertextObject,
+                "put_ciphertext_object",
+                Some("object.txt"),
+                Some(b"ciphertext-object".to_vec()),
+                None,
+                None,
+                None,
+                true,
+            ),
+            (
+                RemoteGatewayAction::GetCiphertextObject,
+                "get_ciphertext_object",
+                Some("object.txt"),
+                None,
+                None,
+                Some(b"ciphertext-object".to_vec()),
+                None,
+                false,
+            ),
+            (
+                RemoteGatewayAction::HeadCiphertextObject,
+                "head_ciphertext_object",
+                Some("object.txt"),
+                None,
+                None,
+                None,
+                None,
+                true,
+            ),
+            (
+                RemoteGatewayAction::ListCiphertextManifest,
+                "list_ciphertext_manifest",
+                None,
+                None,
+                None,
+                None,
+                Some(b"encrypted-manifest".to_vec()),
+                false,
+            ),
+            (
+                RemoteGatewayAction::DeleteCiphertextObject,
+                "delete_ciphertext_object",
+                None,
+                None,
+                Some(b"encrypted-manifest".to_vec()),
+                None,
+                None,
+                true,
+            ),
+            (
+                RemoteGatewayAction::CreateTrustlessBucket,
+                "create_trustless_bucket",
+                None,
+                None,
+                None,
+                None,
+                None,
+                true,
+            ),
+        ];
+
+        for (
+            action,
+            expected_wire_action,
+            key,
+            ciphertext_payload,
+            encrypted_manifest_payload,
+            response_ciphertext_payload,
+            response_encrypted_manifest_payload,
+            response_metadata_only,
+        ) in cases
+        {
+            let transport = MockHttpTransport::new(RemoteGatewayHttpResponseEnvelope {
+                version: WIRE_VERSION,
+                action: expected_wire_action.to_owned(),
+                ciphertext_hex: response_ciphertext_payload.as_ref().map(hex::encode),
+                encrypted_manifest_hex: response_encrypted_manifest_payload
+                    .as_ref()
+                    .map(hex::encode),
+                metadata_only: response_metadata_only,
+                gateway_plaintext_access: false,
+            });
+
+            let client = RemoteGatewayHttpClient::with_transport(
+                RemoteGatewayHttpClientConfig {
+                    base_url: "http://gateway.local/".to_owned(),
+                },
+                transport.clone(),
+            )
+            .unwrap();
+
+            let response = client
+                .execute_ciphertext_request(CiphertextGatewayRequest {
+                    bucket: "bucket-a".to_owned(),
+                    key: key.map(str::to_owned),
+                    action,
+                    ciphertext_payload: ciphertext_payload.clone(),
+                    encrypted_manifest_payload: encrypted_manifest_payload.clone(),
+                    plaintext_payload_present: false,
+                })
+                .unwrap();
+
+            assert_eq!(
+                transport.state.borrow().seen_url.as_deref(),
+                Some("http://gateway.local/trustless/v1/ciphertext-gateway")
+            );
+
+            let body = transport.seen_body_json();
+            let object = body.as_object().unwrap();
+
+            assert_eq!(object.len(), 6);
+            assert!(object.contains_key("version"));
+            assert!(object.contains_key("action"));
+            assert!(object.contains_key("bucket"));
+            assert!(object.contains_key("key"));
+            assert!(object.contains_key("ciphertext_hex"));
+            assert!(object.contains_key("encrypted_manifest_hex"));
+
+            assert_eq!(body["version"], WIRE_VERSION);
+            assert_eq!(body["action"], expected_wire_action);
+            assert_eq!(body["bucket"], "bucket-a");
+
+            match key {
+                Some(expected_key) => assert_eq!(body["key"], expected_key),
+                None => assert!(body["key"].is_null()),
+            }
+
+            match ciphertext_payload {
+                Some(expected_payload) => {
+                    assert_eq!(body["ciphertext_hex"], hex::encode(expected_payload));
+                }
+                None => assert!(body["ciphertext_hex"].is_null()),
+            }
+
+            match encrypted_manifest_payload {
+                Some(expected_payload) => {
+                    assert_eq!(
+                        body["encrypted_manifest_hex"],
+                        hex::encode(expected_payload)
+                    );
+                }
+                None => assert!(body["encrypted_manifest_hex"].is_null()),
+            }
+
+            assert_eq!(response.action, action);
+            assert_eq!(response.ciphertext_payload, response_ciphertext_payload);
+            assert_eq!(
+                response.encrypted_manifest_payload,
+                response_encrypted_manifest_payload
+            );
+            assert_eq!(response.metadata_only, response_metadata_only);
+            assert!(!response.gateway_plaintext_access);
+        }
+    }
 }
