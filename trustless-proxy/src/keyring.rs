@@ -39,6 +39,24 @@ pub enum KeyringError {
     #[error("AWS Encryption SDK for Rust adapter is not wired yet")]
     AwsEsdkAdapterNotWired,
 
+    #[error("AWS Encryption SDK for Rust operation failed: {0}")]
+    AwsEsdkSdkError(String),
+
+    #[error("AWS Encryption SDK encryption response did not contain ciphertext")]
+    AwsEsdkMissingCiphertextOutput,
+
+    #[error("AWS Encryption SDK decryption response did not contain plaintext")]
+    AwsEsdkMissingPlaintextOutput,
+
+    #[error("AWS ESDK Raw RSA key namespace is required")]
+    AwsEsdkMissingKeyNamespace,
+
+    #[error("AWS ESDK Raw RSA local key name is required for decrypt")]
+    AwsEsdkMissingLocalKeyName,
+
+    #[error("AWS ESDK Raw RSA local private key PEM is required for decrypt")]
+    AwsEsdkMissingPrivateKeyPem,
+
     #[error("plaintext payload is required for trustless keyring encryption")]
     MissingPlaintextPayload,
 
