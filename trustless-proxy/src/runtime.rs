@@ -1,6 +1,10 @@
 use thiserror::Error;
 
-use crate::config::TrustlessProxyConfig;
+use crate::aws_esdk::{
+    AwsEsdkKeyringConfig, AwsEsdkRawRsaByteCryptoAdapterConfig, AwsEsdkTrustlessRecipientKeyring,
+    RealAwsEsdkRawRsaByteCryptoAdapter,
+};
+use crate::config::{ConfigError, TrustlessProxyConfig};
 use crate::encryption::TrustlessEncryptResult;
 use crate::execution_coordinator::{
     TrustlessExecutionCoordinator, TrustlessExecutionCoordinatorError,
@@ -13,8 +17,8 @@ use crate::handler::{
     LocalTrustlessHandler, LocalTrustlessHandlerCompletion, LocalTrustlessHandlerError,
     LocalTrustlessHandlerPreparedResponse,
 };
-use crate::keyring::TrustlessRecipientKeyring;
-use crate::local_keystore::LocalKeystoreResolver;
+use crate::keyring::{KeyringError, TrustlessRecipientKeyring};
+use crate::local_keystore::{LocalKeystoreResolver, LocalPrivateKeySelection};
 use crate::manifest::{TrustlessManifest, TrustlessManifestCipher, TrustlessManifestEntry};
 use crate::operations::{
     TrustlessDeleteOperationInput, TrustlessDeleteOperationPlan, TrustlessOperationAssembler,
@@ -88,6 +92,12 @@ pub enum LocalTrustlessRuntimeError {
 
     #[error(transparent)]
     Operation(TrustlessOperationError),
+
+    #[error(transparent)]
+    Config(ConfigError),
+
+    #[error(transparent)]
+    Keyring(KeyringError),
 
     #[error("gateway plaintext access is not allowed")]
     GatewayPlaintextAccessRejected,
@@ -168,6 +178,18 @@ impl From<PreflightError> for LocalTrustlessRuntimeError {
 impl From<TrustlessOperationError> for LocalTrustlessRuntimeError {
     fn from(error: TrustlessOperationError) -> Self {
         Self::Operation(error)
+    }
+}
+
+impl From<ConfigError> for LocalTrustlessRuntimeError {
+    fn from(error: ConfigError) -> Self {
+        Self::Config(error)
+    }
+}
+
+impl From<KeyringError> for LocalTrustlessRuntimeError {
+    fn from(error: KeyringError) -> Self {
+        Self::Keyring(error)
     }
 }
 
@@ -576,6 +598,37 @@ impl LocalTrustlessRuntime {
         let executor = TrustlessRemoteGatewayExecutor::new(client);
 
         Self::execute_prepared_remote_request(prepared, request, &executor)
+    }
+
+    pub fn build_aws_esdk_raw_rsa_adapter_config_from_local_selection(
+        config: &TrustlessProxyConfig,
+        selection: LocalPrivateKeySelection,
+    ) -> Result<AwsEsdkRawRsaByteCryptoAdapterConfig, LocalTrustlessRuntimeError> {
+        let unlocker = config.local_private_key_unlocker();
+
+        Ok(
+            AwsEsdkRawRsaByteCryptoAdapterConfig::from_local_private_key_selection_with_namespace(
+                selection,
+                config.aws_esdk_key_namespace.clone(),
+                &unlocker,
+            )?,
+        )
+    }
+
+    pub fn build_aws_esdk_raw_rsa_keyring_from_local_selection(
+        config: &TrustlessProxyConfig,
+        selection: LocalPrivateKeySelection,
+    ) -> Result<
+        AwsEsdkTrustlessRecipientKeyring<RealAwsEsdkRawRsaByteCryptoAdapter>,
+        LocalTrustlessRuntimeError,
+    > {
+        let adapter_config =
+            Self::build_aws_esdk_raw_rsa_adapter_config_from_local_selection(config, selection)?;
+
+        Ok(AwsEsdkTrustlessRecipientKeyring::with_adapter(
+            AwsEsdkKeyringConfig::default(),
+            RealAwsEsdkRawRsaByteCryptoAdapter::new(adapter_config),
+        ))
     }
 
     pub fn complete_get_with_plaintext(
@@ -1166,6 +1219,90 @@ mod tests {
         assert!(seen_request.borrow().is_none());
     }
 
+    fn trustless_proxy_config() -> TrustlessProxyConfig {
+        TrustlessProxyConfig {
+            listen_host: "127.0.0.1".to_owned(),
+            listen_port: 9090,
+            remote_gateway_url: "http://127.0.0.1:3000".to_owned(),
+            chain_rpc_url: "ws://127.0.0.1:9944".to_owned(),
+            local_account: "alice".to_owned(),
+            keystore_path: std::path::PathBuf::from("./keystore.json"),
+            local_private_key_unlock_key: [12u8; 32],
+            aws_esdk_key_namespace: "runtime-config-namespace".to_owned(),
+        }
+    }
+
+    fn local_private_key_selection(blob: Vec<u8>) -> LocalPrivateKeySelection {
+        LocalPrivateKeySelection {
+            account: "alice".to_owned(),
+            key_type: "aws-esdk-rust-recipient-key".to_owned(),
+            key_version: 1,
+            encrypted_private_key_blob: blob,
+            storage_label: "local-keystore/alice/1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn runtime_builds_aws_esdk_raw_rsa_adapter_config_from_config_and_keystore_unlock() {
+        let config = trustless_proxy_config();
+        let private_key_pem =
+            b"-----BEGIN PRIVATE KEY-----\nruntime local key\n-----END PRIVATE KEY-----\n".to_vec();
+
+        let encrypted_private_key_blob = config
+            .local_private_key_unlocker()
+            .seal_private_key_for_storage(
+                &local_private_key_selection(b"placeholder".to_vec()),
+                &private_key_pem,
+            )
+            .unwrap();
+
+        let adapter_config =
+            LocalTrustlessRuntime::build_aws_esdk_raw_rsa_adapter_config_from_local_selection(
+                &config,
+                local_private_key_selection(encrypted_private_key_blob),
+            )
+            .unwrap();
+
+        assert_eq!(adapter_config.key_namespace, "runtime-config-namespace");
+        assert_eq!(
+            adapter_config.local_key_name,
+            Some("alice:aws-esdk-rust-recipient-key:1".to_owned())
+        );
+        assert_eq!(adapter_config.local_private_key_pem, Some(private_key_pem));
+
+        let debug = format!("{adapter_config:?}");
+        assert!(debug.contains("<redacted:"));
+        assert!(!debug.contains("BEGIN PRIVATE KEY"));
+        assert!(!debug.contains("runtime local key"));
+    }
+
+    #[test]
+    fn runtime_rejects_bad_config_keystore_unlock_material() {
+        let mut config = trustless_proxy_config();
+        config.local_private_key_unlock_key = [13u8; 32];
+
+        let good_config = trustless_proxy_config();
+        let private_key_pem =
+            b"-----BEGIN PRIVATE KEY-----\nruntime local key\n-----END PRIVATE KEY-----\n".to_vec();
+
+        let encrypted_private_key_blob = good_config
+            .local_private_key_unlocker()
+            .seal_private_key_for_storage(
+                &local_private_key_selection(b"placeholder".to_vec()),
+                &private_key_pem,
+            )
+            .unwrap();
+
+        let err =
+            LocalTrustlessRuntime::build_aws_esdk_raw_rsa_adapter_config_from_local_selection(
+                &config,
+                local_private_key_selection(encrypted_private_key_blob),
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, LocalTrustlessRuntimeError::Keyring(_)));
+    }
+
     #[test]
     fn runtime_builds_remote_http_client_from_config_and_rejects_invalid_gateway_url() {
         use std::path::PathBuf;
@@ -1196,6 +1333,8 @@ mod tests {
                 chain_rpc_url: "ws://127.0.0.1:9944".to_owned(),
                 local_account: "alice".to_owned(),
                 keystore_path: PathBuf::from("./keystore.json"),
+                local_private_key_unlock_key: [9u8; 32],
+                aws_esdk_key_namespace: "swarm-s3-trustless-recipient".to_owned(),
             },
         )
         .unwrap_err();
