@@ -45,7 +45,8 @@ pub use chain_recipient_key_adapter::{
 };
 pub use cli::{
     LocalTrustlessCli, LocalTrustlessCliCommand, LocalTrustlessCliError, LocalTrustlessCliInput,
-    LocalTrustlessCliPreparedCommand,
+    LocalTrustlessCliPreparedCommand, LocalTrustlessStartupDependencyPlan,
+    LocalTrustlessStartupLocalKeystoreResolver, LocalTrustlessStartupRecipientKeyResolverBoundary,
 };
 pub use config::{ConfigError, TrustlessProxyConfig};
 pub use encryption::{
