@@ -13,6 +13,7 @@ pub mod identity_recipient_resolver;
 pub mod keyring;
 pub mod local_keystore;
 pub mod local_keystore_file;
+pub mod local_proxy_live;
 pub mod manifest;
 pub mod manifest_codec;
 pub mod operations;
@@ -170,4 +171,10 @@ pub use service::{
 pub use types::{
     Hex32, RecipientEncryptionKey, RecipientEnvelopeContext, SubstrateAccountId,
     TrustlessBucketType, TrustlessGetPlan, TrustlessPutPlan,
+};
+
+pub use local_proxy_live::{
+    LocalTrustlessHeaderContextBuilder, LocalTrustlessLiveBindConfig, LocalTrustlessLiveBindError,
+    LocalTrustlessLiveContextBuilder, LocalTrustlessLiveExecutionMetadata,
+    LocalTrustlessLiveHttpServer, LocalTrustlessLiveRequestExecutor, LocalTrustlessLiveServeResult,
 };
