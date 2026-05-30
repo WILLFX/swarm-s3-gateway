@@ -1,16 +1,24 @@
 use thiserror::Error;
 
 use crate::config::TrustlessProxyConfig;
+use crate::gateway_boundary::{CiphertextGatewayBoundary, CiphertextGatewayBoundaryError};
 use crate::http_mapping::{
     LocalTrustlessHttpRequest, LocalTrustlessHttpRequestContext, LocalTrustlessHttpResponse,
 };
 use crate::local_keystore::LocalKeystoreResolver;
-use crate::manifest::{TrustlessManifest, TrustlessManifestCipher, TrustlessManifestEntry};
+use crate::manifest::{
+    EncryptedTrustlessManifest, TrustlessManifestBoundary, TrustlessManifestCipher,
+    TrustlessManifestEntry, TrustlessManifestError,
+};
+use crate::planner::{PlannerError, RemoteGatewayAction, TrustlessRoutePlanner};
 use crate::preflight::TrustlessOperationPreflightBuilder;
 use crate::recipient_keys::RecipientKeyResolver;
-use crate::remote_gateway::{TrustlessRemoteGatewayClient, TrustlessRemoteGatewayExecutor};
+use crate::remote_gateway::{
+    RemoteGatewayClientError, TrustlessRemoteGatewayClient, TrustlessRemoteGatewayExecutor,
+};
 use crate::runtime::{
-    LocalTrustlessRuntime, LocalTrustlessRuntimeError, LocalTrustlessRuntimeRemotePayload,
+    LocalTrustlessRuntime, LocalTrustlessRuntimeError, LocalTrustlessRuntimePreparedResponse,
+    LocalTrustlessRuntimeRemotePayload,
 };
 use crate::s3_surface::LocalS3Operation;
 use crate::server::{LocalTrustlessServer, LocalTrustlessServerError};
@@ -28,7 +36,6 @@ pub struct LocalTrustlessExecutionEngine<C, RK, LK, G> {
 pub struct LocalTrustlessExecutionInput {
     pub http_request: LocalTrustlessHttpRequest,
     pub http_context: LocalTrustlessHttpRequestContext,
-    pub current_manifest: TrustlessManifest,
     pub manifest_entry: TrustlessManifestEntry,
     pub envelope_context: RecipientEnvelopeContext,
 }
@@ -41,8 +48,26 @@ pub enum LocalTrustlessExecutionEngineError {
     #[error(transparent)]
     Runtime(LocalTrustlessRuntimeError),
 
+    #[error(transparent)]
+    RemoteGateway(RemoteGatewayClientError),
+
+    #[error(transparent)]
+    GatewayBoundary(CiphertextGatewayBoundaryError),
+
+    #[error(transparent)]
+    Planner(PlannerError),
+
+    #[error(transparent)]
+    Manifest(TrustlessManifestError),
+
     #[error("gateway plaintext access is not allowed")]
     GatewayPlaintextAccessRejected,
+
+    #[error("remote gateway returned unexpected action: expected {expected:?}, got {actual:?}")]
+    UnexpectedRemoteResponseAction {
+        expected: RemoteGatewayAction,
+        actual: RemoteGatewayAction,
+    },
 
     #[error("execution engine does not support operation yet: {0:?}")]
     UnsupportedOperation(LocalS3Operation),
@@ -57,6 +82,30 @@ impl From<LocalTrustlessServerError> for LocalTrustlessExecutionEngineError {
 impl From<LocalTrustlessRuntimeError> for LocalTrustlessExecutionEngineError {
     fn from(error: LocalTrustlessRuntimeError) -> Self {
         Self::Runtime(error)
+    }
+}
+
+impl From<RemoteGatewayClientError> for LocalTrustlessExecutionEngineError {
+    fn from(error: RemoteGatewayClientError) -> Self {
+        Self::RemoteGateway(error)
+    }
+}
+
+impl From<CiphertextGatewayBoundaryError> for LocalTrustlessExecutionEngineError {
+    fn from(error: CiphertextGatewayBoundaryError) -> Self {
+        Self::GatewayBoundary(error)
+    }
+}
+
+impl From<PlannerError> for LocalTrustlessExecutionEngineError {
+    fn from(error: PlannerError) -> Self {
+        Self::Planner(error)
+    }
+}
+
+impl From<TrustlessManifestError> for LocalTrustlessExecutionEngineError {
+    fn from(error: TrustlessManifestError) -> Self {
+        Self::Manifest(error)
     }
 }
 
@@ -97,25 +146,72 @@ where
 
         match prepared.operation {
             LocalS3Operation::PutObject => {
-                let execution = self.server.execute_prepared_put_with_configured_aws_esdk(
-                    &prepared,
-                    input.current_manifest,
-                    input.manifest_entry,
-                    input.envelope_context,
-                    &self.proxy_config,
-                    &self.preflight_builder,
-                    self.manifest_cipher.clone(),
-                    &self.remote_gateway_executor,
+                let runtime_prepared =
+                    &prepared.handler_prepared_response.runtime_prepared_response;
+
+                let current_manifest = self.fetch_and_decrypt_current_manifest(
+                    runtime_prepared,
+                    &input.envelope_context,
                 )?;
 
-                if execution.gateway_plaintext_access
-                    || execution.gateway_response.gateway_plaintext_access
-                    || execution.http_response.gateway_plaintext_access
+                let plan =
+                    LocalTrustlessRuntime::build_prepared_put_operation_plan_with_configured_aws_esdk(
+                        runtime_prepared,
+                        current_manifest,
+                        input.manifest_entry,
+                        input.envelope_context.clone(),
+                        &self.proxy_config,
+                        &self.preflight_builder,
+                        self.manifest_cipher.clone(),
+                    )?;
+
+                if plan.gateway_plaintext_access
+                    || plan.encrypted_manifest.gateway_plaintext_access
+                    || plan.object_request.plaintext_payload_present
                 {
                     return Err(LocalTrustlessExecutionEngineError::GatewayPlaintextAccessRejected);
                 }
 
-                Ok(execution.http_response)
+                let object_request =
+                    LocalTrustlessRuntime::build_prepared_put_operation_remote_request(
+                        runtime_prepared,
+                        plan.clone(),
+                    )?;
+
+                let object_response = LocalTrustlessRuntime::execute_prepared_remote_request(
+                    runtime_prepared,
+                    object_request,
+                    &self.remote_gateway_executor,
+                )?;
+
+                self.require_response_action(
+                    &object_response,
+                    RemoteGatewayAction::PutCiphertextObject,
+                )?;
+
+                if object_response.gateway_plaintext_access
+                    || prepared.http_response.gateway_plaintext_access
+                {
+                    return Err(LocalTrustlessExecutionEngineError::GatewayPlaintextAccessRejected);
+                }
+
+                let manifest_request = CiphertextGatewayBoundary::put_encrypted_manifest_request(
+                    runtime_prepared_bucket(runtime_prepared),
+                    plan.encrypted_manifest.ciphertext,
+                )?;
+
+                let manifest_response = self.remote_gateway_executor.execute(manifest_request)?;
+
+                self.require_response_action(
+                    &manifest_response,
+                    RemoteGatewayAction::PutEncryptedManifest,
+                )?;
+
+                if manifest_response.gateway_plaintext_access {
+                    return Err(LocalTrustlessExecutionEngineError::GatewayPlaintextAccessRejected);
+                }
+
+                Ok(prepared.http_response)
             }
             LocalS3Operation::GetObject => {
                 let runtime_prepared =
@@ -154,6 +250,72 @@ where
             )),
         }
     }
+
+    fn fetch_and_decrypt_current_manifest(
+        &self,
+        runtime_prepared: &LocalTrustlessRuntimePreparedResponse,
+        envelope_context: &RecipientEnvelopeContext,
+    ) -> Result<crate::manifest::TrustlessManifest, LocalTrustlessExecutionEngineError> {
+        let bucket = runtime_prepared_bucket(runtime_prepared);
+        let route_plan = TrustlessRoutePlanner::plan_list_objects_v2(bucket)?;
+        let list_request = CiphertextGatewayBoundary::list_encrypted_manifest_request(&route_plan)?;
+
+        let list_response = self.remote_gateway_executor.execute(list_request)?;
+
+        self.require_response_action(&list_response, RemoteGatewayAction::ListCiphertextManifest)?;
+
+        if list_response.gateway_plaintext_access {
+            return Err(LocalTrustlessExecutionEngineError::GatewayPlaintextAccessRejected);
+        }
+
+        let Some(ciphertext) = list_response.encrypted_manifest_payload else {
+            return Err(LocalTrustlessExecutionEngineError::Manifest(
+                TrustlessManifestError::MissingEncryptedManifest,
+            ));
+        };
+
+        let read = TrustlessManifestBoundary::new(self.manifest_cipher.clone())
+            .decrypt_manifest_locally(EncryptedTrustlessManifest {
+                ciphertext,
+                envelope_context: envelope_context.clone(),
+                gateway_plaintext_access: false,
+            })?;
+
+        if read.gateway_plaintext_access {
+            return Err(LocalTrustlessExecutionEngineError::GatewayPlaintextAccessRejected);
+        }
+
+        Ok(read.manifest)
+    }
+
+    fn require_response_action(
+        &self,
+        response: &crate::gateway_boundary::CiphertextGatewayResponse,
+        expected: RemoteGatewayAction,
+    ) -> Result<(), LocalTrustlessExecutionEngineError> {
+        if response.action != expected {
+            return Err(
+                LocalTrustlessExecutionEngineError::UnexpectedRemoteResponseAction {
+                    expected,
+                    actual: response.action,
+                },
+            );
+        }
+
+        Ok(())
+    }
+}
+
+fn runtime_prepared_bucket(prepared: &LocalTrustlessRuntimePreparedResponse) -> String {
+    prepared
+        .handler_response
+        .request_preparation
+        .prepared_operation
+        .pipeline_plan
+        .request_context
+        .preflight_request
+        .bucket
+        .clone()
 }
 
 #[cfg(test)]
@@ -171,7 +333,7 @@ mod tests {
     use crate::local_keystore::{
         LocalKeystoreError, LocalKeystoreRecord, LocalPrivateKeySelection,
     };
-    use crate::manifest::TrustlessManifestError;
+    use crate::manifest::{TrustlessManifest, TrustlessManifestError};
     use crate::planner::RemoteGatewayAction;
     use crate::recipient_keys::{RecipientKeyError, RecipientKeyRecord};
     use crate::remote_gateway::{RemoteGatewayClientError, TrustlessRemoteGatewayClient};
@@ -261,8 +423,8 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct EngineMockRemoteGatewayClient {
-        response: CiphertextGatewayResponse,
-        seen_request: Rc<RefCell<Option<CiphertextGatewayRequest>>>,
+        responses: Rc<RefCell<Vec<CiphertextGatewayResponse>>>,
+        seen_requests: Rc<RefCell<Vec<CiphertextGatewayRequest>>>,
     }
 
     impl TrustlessRemoteGatewayClient for EngineMockRemoteGatewayClient {
@@ -270,8 +432,15 @@ mod tests {
             &self,
             request: CiphertextGatewayRequest,
         ) -> Result<CiphertextGatewayResponse, RemoteGatewayClientError> {
-            *self.seen_request.borrow_mut() = Some(request);
-            Ok(self.response.clone())
+            self.seen_requests.borrow_mut().push(request);
+
+            if self.responses.borrow().is_empty() {
+                return Err(RemoteGatewayClientError::Http(
+                    "engine mock remote gateway response queue is empty".to_owned(),
+                ));
+            }
+
+            Ok(self.responses.borrow_mut().remove(0))
         }
     }
 
@@ -486,15 +655,14 @@ mod tests {
         LocalTrustlessExecutionInput {
             http_request: http_request(method, body),
             http_context: http_context(),
-            current_manifest: engine_manifest(),
             manifest_entry: engine_manifest_entry(),
             envelope_context: envelope_context(public_key_pem),
         }
     }
 
     fn test_engine(
-        response: CiphertextGatewayResponse,
-        seen_request: Rc<RefCell<Option<CiphertextGatewayRequest>>>,
+        responses: Vec<CiphertextGatewayResponse>,
+        seen_requests: Rc<RefCell<Vec<CiphertextGatewayRequest>>>,
         private_key_pem: &[u8],
         public_key_pem: &[u8],
     ) -> TestEngine {
@@ -506,10 +674,40 @@ mod tests {
             preflight_builder(&config, private_key_pem, public_key_pem),
             EngineMockManifestCipher,
             TrustlessRemoteGatewayExecutor::new(EngineMockRemoteGatewayClient {
-                response,
-                seen_request,
+                responses: Rc::new(RefCell::new(responses)),
+                seen_requests,
             }),
         )
+    }
+
+    fn list_manifest_response() -> CiphertextGatewayResponse {
+        CiphertextGatewayResponse {
+            action: RemoteGatewayAction::ListCiphertextManifest,
+            ciphertext_payload: None,
+            encrypted_manifest_payload: Some(b"engine-encrypted-manifest".to_vec()),
+            metadata_only: false,
+            gateway_plaintext_access: false,
+        }
+    }
+
+    fn put_object_response() -> CiphertextGatewayResponse {
+        CiphertextGatewayResponse {
+            action: RemoteGatewayAction::PutCiphertextObject,
+            ciphertext_payload: None,
+            encrypted_manifest_payload: None,
+            metadata_only: true,
+            gateway_plaintext_access: false,
+        }
+    }
+
+    fn put_manifest_response() -> CiphertextGatewayResponse {
+        CiphertextGatewayResponse {
+            action: RemoteGatewayAction::PutEncryptedManifest,
+            ciphertext_payload: None,
+            encrypted_manifest_payload: None,
+            metadata_only: true,
+            gateway_plaintext_access: false,
+        }
     }
 
     fn encrypt_get_fixture(
@@ -540,16 +738,14 @@ mod tests {
     #[test]
     fn engine_executes_put_as_ciphertext_only_remote_request() {
         let (private_key_pem, public_key_pem) = generate_test_rsa_pem_pair();
-        let seen_request = Rc::new(RefCell::new(None));
+        let seen_requests = Rc::new(RefCell::new(Vec::new()));
         let engine = test_engine(
-            CiphertextGatewayResponse {
-                action: RemoteGatewayAction::PutCiphertextObject,
-                ciphertext_payload: None,
-                encrypted_manifest_payload: None,
-                metadata_only: true,
-                gateway_plaintext_access: false,
-            },
-            seen_request.clone(),
+            vec![
+                list_manifest_response(),
+                put_object_response(),
+                put_manifest_response(),
+            ],
+            seen_requests.clone(),
             &private_key_pem,
             &public_key_pem,
         );
@@ -566,21 +762,86 @@ mod tests {
 
         assert!(!response.gateway_plaintext_access);
 
-        let remote_request = seen_request.borrow().clone().unwrap();
-        assert_eq!(
-            remote_request.action,
-            RemoteGatewayAction::PutCiphertextObject
-        );
-        assert!(!remote_request.plaintext_payload_present);
-        assert!(remote_request.encrypted_manifest_payload.is_none());
+        let requests = seen_requests.borrow();
+        assert_eq!(requests.len(), 3);
 
-        let ciphertext = remote_request.ciphertext_payload.unwrap();
+        assert_eq!(
+            requests[0].action,
+            RemoteGatewayAction::ListCiphertextManifest
+        );
+        assert!(requests[0].ciphertext_payload.is_none());
+        assert!(requests[0].encrypted_manifest_payload.is_none());
+        assert!(!requests[0].plaintext_payload_present);
+
+        assert_eq!(requests[1].action, RemoteGatewayAction::PutCiphertextObject);
+        assert!(!requests[1].plaintext_payload_present);
+        assert!(requests[1].encrypted_manifest_payload.is_none());
+
+        let ciphertext = requests[1].ciphertext_payload.clone().unwrap();
         assert!(!ciphertext.is_empty());
         assert_ne!(ciphertext, plaintext);
         assert!(
             !String::from_utf8_lossy(&ciphertext)
                 .contains("engine PUT plaintext must not leave local boundary")
         );
+
+        assert_eq!(
+            requests[2].action,
+            RemoteGatewayAction::PutEncryptedManifest
+        );
+        assert!(requests[2].ciphertext_payload.is_none());
+        assert!(!requests[2].plaintext_payload_present);
+
+        let encrypted_manifest = requests[2].encrypted_manifest_payload.clone().unwrap();
+        assert_eq!(
+            encrypted_manifest,
+            format!("engine-encrypted-manifest:{}:2", hex::encode([1u8; 32])).into_bytes()
+        );
+    }
+
+    #[test]
+    fn engine_fetches_decrypts_updates_and_persists_manifest_for_put() {
+        let (private_key_pem, public_key_pem) = generate_test_rsa_pem_pair();
+        let seen_requests = Rc::new(RefCell::new(Vec::new()));
+        let engine = test_engine(
+            vec![
+                list_manifest_response(),
+                put_object_response(),
+                put_manifest_response(),
+            ],
+            seen_requests.clone(),
+            &private_key_pem,
+            &public_key_pem,
+        );
+
+        engine
+            .execute_http_request(execution_input(
+                LocalTrustlessHttpMethod::Put,
+                Some(b"manifest orchestration plaintext".to_vec()),
+                &public_key_pem,
+            ))
+            .unwrap();
+
+        let requests = seen_requests.borrow();
+        let actions = requests
+            .iter()
+            .map(|request| request.action)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actions,
+            vec![
+                RemoteGatewayAction::ListCiphertextManifest,
+                RemoteGatewayAction::PutCiphertextObject,
+                RemoteGatewayAction::PutEncryptedManifest,
+            ]
+        );
+
+        assert_eq!(requests[0].bucket, "bucket");
+        assert_eq!(requests[0].key, None);
+        assert_eq!(requests[2].bucket, "bucket");
+        assert_eq!(requests[2].key, None);
+        assert!(requests[2].encrypted_manifest_payload.is_some());
     }
 
     #[test]
@@ -589,16 +850,16 @@ mod tests {
         let plaintext = b"engine GET plaintext returns only locally".to_vec();
         let ciphertext = encrypt_get_fixture(&private_key_pem, &public_key_pem, &plaintext);
 
-        let seen_request = Rc::new(RefCell::new(None));
+        let seen_requests = Rc::new(RefCell::new(Vec::new()));
         let engine = test_engine(
-            CiphertextGatewayResponse {
+            vec![CiphertextGatewayResponse {
                 action: RemoteGatewayAction::GetCiphertextObject,
                 ciphertext_payload: Some(ciphertext),
                 encrypted_manifest_payload: None,
                 metadata_only: false,
                 gateway_plaintext_access: false,
-            },
-            seen_request.clone(),
+            }],
+            seen_requests.clone(),
             &private_key_pem,
             &public_key_pem,
         );
@@ -616,29 +877,27 @@ mod tests {
         assert!(response.plaintext_returned_locally);
         assert!(!response.gateway_plaintext_access);
 
-        let remote_request = seen_request.borrow().clone().unwrap();
-        assert_eq!(
-            remote_request.action,
-            RemoteGatewayAction::GetCiphertextObject
-        );
-        assert!(remote_request.ciphertext_payload.is_none());
-        assert!(remote_request.encrypted_manifest_payload.is_none());
-        assert!(!remote_request.plaintext_payload_present);
+        let requests = seen_requests.borrow();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].action, RemoteGatewayAction::GetCiphertextObject);
+        assert!(requests[0].ciphertext_payload.is_none());
+        assert!(requests[0].encrypted_manifest_payload.is_none());
+        assert!(!requests[0].plaintext_payload_present);
     }
 
     #[test]
     fn engine_rejects_or_fails_closed_if_remote_claims_gateway_plaintext_access() {
         let (private_key_pem, public_key_pem) = generate_test_rsa_pem_pair();
-        let seen_request = Rc::new(RefCell::new(None));
+        let seen_requests = Rc::new(RefCell::new(Vec::new()));
         let engine = test_engine(
-            CiphertextGatewayResponse {
+            vec![CiphertextGatewayResponse {
                 action: RemoteGatewayAction::GetCiphertextObject,
                 ciphertext_payload: Some(b"ciphertext".to_vec()),
                 encrypted_manifest_payload: None,
                 metadata_only: false,
                 gateway_plaintext_access: true,
-            },
-            seen_request,
+            }],
+            seen_requests,
             &private_key_pem,
             &public_key_pem,
         );
@@ -660,16 +919,14 @@ mod tests {
     #[test]
     fn engine_does_not_send_plaintext_payload_to_remote_gateway() {
         let (private_key_pem, public_key_pem) = generate_test_rsa_pem_pair();
-        let seen_request = Rc::new(RefCell::new(None));
+        let seen_requests = Rc::new(RefCell::new(Vec::new()));
         let engine = test_engine(
-            CiphertextGatewayResponse {
-                action: RemoteGatewayAction::PutCiphertextObject,
-                ciphertext_payload: None,
-                encrypted_manifest_payload: None,
-                metadata_only: true,
-                gateway_plaintext_access: false,
-            },
-            seen_request.clone(),
+            vec![
+                list_manifest_response(),
+                put_object_response(),
+                put_manifest_response(),
+            ],
+            seen_requests.clone(),
             &private_key_pem,
             &public_key_pem,
         );
@@ -684,13 +941,92 @@ mod tests {
             ))
             .unwrap();
 
-        let remote_request = seen_request.borrow().clone().unwrap();
-        assert!(!remote_request.plaintext_payload_present);
+        let requests = seen_requests.borrow();
 
-        let ciphertext = remote_request.ciphertext_payload.unwrap();
+        for request in requests.iter() {
+            assert!(!request.plaintext_payload_present);
+        }
+
+        assert!(requests[0].ciphertext_payload.is_none());
+        assert!(requests[0].encrypted_manifest_payload.is_none());
+
+        let ciphertext = requests[1].ciphertext_payload.clone().unwrap();
         assert_ne!(ciphertext, plaintext);
         assert!(
             !String::from_utf8_lossy(&ciphertext).contains("do not send this plaintext remotely")
         );
+
+        assert!(requests[2].ciphertext_payload.is_none());
+        assert!(requests[2].encrypted_manifest_payload.is_some());
+    }
+
+    #[test]
+    fn engine_fails_closed_when_manifest_fetch_claims_gateway_plaintext_access() {
+        let (private_key_pem, public_key_pem) = generate_test_rsa_pem_pair();
+        let seen_requests = Rc::new(RefCell::new(Vec::new()));
+        let engine = test_engine(
+            vec![CiphertextGatewayResponse {
+                action: RemoteGatewayAction::ListCiphertextManifest,
+                ciphertext_payload: None,
+                encrypted_manifest_payload: Some(b"engine-encrypted-manifest".to_vec()),
+                metadata_only: false,
+                gateway_plaintext_access: true,
+            }],
+            seen_requests.clone(),
+            &private_key_pem,
+            &public_key_pem,
+        );
+
+        let err = engine
+            .execute_http_request(execution_input(
+                LocalTrustlessHttpMethod::Put,
+                Some(b"secret".to_vec()),
+                &public_key_pem,
+            ))
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            LocalTrustlessExecutionEngineError::RemoteGateway(_)
+        ));
+        assert_eq!(seen_requests.borrow().len(), 1);
+        assert_eq!(
+            seen_requests.borrow()[0].action,
+            RemoteGatewayAction::ListCiphertextManifest
+        );
+    }
+
+    #[test]
+    fn engine_fails_closed_when_manifest_fetch_missing_encrypted_payload() {
+        let (private_key_pem, public_key_pem) = generate_test_rsa_pem_pair();
+        let seen_requests = Rc::new(RefCell::new(Vec::new()));
+        let engine = test_engine(
+            vec![CiphertextGatewayResponse {
+                action: RemoteGatewayAction::ListCiphertextManifest,
+                ciphertext_payload: None,
+                encrypted_manifest_payload: None,
+                metadata_only: false,
+                gateway_plaintext_access: false,
+            }],
+            seen_requests.clone(),
+            &private_key_pem,
+            &public_key_pem,
+        );
+
+        let err = engine
+            .execute_http_request(execution_input(
+                LocalTrustlessHttpMethod::Put,
+                Some(b"secret".to_vec()),
+                &public_key_pem,
+            ))
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            LocalTrustlessExecutionEngineError::Manifest(
+                TrustlessManifestError::MissingEncryptedManifest
+            )
+        );
+        assert_eq!(seen_requests.borrow().len(), 1);
     }
 }
