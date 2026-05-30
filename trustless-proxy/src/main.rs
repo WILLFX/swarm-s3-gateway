@@ -1,7 +1,7 @@
 fn main() {
-    match trustless_proxy::LocalTrustlessCli::prepare_from_args(std::env::args()) {
-        Ok(prepared) => {
-            println!("{}", prepared.summary);
+    match trustless_proxy::LocalTrustlessCli::run_from_args(std::env::args()) {
+        Ok(summary) => {
+            println!("{summary}");
         }
         Err(error) => {
             eprintln!("{error}");

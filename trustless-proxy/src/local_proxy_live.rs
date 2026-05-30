@@ -184,6 +184,44 @@ impl LocalTrustlessLiveHttpServer {
         E: LocalTrustlessLiveRequestExecutor,
         B: LocalTrustlessLiveContextBuilder,
     {
+        Self::serve_next(
+            &listener,
+            &executor,
+            &context_builder,
+            max_request_body_bytes,
+        )
+    }
+
+    pub fn serve_forever<E, B>(
+        listener: TcpListener,
+        executor: E,
+        context_builder: B,
+        max_request_body_bytes: u64,
+    ) -> Result<(), LocalTrustlessLiveBindError>
+    where
+        E: LocalTrustlessLiveRequestExecutor,
+        B: LocalTrustlessLiveContextBuilder,
+    {
+        loop {
+            Self::serve_next(
+                &listener,
+                &executor,
+                &context_builder,
+                max_request_body_bytes,
+            )?;
+        }
+    }
+
+    pub fn serve_next<E, B>(
+        listener: &TcpListener,
+        executor: &E,
+        context_builder: &B,
+        max_request_body_bytes: u64,
+    ) -> Result<LocalTrustlessLiveServeResult, LocalTrustlessLiveBindError>
+    where
+        E: LocalTrustlessLiveRequestExecutor,
+        B: LocalTrustlessLiveContextBuilder,
+    {
         if max_request_body_bytes == 0 {
             return Err(LocalTrustlessLiveBindError::InvalidRequestBodyLimit);
         }
@@ -192,8 +230,8 @@ impl LocalTrustlessLiveHttpServer {
 
         let result = handle_stream(
             &mut stream,
-            &executor,
-            &context_builder,
+            executor,
+            context_builder,
             max_request_body_bytes,
         );
 
