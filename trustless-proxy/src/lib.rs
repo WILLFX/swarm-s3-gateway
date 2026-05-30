@@ -4,6 +4,7 @@ pub mod cli;
 pub mod config;
 pub mod encryption;
 pub mod execution_coordinator;
+pub mod execution_engine;
 pub mod gateway_boundary;
 pub mod handler;
 pub mod http_handler;
@@ -56,6 +57,9 @@ pub use encryption::{
 pub use execution_coordinator::{
     TrustlessExecutionBoundaryRequirements, TrustlessExecutionCoordinator,
     TrustlessExecutionCoordinatorError, TrustlessExecutionResult,
+};
+pub use execution_engine::{
+    LocalTrustlessExecutionEngine, LocalTrustlessExecutionEngineError, LocalTrustlessExecutionInput,
 };
 pub use gateway_boundary::{
     CiphertextGatewayBoundary, CiphertextGatewayBoundaryError, CiphertextGatewayRequest,
