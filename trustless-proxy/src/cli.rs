@@ -5,6 +5,11 @@ use crate::config::TrustlessProxyConfig;
 use crate::execution_engine::LocalTrustlessExecutionEngine;
 use crate::local_keystore::{LocalKeystoreError, LocalKeystoreRecord, LocalKeystoreResolver};
 use crate::local_keystore_file::LocalKeystoreFile;
+use crate::local_proxy_live::{
+    LocalTrustlessHeaderContextBuilder, LocalTrustlessLiveBindConfig, LocalTrustlessLiveBindError,
+    LocalTrustlessLiveContextBuilder, LocalTrustlessLiveHttpServer,
+    LocalTrustlessLiveRequestExecutor, LocalTrustlessLiveServeResult,
+};
 use crate::manifest_codec::AwsEsdkTrustlessManifestCipher;
 use crate::preflight::TrustlessOperationPreflightBuilder;
 use crate::recipient_keys::{RecipientKeyError, RecipientKeyRecord, RecipientKeyResolver};
@@ -38,6 +43,7 @@ pub struct LocalTrustlessStartupDependencies {
 pub enum LocalTrustlessCliCommand {
     LocalProxyConfig,
     LocalProxyStartScaffold,
+    LocalProxyStart,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,11 +166,20 @@ pub enum LocalTrustlessCliError {
 
     #[error(transparent)]
     Server(LocalTrustlessServerError),
+
+    #[error(transparent)]
+    LiveBind(LocalTrustlessLiveBindError),
 }
 
 impl From<LocalTrustlessServerError> for LocalTrustlessCliError {
     fn from(error: LocalTrustlessServerError) -> Self {
         Self::Server(error)
+    }
+}
+
+impl From<LocalTrustlessLiveBindError> for LocalTrustlessCliError {
+    fn from(error: LocalTrustlessLiveBindError) -> Self {
+        Self::LiveBind(error)
     }
 }
 
@@ -197,8 +212,11 @@ impl LocalTrustlessCli {
 
         let mut input = match command.as_str() {
             "local-proxy-config" => Self::default_input(LocalTrustlessCliCommand::LocalProxyConfig),
-            "local-proxy" | "local-proxy-start" => {
+            "local-proxy-start-scaffold" => {
                 Self::default_input(LocalTrustlessCliCommand::LocalProxyStartScaffold)
+            }
+            "local-proxy" | "local-proxy-start" => {
+                Self::default_input(LocalTrustlessCliCommand::LocalProxyStart)
             }
             unknown => return Err(LocalTrustlessCliError::UnknownCommand(unknown.to_owned())),
         };
@@ -243,6 +261,91 @@ impl LocalTrustlessCli {
         }
 
         Ok(input)
+    }
+
+    pub fn run_from_args<I, S>(args: I) -> Result<String, LocalTrustlessCliError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let input = Self::from_args(args)?;
+
+        match input.command {
+            LocalTrustlessCliCommand::LocalProxyStart => {
+                Self::run_live_proxy_forever_from_env(input)?;
+                Ok("local proxy listener stopped".to_owned())
+            }
+            LocalTrustlessCliCommand::LocalProxyConfig
+            | LocalTrustlessCliCommand::LocalProxyStartScaffold => {
+                Ok(Self::prepare_command(input)?.summary)
+            }
+        }
+    }
+
+    pub fn run_live_proxy_forever_from_env(
+        input: LocalTrustlessCliInput,
+    ) -> Result<(), LocalTrustlessCliError> {
+        let proxy_config = TrustlessProxyConfig::from_env()
+            .map_err(|error| LocalTrustlessCliError::StartupDependency(error.to_string()))?;
+
+        let dependencies = Self::prepare_startup_execution_engine(proxy_config, input)?;
+        let bind_config = live_bind_config_from_server(&dependencies.plan.server_config);
+        let listener = LocalTrustlessLiveHttpServer::bind(bind_config)?;
+
+        eprintln!("{}", dependencies.plan.summary);
+        eprintln!(
+            "local proxy live listener bound on {}:{}",
+            dependencies.plan.server_config.listen_host,
+            dependencies.plan.server_config.listen_port
+        );
+
+        LocalTrustlessLiveHttpServer::serve_forever(
+            listener,
+            dependencies.engine,
+            LocalTrustlessHeaderContextBuilder,
+            dependencies.plan.server_config.max_request_body_bytes,
+        )?;
+
+        Ok(())
+    }
+
+    pub fn run_live_proxy_once_with_executor<E, B>(
+        input: LocalTrustlessCliInput,
+        executor: E,
+        context_builder: B,
+    ) -> Result<LocalTrustlessLiveServeResult, LocalTrustlessCliError>
+    where
+        E: LocalTrustlessLiveRequestExecutor,
+        B: LocalTrustlessLiveContextBuilder,
+    {
+        if input.command != LocalTrustlessCliCommand::LocalProxyStart {
+            return Err(LocalTrustlessCliError::UnknownCommand(
+                "live listener requires local-proxy command".to_owned(),
+            ));
+        }
+
+        if input.network_bind_enabled {
+            return Err(LocalTrustlessCliError::NetworkBindFlagRejected);
+        }
+
+        let server_config = LocalTrustlessServerConfig {
+            listen_host: input.listen_host,
+            listen_port: input.listen_port,
+            max_request_body_bytes: input.max_request_body_bytes,
+            remote_gateway_url: input.remote_gateway_url,
+            network_bind_enabled: false,
+        };
+
+        let bind_config = live_bind_config_from_server(&server_config);
+        let listener = LocalTrustlessLiveHttpServer::bind(bind_config)?;
+
+        LocalTrustlessLiveHttpServer::serve_one(
+            listener,
+            executor,
+            context_builder,
+            server_config.max_request_body_bytes,
+        )
+        .map_err(Into::into)
     }
 
     pub fn prepare_from_args<I, S>(
@@ -398,6 +501,11 @@ impl LocalTrustlessCli {
                 server.config().listen_host,
                 server.config().listen_port
             ),
+            LocalTrustlessCliCommand::LocalProxyStart => format!(
+                "local proxy live listener prepared for {}:{} with localhost-only binding",
+                server.config().listen_host,
+                server.config().listen_port
+            ),
         };
 
         Ok(LocalTrustlessCliPreparedCommand {
@@ -408,6 +516,16 @@ impl LocalTrustlessCli {
             gateway_plaintext_access: false,
             summary,
         })
+    }
+}
+
+fn live_bind_config_from_server(
+    server_config: &LocalTrustlessServerConfig,
+) -> LocalTrustlessLiveBindConfig {
+    LocalTrustlessLiveBindConfig {
+        listen_host: server_config.listen_host.clone(),
+        listen_port: server_config.listen_port,
+        max_request_body_bytes: server_config.max_request_body_bytes,
     }
 }
 
@@ -680,6 +798,150 @@ mod tests {
         let _ = std::fs::remove_file(keystore_path);
     }
 
+    #[derive(Debug, Clone)]
+    struct CliLiveRecordingExecutor {
+        seen_input: std::sync::Arc<
+            std::sync::Mutex<Option<crate::execution_engine::LocalTrustlessExecutionInput>>,
+        >,
+    }
+
+    impl LocalTrustlessLiveRequestExecutor for CliLiveRecordingExecutor {
+        fn execute_live_http_request(
+            &self,
+            input: crate::execution_engine::LocalTrustlessExecutionInput,
+        ) -> Result<crate::http_mapping::LocalTrustlessHttpResponse, LocalTrustlessLiveBindError>
+        {
+            *self.seen_input.lock().unwrap() = Some(input);
+
+            Ok(crate::http_mapping::LocalTrustlessHttpResponse {
+                status_code: 202,
+                body: None,
+                headers: vec![(
+                    "x-s3w-gateway-plaintext-access".to_owned(),
+                    "false".to_owned(),
+                )],
+                metadata_only: true,
+                plaintext_returned_locally: false,
+                gateway_plaintext_access: false,
+            })
+        }
+    }
+
+    fn unused_local_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    fn cli_live_headers() -> String {
+        format!(
+            "\
+x-s3w-bucket-id: {bucket_id}\r\n\
+x-s3w-object-key-id: {object_key_id}\r\n\
+x-s3w-policy-version: 7\r\n\
+x-s3w-local-account: alice\r\n\
+x-s3w-local-key-type: aws-esdk-rust-recipient-key\r\n\
+x-s3w-recipients: alice\r\n\
+x-s3w-recipient-keys: alice|aws-esdk-rust-recipient-key|1|true|{public_key_hex}\r\n\
+x-s3w-manifest-ciphertext-ref: bee://ciphertext/cli-live\r\n\
+x-s3w-manifest-ciphertext-size: 64\r\n\
+",
+            bucket_id = hex::encode([1u8; 32]),
+            object_key_id = hex::encode([2u8; 32]),
+            public_key_hex = hex::encode("public-key")
+        )
+    }
+
+    fn send_cli_live_request(port: u16, request: &[u8]) -> Vec<u8> {
+        use std::io::{Read, Write};
+        use std::net::Shutdown;
+
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.write_all(request).unwrap();
+        stream.shutdown(Shutdown::Write).unwrap();
+
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        response
+    }
+
+    #[test]
+    fn cli_live_listener_rejects_non_localhost_bind() {
+        let err = LocalTrustlessCli::run_live_proxy_once_with_executor(
+            LocalTrustlessCliInput {
+                command: LocalTrustlessCliCommand::LocalProxyStart,
+                listen_host: "0.0.0.0".to_owned(),
+                listen_port: 9090,
+                max_request_body_bytes: 1024,
+                remote_gateway_url: None,
+                network_bind_enabled: false,
+            },
+            CliLiveRecordingExecutor {
+                seen_input: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            },
+            LocalTrustlessHeaderContextBuilder,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            LocalTrustlessCliError::LiveBind(
+                LocalTrustlessLiveBindError::NonLocalBindHostRejected(_)
+            )
+        ));
+    }
+
+    #[test]
+    fn cli_runs_live_proxy_once_and_routes_request_to_executor() {
+        let port = unused_local_port();
+        let seen_input = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let executor = CliLiveRecordingExecutor {
+            seen_input: seen_input.clone(),
+        };
+
+        let handle = std::thread::spawn(move || {
+            LocalTrustlessCli::run_live_proxy_once_with_executor(
+                LocalTrustlessCliInput {
+                    command: LocalTrustlessCliCommand::LocalProxyStart,
+                    listen_host: "127.0.0.1".to_owned(),
+                    listen_port: port,
+                    max_request_body_bytes: 1024 * 1024,
+                    remote_gateway_url: None,
+                    network_bind_enabled: false,
+                },
+                executor,
+                LocalTrustlessHeaderContextBuilder,
+            )
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let body = b"cli live listener plaintext";
+        let request = format!(
+            "PUT /bucket/live.txt HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n{}\r\n",
+            body.len(),
+            cli_live_headers()
+        );
+
+        let mut raw_request = request.into_bytes();
+        raw_request.extend_from_slice(body);
+
+        let raw_response = send_cli_live_request(port, &raw_request);
+        let result = handle.join().unwrap().unwrap();
+
+        assert!(result.network_bind_performed);
+        assert_eq!(result.response.status_code, 202);
+        assert!(!result.gateway_plaintext_access);
+
+        let raw_response = String::from_utf8_lossy(&raw_response);
+        assert!(raw_response.starts_with("HTTP/1.1 202 Accepted"));
+
+        let input = seen_input.lock().unwrap().clone().unwrap();
+        assert_eq!(input.http_request.path, "/bucket/live.txt");
+        assert_eq!(input.http_request.body, Some(body.to_vec()));
+        assert_eq!(input.manifest_entry.object_key, "live.txt");
+        assert_eq!(input.envelope_context.recipients.len(), 1);
+    }
+
     #[test]
     fn cli_prepares_local_proxy_start_scaffold_without_network_bind() {
         let prepared = LocalTrustlessCli::prepare_command(LocalTrustlessCliInput {
@@ -737,10 +999,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(
-            input.command,
-            LocalTrustlessCliCommand::LocalProxyStartScaffold
-        );
+        assert_eq!(input.command, LocalTrustlessCliCommand::LocalProxyStart);
         assert_eq!(input.listen_host, "127.0.0.1");
         assert_eq!(input.listen_port, 9091);
         assert_eq!(input.max_request_body_bytes, 2048);
@@ -755,7 +1014,7 @@ mod tests {
     fn cli_prepare_from_args_builds_server_config_boundary() {
         let prepared = LocalTrustlessCli::prepare_from_args([
             "trustless-proxy",
-            "local-proxy-start",
+            "local-proxy-start-scaffold",
             "--listen-host",
             "127.0.0.1",
             "--listen-port",
