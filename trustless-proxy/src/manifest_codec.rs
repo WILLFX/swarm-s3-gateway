@@ -3,7 +3,11 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::manifest::{TrustlessManifest, TrustlessManifestEntry, TrustlessManifestError};
+use crate::keyring::TrustlessRecipientKeyring;
+use crate::manifest::{
+    TrustlessManifest, TrustlessManifestCipher, TrustlessManifestEntry, TrustlessManifestError,
+};
+use crate::types::RecipientEnvelopeContext;
 
 const MANIFEST_SCHEMA: &str = "s3w.trustless.manifest";
 const MANIFEST_SCHEMA_VERSION: u32 = 1;
@@ -193,9 +197,128 @@ fn validate_entry(entry: &TrustlessManifestEntry) -> Result<(), TrustlessManifes
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+pub struct AwsEsdkTrustlessManifestCipher<K> {
+    keyring: K,
+}
+
+impl<K> AwsEsdkTrustlessManifestCipher<K> {
+    pub fn new(keyring: K) -> Self {
+        Self { keyring }
+    }
+
+    pub fn keyring(&self) -> &K {
+        &self.keyring
+    }
+}
+
+impl<K> TrustlessManifestCipher for AwsEsdkTrustlessManifestCipher<K>
+where
+    K: TrustlessRecipientKeyring,
+{
+    fn decrypt_manifest(
+        &self,
+        ciphertext: &[u8],
+        context: &RecipientEnvelopeContext,
+    ) -> Result<TrustlessManifest, TrustlessManifestError> {
+        let plaintext = self
+            .keyring
+            .decrypt_with_local_recipient_key(ciphertext, context)
+            .map_err(|error| TrustlessManifestError::Cipher(error.to_string()))?;
+
+        TrustlessManifestJsonCodec::decode_manifest(&plaintext)
+            .map_err(|error| TrustlessManifestError::Cipher(error.to_string()))
+    }
+
+    fn encrypt_manifest(
+        &self,
+        manifest: &TrustlessManifest,
+        context: &RecipientEnvelopeContext,
+    ) -> Result<Vec<u8>, TrustlessManifestError> {
+        let plaintext = TrustlessManifestJsonCodec::encode_manifest(manifest)
+            .map_err(|error| TrustlessManifestError::Cipher(error.to_string()))?;
+
+        self.keyring
+            .encrypt_with_recipient_envelopes(&plaintext, context)
+            .map_err(|error| TrustlessManifestError::Cipher(error.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::keyring::{KeyringError, TrustlessRecipientKeyring};
+    use crate::types::{RecipientEncryptionKey, RecipientEnvelopeContext};
+
+    #[derive(Debug, Clone, Copy)]
+    struct MockManifestKeyring;
+
+    impl TrustlessRecipientKeyring for MockManifestKeyring {
+        fn keyring_name(&self) -> &'static str {
+            "mock-manifest-keyring"
+        }
+
+        fn encrypt_with_recipient_envelopes(
+            &self,
+            plaintext: &[u8],
+            _context: &RecipientEnvelopeContext,
+        ) -> Result<Vec<u8>, KeyringError> {
+            let mut ciphertext = b"manifest-ciphertext:".to_vec();
+            ciphertext.extend_from_slice(plaintext);
+            Ok(ciphertext)
+        }
+
+        fn decrypt_with_local_recipient_key(
+            &self,
+            ciphertext: &[u8],
+            _context: &RecipientEnvelopeContext,
+        ) -> Result<Vec<u8>, KeyringError> {
+            ciphertext
+                .strip_prefix(b"manifest-ciphertext:")
+                .map(|plaintext| plaintext.to_vec())
+                .ok_or(KeyringError::DecryptNotImplemented)
+        }
+    }
+
+    fn manifest_envelope_context() -> RecipientEnvelopeContext {
+        RecipientEnvelopeContext {
+            bucket_id: hex::encode([9u8; 32]),
+            object_key_id: hex::encode([8u8; 32]),
+            policy_version: 1,
+            recipients: vec![RecipientEncryptionKey {
+                account: "alice".to_owned(),
+                public_key: "alice-public-key".to_owned(),
+                key_type: "aws-esdk-rust-recipient-key".to_owned(),
+                key_version: 1,
+                enabled: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn aws_esdk_manifest_cipher_round_trips_manifest_json_through_keyring() {
+        let cipher = AwsEsdkTrustlessManifestCipher::new(MockManifestKeyring);
+        let context = manifest_envelope_context();
+
+        let encrypted = cipher
+            .encrypt_manifest(&sample_manifest(), &context)
+            .unwrap();
+
+        assert!(encrypted.starts_with(b"manifest-ciphertext:"));
+        assert_ne!(
+            encrypted,
+            TrustlessManifestJsonCodec::encode_manifest(&sample_manifest()).unwrap()
+        );
+
+        let decrypted = cipher.decrypt_manifest(&encrypted, &context).unwrap();
+        let expected = TrustlessManifestJsonCodec::decode_manifest(
+            &TrustlessManifestJsonCodec::encode_manifest(&sample_manifest()).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(decrypted, expected);
+    }
 
     fn entry(object_key_id_byte: u8, object_key: &str) -> TrustlessManifestEntry {
         TrustlessManifestEntry {

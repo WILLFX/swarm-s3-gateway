@@ -46,8 +46,10 @@ pub use chain_recipient_key_adapter::{
 };
 pub use cli::{
     LocalTrustlessCli, LocalTrustlessCliCommand, LocalTrustlessCliError, LocalTrustlessCliInput,
-    LocalTrustlessCliPreparedCommand, LocalTrustlessStartupDependencyPlan,
-    LocalTrustlessStartupLocalKeystoreResolver, LocalTrustlessStartupRecipientKeyResolverBoundary,
+    LocalTrustlessCliPreparedCommand, LocalTrustlessStartupDependencies,
+    LocalTrustlessStartupDependencyPlan, LocalTrustlessStartupExecutionEngine,
+    LocalTrustlessStartupLocalKeystoreResolver, LocalTrustlessStartupManifestCipher,
+    LocalTrustlessStartupRecipientKeyResolverBoundary,
 };
 pub use config::{ConfigError, TrustlessProxyConfig};
 pub use encryption::{
@@ -100,7 +102,9 @@ pub use manifest::{
     TrustlessManifestListResult, TrustlessManifestMutation, TrustlessManifestRead,
     TrustlessManifestWrite,
 };
-pub use manifest_codec::{TrustlessManifestJsonCodec, TrustlessManifestJsonCodecError};
+pub use manifest_codec::{
+    AwsEsdkTrustlessManifestCipher, TrustlessManifestJsonCodec, TrustlessManifestJsonCodecError,
+};
 pub use operations::{
     TrustlessDeleteOperationInput, TrustlessDeleteOperationPlan, TrustlessOperationAssembler,
     TrustlessOperationError, TrustlessPutOperationInput, TrustlessPutOperationPlan,

@@ -1,18 +1,38 @@
 use thiserror::Error;
 
+use crate::aws_esdk::{AwsEsdkTrustlessRecipientKeyring, RealAwsEsdkRawRsaByteCryptoAdapter};
 use crate::config::TrustlessProxyConfig;
+use crate::execution_engine::LocalTrustlessExecutionEngine;
 use crate::local_keystore::{LocalKeystoreError, LocalKeystoreRecord, LocalKeystoreResolver};
 use crate::local_keystore_file::LocalKeystoreFile;
+use crate::manifest_codec::AwsEsdkTrustlessManifestCipher;
 use crate::preflight::TrustlessOperationPreflightBuilder;
 use crate::recipient_keys::{RecipientKeyError, RecipientKeyRecord, RecipientKeyResolver};
 use crate::remote_gateway::TrustlessRemoteGatewayExecutor;
 use crate::remote_gateway_http::RemoteGatewayHttpClient;
+use crate::runtime::LocalTrustlessRuntime;
 use crate::server::{LocalTrustlessServer, LocalTrustlessServerConfig, LocalTrustlessServerError};
 use crate::types::SubstrateAccountId;
 
 const DEFAULT_LISTEN_HOST: &str = "127.0.0.1";
 const DEFAULT_LISTEN_PORT: u16 = 9090;
 const DEFAULT_MAX_REQUEST_BODY_BYTES: u64 = 10 * 1024 * 1024;
+
+pub type LocalTrustlessStartupManifestCipher = AwsEsdkTrustlessManifestCipher<
+    AwsEsdkTrustlessRecipientKeyring<RealAwsEsdkRawRsaByteCryptoAdapter>,
+>;
+
+pub type LocalTrustlessStartupExecutionEngine = LocalTrustlessExecutionEngine<
+    LocalTrustlessStartupManifestCipher,
+    LocalTrustlessStartupRecipientKeyResolverBoundary,
+    LocalTrustlessStartupLocalKeystoreResolver,
+    RemoteGatewayHttpClient,
+>;
+
+pub struct LocalTrustlessStartupDependencies {
+    pub plan: LocalTrustlessStartupDependencyPlan,
+    pub engine: LocalTrustlessStartupExecutionEngine,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalTrustlessCliCommand {
@@ -57,6 +77,9 @@ pub struct LocalTrustlessStartupDependencyPlan {
     pub remote_gateway_client_prepared: bool,
     pub remote_gateway_endpoint_url: String,
     pub remote_gateway_executor_prepared: bool,
+    pub configured_aws_esdk_keyring_prepared: bool,
+    pub manifest_cipher_prepared: bool,
+    pub execution_engine_prepared: bool,
     pub network_bind_performed: bool,
     pub gateway_plaintext_access: bool,
     pub summary: String,
@@ -245,6 +268,13 @@ impl LocalTrustlessCli {
         proxy_config: TrustlessProxyConfig,
         input: LocalTrustlessCliInput,
     ) -> Result<LocalTrustlessStartupDependencyPlan, LocalTrustlessCliError> {
+        Ok(Self::prepare_startup_execution_engine(proxy_config, input)?.plan)
+    }
+
+    pub fn prepare_startup_execution_engine(
+        proxy_config: TrustlessProxyConfig,
+        input: LocalTrustlessCliInput,
+    ) -> Result<LocalTrustlessStartupDependencies, LocalTrustlessCliError> {
         if input.network_bind_enabled {
             return Err(LocalTrustlessCliError::NetworkBindFlagRejected);
         }
@@ -266,47 +296,74 @@ impl LocalTrustlessCli {
         )
         .map_err(|error| LocalTrustlessCliError::StartupDependency(error.to_string()))?;
 
+        let selected_account = selected.account.clone();
+        let selected_key_type = selected.key_type.clone();
+        let selected_key_version = selected.key_version;
+        let selected_storage_label = selected.storage_label.clone();
+
         let local_keystore_resolver =
             LocalTrustlessStartupLocalKeystoreResolver::new(records.clone());
 
-        let _preflight_builder = TrustlessOperationPreflightBuilder::new(
+        let preflight_builder = TrustlessOperationPreflightBuilder::new(
             LocalTrustlessStartupRecipientKeyResolverBoundary,
             local_keystore_resolver.clone(),
         );
+
+        let configured_keyring =
+            LocalTrustlessRuntime::build_aws_esdk_raw_rsa_keyring_from_local_selection(
+                &proxy_config,
+                selected,
+            )
+            .map_err(|error| LocalTrustlessCliError::StartupDependency(error.to_string()))?;
+
+        let manifest_cipher = AwsEsdkTrustlessManifestCipher::new(configured_keyring);
 
         let remote_gateway_client =
             RemoteGatewayHttpClient::new(proxy_config.remote_gateway_url.clone())
                 .map_err(|error| LocalTrustlessCliError::StartupDependency(error.to_string()))?;
 
         let remote_gateway_endpoint_url = remote_gateway_client.endpoint_url();
-        let _remote_gateway_executor = TrustlessRemoteGatewayExecutor::new(remote_gateway_client);
+        let remote_gateway_executor = TrustlessRemoteGatewayExecutor::new(remote_gateway_client);
 
         let summary = format!(
-            "local proxy startup dependencies prepared for {}:{} with keystore records loaded, AWS ESDK unlocker configured, remote gateway client prepared, and network binding disabled",
+            "local proxy startup execution engine prepared for {}:{} with keystore records loaded, AWS ESDK keyring configured, manifest cipher prepared, remote gateway executor prepared, and network binding disabled",
             server.config().listen_host,
             server.config().listen_port
         );
 
-        Ok(LocalTrustlessStartupDependencyPlan {
+        let plan = LocalTrustlessStartupDependencyPlan {
             command: input.command,
-            proxy_config,
+            proxy_config: proxy_config.clone(),
             server_config,
             server_initialized: true,
             local_keystore_record_count: local_keystore_resolver.record_count(),
-            selected_local_key_account: selected.account,
-            selected_local_key_type: selected.key_type,
-            selected_local_key_version: selected.key_version,
-            selected_local_key_storage_label: selected.storage_label,
+            selected_local_key_account: selected_account,
+            selected_local_key_type: selected_key_type,
+            selected_local_key_version: selected_key_version,
+            selected_local_key_storage_label: selected_storage_label,
             local_keystore_resolver_prepared: true,
             recipient_key_resolver_boundary_prepared: true,
             preflight_builder_prepared: true,
             remote_gateway_client_prepared: true,
             remote_gateway_endpoint_url,
             remote_gateway_executor_prepared: true,
+            configured_aws_esdk_keyring_prepared: true,
+            manifest_cipher_prepared: true,
+            execution_engine_prepared: true,
             network_bind_performed: false,
             gateway_plaintext_access: false,
             summary,
-        })
+        };
+
+        let engine = LocalTrustlessExecutionEngine::new(
+            server,
+            proxy_config,
+            preflight_builder,
+            manifest_cipher,
+            remote_gateway_executor,
+        );
+
+        Ok(LocalTrustlessStartupDependencies { plan, engine })
     }
 
     pub fn prepare_command(
@@ -398,16 +455,38 @@ mod tests {
         path
     }
 
-    fn startup_local_record(account: &str, version: u32, enabled: bool) -> LocalKeystoreRecord {
+    fn startup_local_record(
+        config: &TrustlessProxyConfig,
+        account: &str,
+        version: u32,
+        enabled: bool,
+    ) -> LocalKeystoreRecord {
+        let storage_label =
+            format!("local-keystore/{account}/aws-esdk-rust-recipient-key/{version}");
+        let selection = crate::local_keystore::LocalPrivateKeySelection {
+            account: account.to_owned(),
+            key_type: "aws-esdk-rust-recipient-key".to_owned(),
+            key_version: version,
+            encrypted_private_key_blob: b"placeholder".to_vec(),
+            storage_label: storage_label.clone(),
+        };
+
+        let private_key_pem = format!(
+            "-----BEGIN PRIVATE KEY-----\nstartup local key {account} {version}\n-----END PRIVATE KEY-----\n"
+        );
+
+        let encrypted_private_key_blob = config
+            .local_private_key_unlocker()
+            .seal_private_key_for_storage(&selection, private_key_pem.as_bytes())
+            .unwrap();
+
         LocalKeystoreRecord {
             account: account.to_owned(),
             key_type: "aws-esdk-rust-recipient-key".to_owned(),
             key_version: version,
-            encrypted_private_key_blob: vec![version as u8, version as u8 + 1, 9],
+            encrypted_private_key_blob,
             enabled,
-            storage_label: format!(
-                "local-keystore/{account}/aws-esdk-rust-recipient-key/{version}"
-            ),
+            storage_label,
         }
     }
 
@@ -427,19 +506,20 @@ mod tests {
     #[test]
     fn cli_prepares_startup_dependencies_without_network_bind_or_secret_leak() {
         let keystore_path = startup_temp_path("dependencies");
+        let config = startup_proxy_config(keystore_path.clone());
         LocalKeystoreFile::write_records(
             &keystore_path,
             &[
-                startup_local_record("alice", 1, true),
-                startup_local_record("alice", 3, false),
-                startup_local_record("alice", 2, true),
-                startup_local_record("bob", 9, true),
+                startup_local_record(&config, "alice", 1, true),
+                startup_local_record(&config, "alice", 3, false),
+                startup_local_record(&config, "alice", 2, true),
+                startup_local_record(&config, "bob", 9, true),
             ],
         )
         .unwrap();
 
         let plan = LocalTrustlessCli::prepare_startup_dependencies(
-            startup_proxy_config(keystore_path.clone()),
+            config,
             LocalTrustlessCliInput {
                 remote_gateway_url: None,
                 ..LocalTrustlessCli::default_input(
@@ -475,6 +555,9 @@ mod tests {
                 .contains("/trustless/v1/ciphertext-gateway")
         );
         assert!(plan.remote_gateway_executor_prepared);
+        assert!(plan.configured_aws_esdk_keyring_prepared);
+        assert!(plan.manifest_cipher_prepared);
+        assert!(plan.execution_engine_prepared);
         assert!(!plan.network_bind_performed);
         assert!(!plan.gateway_plaintext_access);
 
@@ -489,10 +572,56 @@ mod tests {
     }
 
     #[test]
+    fn cli_builds_startup_execution_engine_without_network_bind() {
+        let keystore_path = startup_temp_path("engine");
+        let config = startup_proxy_config(keystore_path.clone());
+
+        LocalKeystoreFile::write_records(
+            &keystore_path,
+            &[startup_local_record(&config, "alice", 1, true)],
+        )
+        .unwrap();
+
+        let dependencies = LocalTrustlessCli::prepare_startup_execution_engine(
+            config,
+            LocalTrustlessCli::default_input(LocalTrustlessCliCommand::LocalProxyStartScaffold),
+        )
+        .unwrap();
+
+        let plan = &dependencies.plan;
+
+        assert!(plan.server_initialized);
+        assert!(plan.local_keystore_resolver_prepared);
+        assert!(plan.recipient_key_resolver_boundary_prepared);
+        assert!(plan.preflight_builder_prepared);
+        assert!(plan.remote_gateway_client_prepared);
+        assert!(plan.remote_gateway_executor_prepared);
+        assert!(plan.configured_aws_esdk_keyring_prepared);
+        assert!(plan.manifest_cipher_prepared);
+        assert!(plan.execution_engine_prepared);
+        assert!(!plan.network_bind_performed);
+        assert!(!plan.gateway_plaintext_access);
+        assert!(plan.summary.contains("execution engine prepared"));
+
+        let _engine = dependencies.engine;
+
+        let debug = format!("{plan:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains(&hex::encode([31u8; 32])));
+        assert!(!debug.contains("startup local key"));
+        assert!(!debug.contains("plaintext_private_key"));
+        assert!(!debug.contains("raw_private_key"));
+        assert!(!debug.contains("private_key_material"));
+
+        let _ = std::fs::remove_file(keystore_path);
+    }
+
+    #[test]
     fn cli_startup_local_keystore_resolver_exposes_only_matching_records() {
+        let config = startup_proxy_config(startup_temp_path("resolver"));
         let resolver = LocalTrustlessStartupLocalKeystoreResolver::new(vec![
-            startup_local_record("alice", 1, true),
-            startup_local_record("bob", 1, true),
+            startup_local_record(&config, "alice", 1, true),
+            startup_local_record(&config, "bob", 1, true),
         ]);
 
         let records = resolver
@@ -507,11 +636,15 @@ mod tests {
     #[test]
     fn cli_startup_dependencies_reject_missing_local_keystore_selection() {
         let keystore_path = startup_temp_path("missing-selection");
-        LocalKeystoreFile::write_records(&keystore_path, &[startup_local_record("bob", 1, true)])
-            .unwrap();
+        let config = startup_proxy_config(keystore_path.clone());
+        LocalKeystoreFile::write_records(
+            &keystore_path,
+            &[startup_local_record(&config, "bob", 1, true)],
+        )
+        .unwrap();
 
         let err = LocalTrustlessCli::prepare_startup_dependencies(
-            startup_proxy_config(keystore_path.clone()),
+            config,
             LocalTrustlessCli::default_input(LocalTrustlessCliCommand::LocalProxyStartScaffold),
         )
         .unwrap_err();
@@ -524,11 +657,15 @@ mod tests {
     #[test]
     fn cli_startup_dependencies_reject_network_bind() {
         let keystore_path = startup_temp_path("network-bind");
-        LocalKeystoreFile::write_records(&keystore_path, &[startup_local_record("alice", 1, true)])
-            .unwrap();
+        let config = startup_proxy_config(keystore_path.clone());
+        LocalKeystoreFile::write_records(
+            &keystore_path,
+            &[startup_local_record(&config, "alice", 1, true)],
+        )
+        .unwrap();
 
         let err = LocalTrustlessCli::prepare_startup_dependencies(
-            startup_proxy_config(keystore_path.clone()),
+            config,
             LocalTrustlessCliInput {
                 network_bind_enabled: true,
                 ..LocalTrustlessCli::default_input(
