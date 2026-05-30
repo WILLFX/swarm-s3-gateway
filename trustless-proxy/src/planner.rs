@@ -33,6 +33,7 @@ pub enum RemoteGatewayAction {
     GetCiphertextObject,
     HeadCiphertextObject,
     ListCiphertextManifest,
+    PutEncryptedManifest,
     DeleteCiphertextObject,
 }
 

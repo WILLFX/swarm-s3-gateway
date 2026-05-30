@@ -47,7 +47,7 @@ pub enum RemoteGatewayHttpClientError {
     #[error("ciphertext payload is required for PUT ciphertext object")]
     MissingCiphertextPayload,
 
-    #[error("encrypted manifest payload is required for DELETE ciphertext object")]
+    #[error("encrypted manifest payload is required for encrypted manifest write")]
     MissingEncryptedManifestPayload,
 
     #[error("request action does not allow ciphertext payload: {0:?}")]
@@ -230,7 +230,7 @@ fn request_to_http_envelope(
                 );
             }
         }
-        RemoteGatewayAction::DeleteCiphertextObject => {
+        RemoteGatewayAction::PutEncryptedManifest | RemoteGatewayAction::DeleteCiphertextObject => {
             let Some(encrypted_manifest) = &request.encrypted_manifest_payload else {
                 return Err(RemoteGatewayHttpClientError::MissingEncryptedManifestPayload);
             };
@@ -330,6 +330,7 @@ fn action_to_wire(action: RemoteGatewayAction) -> &'static str {
         RemoteGatewayAction::GetCiphertextObject => "get_ciphertext_object",
         RemoteGatewayAction::HeadCiphertextObject => "head_ciphertext_object",
         RemoteGatewayAction::ListCiphertextManifest => "list_ciphertext_manifest",
+        RemoteGatewayAction::PutEncryptedManifest => "put_encrypted_manifest",
         RemoteGatewayAction::DeleteCiphertextObject => "delete_ciphertext_object",
         RemoteGatewayAction::CreateTrustlessBucket => "create_trustless_bucket",
     }
@@ -341,6 +342,7 @@ fn wire_to_action(action: &str) -> Result<RemoteGatewayAction, RemoteGatewayHttp
         "get_ciphertext_object" => Ok(RemoteGatewayAction::GetCiphertextObject),
         "head_ciphertext_object" => Ok(RemoteGatewayAction::HeadCiphertextObject),
         "list_ciphertext_manifest" => Ok(RemoteGatewayAction::ListCiphertextManifest),
+        "put_encrypted_manifest" => Ok(RemoteGatewayAction::PutEncryptedManifest),
         "delete_ciphertext_object" => Ok(RemoteGatewayAction::DeleteCiphertextObject),
         "create_trustless_bucket" => Ok(RemoteGatewayAction::CreateTrustlessBucket),
         unknown => Err(RemoteGatewayHttpClientError::UnknownAction(
@@ -505,6 +507,33 @@ mod tests {
     }
 
     #[test]
+    fn http_client_sends_put_encrypted_manifest_without_plaintext() {
+        let (client, transport) =
+            client_with_transport(response(RemoteGatewayAction::PutEncryptedManifest));
+        let executor = TrustlessRemoteGatewayExecutor::new(client);
+
+        let mut request = request(RemoteGatewayAction::PutEncryptedManifest);
+        request.key = None;
+        request.encrypted_manifest_payload = Some(b"encrypted-manifest".to_vec());
+
+        let result = executor.execute(request).unwrap();
+
+        assert_eq!(result.action, RemoteGatewayAction::PutEncryptedManifest);
+
+        let body = transport.seen_body_json();
+
+        assert_eq!(body["action"], "put_encrypted_manifest");
+        assert!(body["key"].is_null());
+        assert_eq!(
+            body["encrypted_manifest_hex"],
+            hex::encode(b"encrypted-manifest")
+        );
+        assert!(body["ciphertext_hex"].is_null());
+        assert!(body.get("plaintext_payload").is_none());
+        assert!(body.get("plaintext_body").is_none());
+    }
+
+    #[test]
     fn http_client_sends_delete_encrypted_manifest_only() {
         let (client, transport) =
             client_with_transport(response(RemoteGatewayAction::DeleteCiphertextObject));
@@ -644,6 +673,16 @@ mod tests {
                 None,
                 Some(b"encrypted-manifest".to_vec()),
                 false,
+            ),
+            (
+                RemoteGatewayAction::PutEncryptedManifest,
+                "put_encrypted_manifest",
+                None,
+                None,
+                Some(b"encrypted-manifest".to_vec()),
+                None,
+                None,
+                true,
             ),
             (
                 RemoteGatewayAction::DeleteCiphertextObject,

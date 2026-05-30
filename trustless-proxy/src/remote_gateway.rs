@@ -21,6 +21,9 @@ pub enum RemoteGatewayClientError {
     #[error("ciphertext payload is required for PUT ciphertext object")]
     MissingPutCiphertextPayload,
 
+    #[error("encrypted manifest payload is required for PUT encrypted manifest")]
+    MissingPutEncryptedManifestPayload,
+
     #[error("encrypted manifest payload is required for DELETE ciphertext object")]
     MissingDeleteEncryptedManifestPayload,
 
@@ -94,6 +97,21 @@ fn validate_request(request: &CiphertextGatewayRequest) -> Result<(), RemoteGate
                 return Err(
                     RemoteGatewayClientError::UnexpectedEncryptedManifestPayload(request.action),
                 );
+            }
+        }
+        RemoteGatewayAction::PutEncryptedManifest => {
+            let Some(encrypted_manifest) = &request.encrypted_manifest_payload else {
+                return Err(RemoteGatewayClientError::MissingPutEncryptedManifestPayload);
+            };
+
+            if encrypted_manifest.is_empty() {
+                return Err(RemoteGatewayClientError::MissingPutEncryptedManifestPayload);
+            }
+
+            if request.ciphertext_payload.is_some() {
+                return Err(RemoteGatewayClientError::UnexpectedCiphertextPayload(
+                    request.action,
+                ));
             }
         }
         RemoteGatewayAction::DeleteCiphertextObject => {
@@ -241,6 +259,67 @@ mod tests {
         assert_eq!(response.action, RemoteGatewayAction::GetCiphertextObject);
         assert_eq!(response.ciphertext_payload, Some(b"ciphertext".to_vec()));
         assert!(!response.gateway_plaintext_access);
+    }
+
+    #[test]
+    fn remote_gateway_accepts_put_encrypted_manifest_payload_only() {
+        let mut request = request(RemoteGatewayAction::PutEncryptedManifest);
+        request.key = None;
+        request.encrypted_manifest_payload = Some(b"encrypted-manifest".to_vec());
+
+        let client =
+            MockRemoteGatewayClient::new(response(RemoteGatewayAction::PutEncryptedManifest));
+        let executor = TrustlessRemoteGatewayExecutor::new(client);
+
+        let response = executor.execute(request).unwrap();
+
+        assert_eq!(response.action, RemoteGatewayAction::PutEncryptedManifest);
+        assert!(!response.gateway_plaintext_access);
+        assert_eq!(
+            executor
+                .client
+                .seen_request()
+                .unwrap()
+                .encrypted_manifest_payload,
+            Some(b"encrypted-manifest".to_vec())
+        );
+        assert!(
+            executor
+                .client
+                .seen_request()
+                .unwrap()
+                .ciphertext_payload
+                .is_none()
+        );
+        assert!(
+            !executor
+                .client
+                .seen_request()
+                .unwrap()
+                .plaintext_payload_present
+        );
+    }
+
+    #[test]
+    fn remote_gateway_rejects_put_encrypted_manifest_with_ciphertext_payload() {
+        let mut request = request(RemoteGatewayAction::PutEncryptedManifest);
+        request.key = None;
+        request.encrypted_manifest_payload = Some(b"encrypted-manifest".to_vec());
+        request.ciphertext_payload = Some(b"ciphertext".to_vec());
+
+        let client =
+            MockRemoteGatewayClient::new(response(RemoteGatewayAction::PutEncryptedManifest));
+        let executor = TrustlessRemoteGatewayExecutor::new(client);
+
+        let err = executor.execute(request).unwrap_err();
+
+        assert_eq!(
+            err,
+            RemoteGatewayClientError::UnexpectedCiphertextPayload(
+                RemoteGatewayAction::PutEncryptedManifest
+            )
+        );
+        assert!(executor.client.seen_request().is_none());
     }
 
     #[test]

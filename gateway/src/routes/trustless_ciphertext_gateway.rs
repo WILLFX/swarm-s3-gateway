@@ -12,6 +12,7 @@ enum CiphertextGatewayAction {
     GetCiphertextObject,
     HeadCiphertextObject,
     ListCiphertextManifest,
+    PutEncryptedManifest,
     DeleteCiphertextObject,
     CreateTrustlessBucket,
 }
@@ -23,6 +24,7 @@ impl CiphertextGatewayAction {
             "get_ciphertext_object" => Ok(Self::GetCiphertextObject),
             "head_ciphertext_object" => Ok(Self::HeadCiphertextObject),
             "list_ciphertext_manifest" => Ok(Self::ListCiphertextManifest),
+            "put_encrypted_manifest" => Ok(Self::PutEncryptedManifest),
             "delete_ciphertext_object" => Ok(Self::DeleteCiphertextObject),
             "create_trustless_bucket" => Ok(Self::CreateTrustlessBucket),
             _ => Err(RouteError::bad_request(
@@ -37,6 +39,7 @@ impl CiphertextGatewayAction {
             Self::GetCiphertextObject => "get_ciphertext_object",
             Self::HeadCiphertextObject => "head_ciphertext_object",
             Self::ListCiphertextManifest => "list_ciphertext_manifest",
+            Self::PutEncryptedManifest => "put_encrypted_manifest",
             Self::DeleteCiphertextObject => "delete_ciphertext_object",
             Self::CreateTrustlessBucket => "create_trustless_bucket",
         }
@@ -186,6 +189,27 @@ pub async fn handle(
                 metadata_only: false,
                 gateway_plaintext_access: false,
             }))
+        }
+        CiphertextGatewayAction::PutEncryptedManifest => {
+            reject_key(&request).map_err(RouteError::into_response)?;
+            reject_ciphertext_payload(&request).map_err(RouteError::into_response)?;
+            let encrypted_manifest = decode_required_hex(
+                request.encrypted_manifest_hex.as_deref(),
+                "encrypted_manifest_hex",
+            )
+            .map_err(RouteError::into_response)?;
+
+            state
+                .bee_client
+                .put_object_and_update_pointer(
+                    &request.bucket,
+                    TRUSTLESS_MANIFEST_KEY,
+                    Bytes::from(encrypted_manifest),
+                )
+                .await
+                .map_err(|_| RouteError::storage_failure().into_response())?;
+
+            Ok(Json(metadata_response(action)))
         }
         CiphertextGatewayAction::DeleteCiphertextObject => {
             reject_key(&request).map_err(RouteError::into_response)?;
@@ -444,6 +468,56 @@ mod tests {
 
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert_eq!(error.message, "ciphertext_hex must be valid hex");
+    }
+
+    #[test]
+    fn gateway_endpoint_decodes_put_encrypted_manifest_request() {
+        let mut request = request("put_encrypted_manifest");
+        request.encrypted_manifest_hex = Some(hex::encode(b"encrypted-manifest"));
+
+        let action = CiphertextGatewayAction::parse(&request.action).unwrap();
+        assert_eq!(action, CiphertextGatewayAction::PutEncryptedManifest);
+
+        reject_key(&request).unwrap();
+        reject_ciphertext_payload(&request).unwrap();
+
+        let decoded = decode_required_hex(
+            request.encrypted_manifest_hex.as_deref(),
+            "encrypted_manifest_hex",
+        )
+        .unwrap();
+
+        assert_eq!(decoded, b"encrypted-manifest");
+        assert_eq!(action.as_wire_str(), "put_encrypted_manifest");
+    }
+
+    #[test]
+    fn gateway_endpoint_rejects_put_encrypted_manifest_without_payload() {
+        let request = request("put_encrypted_manifest");
+
+        let error = decode_required_hex(
+            request.encrypted_manifest_hex.as_deref(),
+            "encrypted_manifest_hex",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.message, "encrypted_manifest_hex is required");
+    }
+
+    #[test]
+    fn gateway_endpoint_rejects_put_encrypted_manifest_with_ciphertext_payload() {
+        let mut request = request("put_encrypted_manifest");
+        request.encrypted_manifest_hex = Some(hex::encode(b"encrypted-manifest"));
+        request.ciphertext_hex = Some(hex::encode(b"ciphertext"));
+
+        let error = reject_ciphertext_payload(&request).unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.message,
+            "ciphertext object payload is not allowed for this action"
+        );
     }
 
     #[test]
