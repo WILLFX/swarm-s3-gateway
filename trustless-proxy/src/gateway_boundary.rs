@@ -124,6 +124,26 @@ impl CiphertextGatewayBoundary {
         })
     }
 
+    pub fn put_encrypted_manifest_request(
+        bucket: impl Into<String>,
+        encrypted_manifest_payload: Vec<u8>,
+    ) -> Result<CiphertextGatewayRequest, CiphertextGatewayBoundaryError> {
+        let bucket = require_bucket(&bucket.into())?;
+
+        if encrypted_manifest_payload.is_empty() {
+            return Err(CiphertextGatewayBoundaryError::MissingEncryptedManifestPayload);
+        }
+
+        Ok(CiphertextGatewayRequest {
+            bucket,
+            key: None,
+            action: RemoteGatewayAction::PutEncryptedManifest,
+            ciphertext_payload: None,
+            encrypted_manifest_payload: Some(encrypted_manifest_payload),
+            plaintext_payload_present: false,
+        })
+    }
+
     pub fn delete_ciphertext_request(
         route_plan: &TrustlessRoutePlan,
         encrypted_manifest_payload: Vec<u8>,
@@ -292,6 +312,25 @@ mod tests {
         assert_eq!(request.action, RemoteGatewayAction::ListCiphertextManifest);
         assert!(request.ciphertext_payload.is_none());
         assert!(request.encrypted_manifest_payload.is_none());
+        assert!(!request.plaintext_payload_present);
+    }
+
+    #[test]
+    fn put_encrypted_manifest_request_forwards_only_encrypted_manifest_payload() {
+        let request = CiphertextGatewayBoundary::put_encrypted_manifest_request(
+            "bucket",
+            b"encrypted-manifest".to_vec(),
+        )
+        .unwrap();
+
+        assert_eq!(request.bucket, "bucket");
+        assert_eq!(request.key, None);
+        assert_eq!(request.action, RemoteGatewayAction::PutEncryptedManifest);
+        assert_eq!(
+            request.encrypted_manifest_payload,
+            Some(b"encrypted-manifest".to_vec())
+        );
+        assert!(request.ciphertext_payload.is_none());
         assert!(!request.plaintext_payload_present);
     }
 
