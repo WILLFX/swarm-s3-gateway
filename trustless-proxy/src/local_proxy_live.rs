@@ -184,6 +184,44 @@ impl LocalTrustlessLiveHttpServer {
         E: LocalTrustlessLiveRequestExecutor,
         B: LocalTrustlessLiveContextBuilder,
     {
+        Self::serve_next(
+            &listener,
+            &executor,
+            &context_builder,
+            max_request_body_bytes,
+        )
+    }
+
+    pub fn serve_forever<E, B>(
+        listener: TcpListener,
+        executor: E,
+        context_builder: B,
+        max_request_body_bytes: u64,
+    ) -> Result<(), LocalTrustlessLiveBindError>
+    where
+        E: LocalTrustlessLiveRequestExecutor,
+        B: LocalTrustlessLiveContextBuilder,
+    {
+        loop {
+            Self::serve_next(
+                &listener,
+                &executor,
+                &context_builder,
+                max_request_body_bytes,
+            )?;
+        }
+    }
+
+    pub fn serve_next<E, B>(
+        listener: &TcpListener,
+        executor: &E,
+        context_builder: &B,
+        max_request_body_bytes: u64,
+    ) -> Result<LocalTrustlessLiveServeResult, LocalTrustlessLiveBindError>
+    where
+        E: LocalTrustlessLiveRequestExecutor,
+        B: LocalTrustlessLiveContextBuilder,
+    {
         if max_request_body_bytes == 0 {
             return Err(LocalTrustlessLiveBindError::InvalidRequestBodyLimit);
         }
@@ -192,8 +230,8 @@ impl LocalTrustlessLiveHttpServer {
 
         let result = handle_stream(
             &mut stream,
-            &executor,
-            &context_builder,
+            executor,
+            context_builder,
             max_request_body_bytes,
         );
 
@@ -683,6 +721,23 @@ fn object_key_from_path(path: &str) -> Result<String, LocalTrustlessLiveBindErro
 
 fn io_error(error: std::io::Error) -> LocalTrustlessLiveBindError {
     LocalTrustlessLiveBindError::Io(error.to_string())
+}
+
+#[cfg(test)]
+pub fn localhost_ephemeral_port_for_tests() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+#[cfg(test)]
+pub fn send_raw_http_for_tests(port: u16, request: &[u8]) -> Vec<u8> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.write_all(request).unwrap();
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    response
 }
 
 #[cfg(test)]
