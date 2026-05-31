@@ -1,4 +1,7 @@
-use crate::{app_state::AppState, bee::client::BeeClient};
+use crate::{
+    app_state::AppState,
+    bee::client::{BeeClient, BeeStorage},
+};
 use axum::{Json, extract::State, http::StatusCode};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -107,6 +110,15 @@ pub async fn handle(
     State(state): State<AppState>,
     Json(request): Json<CiphertextGatewayRequest>,
 ) -> Result<Json<CiphertextGatewayResponse>, (StatusCode, String)> {
+    execute_ciphertext_gateway_request(state.bee_client.as_ref(), request)
+        .await
+        .map(Json)
+}
+
+async fn execute_ciphertext_gateway_request(
+    bee_client: &dyn BeeStorage,
+    request: CiphertextGatewayRequest,
+) -> Result<CiphertextGatewayResponse, (StatusCode, String)> {
     validate_common_request(&request).map_err(RouteError::into_response)?;
 
     let action = CiphertextGatewayAction::parse(request.action.as_str())
@@ -120,21 +132,19 @@ pub async fn handle(
                 decode_required_hex(request.ciphertext_hex.as_deref(), "ciphertext_hex")
                     .map_err(RouteError::into_response)?;
 
-            state
-                .bee_client
+            bee_client
                 .put_object_and_update_pointer(&request.bucket, key, Bytes::from(ciphertext))
                 .await
                 .map_err(|_| RouteError::storage_failure().into_response())?;
 
-            Ok(Json(metadata_response(action)))
+            Ok(metadata_response(action))
         }
         CiphertextGatewayAction::GetCiphertextObject => {
             let key = required_key(&request).map_err(RouteError::into_response)?;
             reject_all_payloads(&request).map_err(RouteError::into_response)?;
 
             let topic = BeeClient::derive_topic(&request.bucket, key);
-            let ciphertext = state
-                .bee_client
+            let ciphertext = bee_client
                 .get_pointer_bytes(topic)
                 .await
                 .map_err(|_| RouteError::storage_failure().into_response())?
@@ -142,22 +152,21 @@ pub async fn handle(
                     RouteError::not_found("ciphertext object was not found").into_response()
                 })?;
 
-            Ok(Json(CiphertextGatewayResponse {
+            Ok(CiphertextGatewayResponse {
                 version: WIRE_VERSION,
                 action: action.as_wire_str().to_string(),
                 ciphertext_hex: Some(hex::encode(ciphertext)),
                 encrypted_manifest_hex: None,
                 metadata_only: false,
                 gateway_plaintext_access: false,
-            }))
+            })
         }
         CiphertextGatewayAction::HeadCiphertextObject => {
             let key = required_key(&request).map_err(RouteError::into_response)?;
             reject_all_payloads(&request).map_err(RouteError::into_response)?;
 
             let topic = BeeClient::derive_topic(&request.bucket, key);
-            state
-                .bee_client
+            bee_client
                 .get_pointer_bytes(topic)
                 .await
                 .map_err(|_| RouteError::storage_failure().into_response())?
@@ -165,15 +174,14 @@ pub async fn handle(
                     RouteError::not_found("ciphertext object was not found").into_response()
                 })?;
 
-            Ok(Json(metadata_response(action)))
+            Ok(metadata_response(action))
         }
         CiphertextGatewayAction::ListCiphertextManifest => {
             reject_key(&request).map_err(RouteError::into_response)?;
             reject_all_payloads(&request).map_err(RouteError::into_response)?;
 
             let topic = BeeClient::derive_topic(&request.bucket, TRUSTLESS_MANIFEST_KEY);
-            let encrypted_manifest = state
-                .bee_client
+            let encrypted_manifest = bee_client
                 .get_pointer_bytes(topic)
                 .await
                 .map_err(|_| RouteError::storage_failure().into_response())?
@@ -181,14 +189,14 @@ pub async fn handle(
                     RouteError::not_found("encrypted manifest was not found").into_response()
                 })?;
 
-            Ok(Json(CiphertextGatewayResponse {
+            Ok(CiphertextGatewayResponse {
                 version: WIRE_VERSION,
                 action: action.as_wire_str().to_string(),
                 ciphertext_hex: None,
                 encrypted_manifest_hex: Some(hex::encode(encrypted_manifest)),
                 metadata_only: false,
                 gateway_plaintext_access: false,
-            }))
+            })
         }
         CiphertextGatewayAction::PutEncryptedManifest => {
             reject_key(&request).map_err(RouteError::into_response)?;
@@ -199,8 +207,7 @@ pub async fn handle(
             )
             .map_err(RouteError::into_response)?;
 
-            state
-                .bee_client
+            bee_client
                 .put_object_and_update_pointer(
                     &request.bucket,
                     TRUSTLESS_MANIFEST_KEY,
@@ -209,7 +216,7 @@ pub async fn handle(
                 .await
                 .map_err(|_| RouteError::storage_failure().into_response())?;
 
-            Ok(Json(metadata_response(action)))
+            Ok(metadata_response(action))
         }
         CiphertextGatewayAction::DeleteCiphertextObject => {
             reject_key(&request).map_err(RouteError::into_response)?;
@@ -220,8 +227,7 @@ pub async fn handle(
             )
             .map_err(RouteError::into_response)?;
 
-            state
-                .bee_client
+            bee_client
                 .put_object_and_update_pointer(
                     &request.bucket,
                     TRUSTLESS_MANIFEST_KEY,
@@ -230,13 +236,13 @@ pub async fn handle(
                 .await
                 .map_err(|_| RouteError::storage_failure().into_response())?;
 
-            Ok(Json(metadata_response(action)))
+            Ok(metadata_response(action))
         }
         CiphertextGatewayAction::CreateTrustlessBucket => {
             reject_key(&request).map_err(RouteError::into_response)?;
             reject_all_payloads(&request).map_err(RouteError::into_response)?;
 
-            Ok(Json(metadata_response(action)))
+            Ok(metadata_response(action))
         }
     }
 }
@@ -530,5 +536,153 @@ mod tests {
         assert_eq!(response.encrypted_manifest_hex, None);
         assert!(response.metadata_only);
         assert!(!response.gateway_plaintext_access);
+    }
+    #[derive(Debug, Default, Clone)]
+    struct SmokeBeeStorage {
+        inner: std::sync::Arc<std::sync::Mutex<SmokeBeeState>>,
+    }
+
+    #[derive(Debug, Default)]
+    struct SmokeBeeState {
+        pointers: std::collections::BTreeMap<[u8; 32], Vec<u8>>,
+        put_count: usize,
+    }
+
+    impl SmokeBeeStorage {
+        fn put_count(&self) -> usize {
+            self.inner.lock().unwrap().put_count
+        }
+
+        fn pointer_bytes(&self, bucket: &str, key: &str) -> Option<Vec<u8>> {
+            let topic = BeeClient::derive_topic(bucket, key);
+            self.inner.lock().unwrap().pointers.get(&topic).cloned()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::bee::client::BeeStorage for SmokeBeeStorage {
+        async fn get_bytes(&self, _reference: &str) -> anyhow::Result<Option<Bytes>> {
+            Ok(None)
+        }
+
+        async fn put_bytes(
+            &self,
+            data: Bytes,
+        ) -> anyhow::Result<crate::bee::client::BeePutBytesResult> {
+            Ok(crate::bee::client::BeePutBytesResult {
+                reference: format!("smoke-ref-{}", data.len()),
+            })
+        }
+
+        async fn get_pointer_bytes(&self, topic: [u8; 32]) -> anyhow::Result<Option<Vec<u8>>> {
+            Ok(self.inner.lock().unwrap().pointers.get(&topic).cloned())
+        }
+
+        async fn put_object_and_update_pointer(
+            &self,
+            bucket: &str,
+            key: &str,
+            data: Bytes,
+        ) -> anyhow::Result<crate::bee::client::FeedPointerResult> {
+            let topic = BeeClient::derive_topic(bucket, key);
+            let mut inner = self.inner.lock().unwrap();
+            inner.put_count += 1;
+            inner.pointers.insert(topic, data.to_vec());
+
+            Ok(crate::bee::client::FeedPointerResult {
+                owner: "smoke-owner".to_owned(),
+                topic_hex: hex::encode(topic),
+                swarm_reference: format!("smoke-swarm-{}", hex::encode(topic)),
+                manifest_reference: "smoke-manifest".to_owned(),
+                soc_reference: "smoke-soc".to_owned(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_bee_smoke_persists_ciphertext_object_and_fetches_ciphertext() {
+        let bee = SmokeBeeStorage::default();
+
+        let ciphertext = b"remote-object-ciphertext";
+
+        let mut put = request("put_ciphertext_object");
+        put.key = Some("docs/a.txt".to_owned());
+        put.ciphertext_hex = Some(hex::encode(ciphertext));
+
+        let put_response = execute_ciphertext_gateway_request(&bee, put).await.unwrap();
+
+        assert_eq!(put_response.action, "put_ciphertext_object");
+        assert!(put_response.metadata_only);
+        assert!(!put_response.gateway_plaintext_access);
+        assert_eq!(
+            bee.pointer_bytes("bucket-a", "docs/a.txt"),
+            Some(ciphertext.to_vec())
+        );
+
+        let mut get = request("get_ciphertext_object");
+        get.key = Some("docs/a.txt".to_owned());
+
+        let get_response = execute_ciphertext_gateway_request(&bee, get).await.unwrap();
+
+        assert_eq!(get_response.action, "get_ciphertext_object");
+        assert_eq!(get_response.ciphertext_hex, Some(hex::encode(ciphertext)));
+        assert_eq!(get_response.encrypted_manifest_hex, None);
+        assert!(!get_response.metadata_only);
+        assert!(!get_response.gateway_plaintext_access);
+    }
+
+    #[tokio::test]
+    async fn gateway_bee_smoke_persists_and_lists_encrypted_manifest() {
+        let bee = SmokeBeeStorage::default();
+
+        let encrypted_manifest = b"encrypted-manifest-only";
+
+        let mut put = request("put_encrypted_manifest");
+        put.encrypted_manifest_hex = Some(hex::encode(encrypted_manifest));
+
+        let put_response = execute_ciphertext_gateway_request(&bee, put).await.unwrap();
+
+        assert_eq!(put_response.action, "put_encrypted_manifest");
+        assert!(put_response.metadata_only);
+        assert!(!put_response.gateway_plaintext_access);
+        assert_eq!(
+            bee.pointer_bytes("bucket-a", TRUSTLESS_MANIFEST_KEY),
+            Some(encrypted_manifest.to_vec())
+        );
+
+        let list = request("list_ciphertext_manifest");
+        let list_response = execute_ciphertext_gateway_request(&bee, list)
+            .await
+            .unwrap();
+
+        assert_eq!(list_response.action, "list_ciphertext_manifest");
+        assert_eq!(
+            list_response.encrypted_manifest_hex,
+            Some(hex::encode(encrypted_manifest))
+        );
+        assert_eq!(list_response.ciphertext_hex, None);
+        assert!(!list_response.metadata_only);
+        assert!(!list_response.gateway_plaintext_access);
+    }
+
+    #[tokio::test]
+    async fn gateway_bee_smoke_rejects_plaintext_access_claim_before_storage() {
+        let bee = SmokeBeeStorage::default();
+
+        let mut put = request("put_ciphertext_object");
+        put.key = Some("docs/a.txt".to_owned());
+        put.ciphertext_hex = Some(hex::encode(b"ciphertext-only"));
+        put.gateway_plaintext_access = Some(true);
+
+        let err = execute_ciphertext_gateway_request(&bee, put)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.1,
+            "gateway plaintext access is forbidden for trustless requests"
+        );
+        assert_eq!(bee.put_count(), 0);
     }
 }
