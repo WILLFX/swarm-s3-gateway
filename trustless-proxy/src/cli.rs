@@ -12,7 +12,7 @@ use crate::local_proxy_live::{
 };
 use crate::manifest_codec::AwsEsdkTrustlessManifestCipher;
 use crate::preflight::TrustlessOperationPreflightBuilder;
-use crate::recipient_keys::{RecipientKeyError, RecipientKeyRecord, RecipientKeyResolver};
+use crate::recipient_key_file::{LocalRecipientKeyFile, LocalRecipientKeyFileResolver};
 use crate::remote_gateway::TrustlessRemoteGatewayExecutor;
 use crate::remote_gateway_http::RemoteGatewayHttpClient;
 use crate::runtime::LocalTrustlessRuntime;
@@ -78,6 +78,7 @@ pub struct LocalTrustlessStartupDependencyPlan {
     pub selected_local_key_version: u32,
     pub selected_local_key_storage_label: String,
     pub local_keystore_resolver_prepared: bool,
+    pub recipient_key_record_count: usize,
     pub recipient_key_resolver_boundary_prepared: bool,
     pub preflight_builder_prepared: bool,
     pub remote_gateway_client_prepared: bool,
@@ -121,19 +122,7 @@ impl LocalKeystoreResolver for LocalTrustlessStartupLocalKeystoreResolver {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct LocalTrustlessStartupRecipientKeyResolverBoundary;
-
-impl RecipientKeyResolver for LocalTrustlessStartupRecipientKeyResolverBoundary {
-    fn resolve_recipient_key(
-        &self,
-        account: &SubstrateAccountId,
-    ) -> Result<Option<RecipientKeyRecord>, RecipientKeyError> {
-        Err(RecipientKeyError::MissingEnabledRecipientKey(
-            account.trim().to_owned(),
-        ))
-    }
-}
+pub type LocalTrustlessStartupRecipientKeyResolverBoundary = LocalRecipientKeyFileResolver;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum LocalTrustlessCliError {
@@ -407,8 +396,17 @@ impl LocalTrustlessCli {
         let local_keystore_resolver =
             LocalTrustlessStartupLocalKeystoreResolver::new(records.clone());
 
+        let recipient_key_records =
+            LocalRecipientKeyFile::read_records(startup_recipient_keys_path(&proxy_config))
+                .map_err(|error| LocalTrustlessCliError::StartupDependency(error.to_string()))?;
+
+        let recipient_key_resolver =
+            LocalTrustlessStartupRecipientKeyResolverBoundary::new(recipient_key_records);
+
+        let recipient_key_record_count = recipient_key_resolver.record_count();
+
         let preflight_builder = TrustlessOperationPreflightBuilder::new(
-            LocalTrustlessStartupRecipientKeyResolverBoundary,
+            recipient_key_resolver,
             local_keystore_resolver.clone(),
         );
 
@@ -445,6 +443,7 @@ impl LocalTrustlessCli {
             selected_local_key_version: selected_key_version,
             selected_local_key_storage_label: selected_storage_label,
             local_keystore_resolver_prepared: true,
+            recipient_key_record_count,
             recipient_key_resolver_boundary_prepared: true,
             preflight_builder_prepared: true,
             remote_gateway_client_prepared: true,
@@ -519,6 +518,16 @@ impl LocalTrustlessCli {
     }
 }
 
+fn startup_recipient_keys_path(proxy_config: &TrustlessProxyConfig) -> std::path::PathBuf {
+    std::env::var("TRUSTLESS_PROXY_RECIPIENT_KEYS_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let mut path = proxy_config.keystore_path.clone();
+            path.set_extension("recipient-keys.json");
+            path
+        })
+}
+
 fn live_bind_config_from_server(
     server_config: &LocalTrustlessServerConfig,
 ) -> LocalTrustlessLiveBindConfig {
@@ -562,6 +571,7 @@ fn next_value(flag: &str, value: Option<String>) -> Result<String, LocalTrustles
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recipient_keys::RecipientKeyRecord;
 
     fn startup_temp_path(name: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
@@ -608,6 +618,46 @@ mod tests {
         }
     }
 
+    fn startup_recipient_keys_path_for_keystore(
+        keystore_path: &std::path::Path,
+    ) -> std::path::PathBuf {
+        let mut path = keystore_path.to_path_buf();
+        path.set_extension("recipient-keys.json");
+        path
+    }
+
+    fn startup_recipient_key_record(
+        account: &str,
+        version: u32,
+        enabled: bool,
+    ) -> RecipientKeyRecord {
+        RecipientKeyRecord {
+            account: account.to_owned(),
+            public_key: format!(
+                "-----BEGIN PUBLIC KEY-----\nstartup recipient key {account} {version}\n-----END PUBLIC KEY-----\n"
+            ),
+            key_type: "aws-esdk-rust-recipient-key".to_owned(),
+            key_version: version,
+            enabled,
+        }
+    }
+
+    fn write_startup_recipient_keys(keystore_path: &std::path::Path) -> std::path::PathBuf {
+        let recipient_keys_path = startup_recipient_keys_path_for_keystore(keystore_path);
+
+        LocalRecipientKeyFile::write_records(
+            &recipient_keys_path,
+            &[
+                startup_recipient_key_record("alice", 1, true),
+                startup_recipient_key_record("alice", 2, true),
+                startup_recipient_key_record("bob", 1, true),
+            ],
+        )
+        .unwrap();
+
+        recipient_keys_path
+    }
+
     fn startup_proxy_config(keystore_path: std::path::PathBuf) -> TrustlessProxyConfig {
         TrustlessProxyConfig {
             listen_host: "127.0.0.1".to_owned(),
@@ -635,6 +685,8 @@ mod tests {
             ],
         )
         .unwrap();
+
+        let recipient_keys_path = write_startup_recipient_keys(&keystore_path);
 
         let plan = LocalTrustlessCli::prepare_startup_dependencies(
             config,
@@ -665,6 +717,7 @@ mod tests {
                 .contains("local-keystore/alice")
         );
         assert!(plan.local_keystore_resolver_prepared);
+        assert_eq!(plan.recipient_key_record_count, 2);
         assert!(plan.recipient_key_resolver_boundary_prepared);
         assert!(plan.preflight_builder_prepared);
         assert!(plan.remote_gateway_client_prepared);
@@ -687,6 +740,7 @@ mod tests {
         assert!(!debug.contains("private_key_material"));
 
         let _ = std::fs::remove_file(keystore_path);
+        let _ = std::fs::remove_file(recipient_keys_path);
     }
 
     #[test]
@@ -700,6 +754,8 @@ mod tests {
         )
         .unwrap();
 
+        let recipient_keys_path = write_startup_recipient_keys(&keystore_path);
+
         let dependencies = LocalTrustlessCli::prepare_startup_execution_engine(
             config,
             LocalTrustlessCli::default_input(LocalTrustlessCliCommand::LocalProxyStartScaffold),
@@ -710,6 +766,7 @@ mod tests {
 
         assert!(plan.server_initialized);
         assert!(plan.local_keystore_resolver_prepared);
+        assert_eq!(plan.recipient_key_record_count, 2);
         assert!(plan.recipient_key_resolver_boundary_prepared);
         assert!(plan.preflight_builder_prepared);
         assert!(plan.remote_gateway_client_prepared);
@@ -732,6 +789,7 @@ mod tests {
         assert!(!debug.contains("private_key_material"));
 
         let _ = std::fs::remove_file(keystore_path);
+        let _ = std::fs::remove_file(recipient_keys_path);
     }
 
     #[test]
@@ -761,6 +819,8 @@ mod tests {
         )
         .unwrap();
 
+        let recipient_keys_path = write_startup_recipient_keys(&keystore_path);
+
         let err = LocalTrustlessCli::prepare_startup_dependencies(
             config,
             LocalTrustlessCli::default_input(LocalTrustlessCliCommand::LocalProxyStartScaffold),
@@ -770,6 +830,7 @@ mod tests {
         assert!(matches!(err, LocalTrustlessCliError::StartupDependency(_)));
 
         let _ = std::fs::remove_file(keystore_path);
+        let _ = std::fs::remove_file(recipient_keys_path);
     }
 
     #[test]
@@ -781,6 +842,8 @@ mod tests {
             &[startup_local_record(&config, "alice", 1, true)],
         )
         .unwrap();
+
+        let recipient_keys_path = write_startup_recipient_keys(&keystore_path);
 
         let err = LocalTrustlessCli::prepare_startup_dependencies(
             config,
@@ -794,6 +857,29 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err, LocalTrustlessCliError::NetworkBindFlagRejected);
+
+        let _ = std::fs::remove_file(keystore_path);
+        let _ = std::fs::remove_file(recipient_keys_path);
+    }
+
+    #[test]
+    fn cli_startup_dependencies_reject_missing_recipient_key_file() {
+        let keystore_path = startup_temp_path("missing-recipient-file");
+        let config = startup_proxy_config(keystore_path.clone());
+
+        LocalKeystoreFile::write_records(
+            &keystore_path,
+            &[startup_local_record(&config, "alice", 1, true)],
+        )
+        .unwrap();
+
+        let err = LocalTrustlessCli::prepare_startup_dependencies(
+            config,
+            LocalTrustlessCli::default_input(LocalTrustlessCliCommand::LocalProxyStartScaffold),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, LocalTrustlessCliError::StartupDependency(_)));
 
         let _ = std::fs::remove_file(keystore_path);
     }

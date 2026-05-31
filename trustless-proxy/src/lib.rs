@@ -20,6 +20,7 @@ pub mod operations;
 pub mod pipeline;
 pub mod planner;
 pub mod preflight;
+pub mod recipient_key_file;
 pub mod recipient_keys;
 pub mod references;
 pub mod remote_gateway;
@@ -120,6 +121,10 @@ pub use planner::{
 pub use preflight::{
     PreflightError, TrustlessLocalDecryptPreflight, TrustlessOperationPreflightBuilder,
     TrustlessPreflightRequest, TrustlessPutPreflight,
+};
+pub use recipient_key_file::{
+    LocalRecipientKeyFile, LocalRecipientKeyFileError, LocalRecipientKeyFileRecord,
+    LocalRecipientKeyFileResolver,
 };
 pub use recipient_keys::{
     RecipientEnvelopeBuilder, RecipientKeyError, RecipientKeyRecord, RecipientKeyRequest,
