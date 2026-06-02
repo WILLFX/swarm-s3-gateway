@@ -1,5 +1,11 @@
+use std::env;
+use std::fmt;
+
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use time::OffsetDateTime;
 
 use crate::gateway_boundary::{CiphertextGatewayRequest, CiphertextGatewayResponse};
 use crate::planner::RemoteGatewayAction;
@@ -8,9 +14,95 @@ use crate::remote_gateway::{RemoteGatewayClientError, TrustlessRemoteGatewayClie
 const CIPHERTEXT_GATEWAY_PATH: &str = "/trustless/v1/ciphertext-gateway";
 const WIRE_VERSION: u32 = 1;
 
+const REMOTE_GATEWAY_ACCESS_KEY_ID_ENV: &str = "TRUSTLESS_PROXY_REMOTE_GATEWAY_ACCESS_KEY_ID";
+const REMOTE_GATEWAY_SECRET_ACCESS_KEY_ENV: &str =
+    "TRUSTLESS_PROXY_REMOTE_GATEWAY_SECRET_ACCESS_KEY";
+const REMOTE_GATEWAY_REGION_ENV: &str = "TRUSTLESS_PROXY_REMOTE_GATEWAY_REGION";
+const REMOTE_GATEWAY_SERVICE_ENV: &str = "TRUSTLESS_PROXY_REMOTE_GATEWAY_SERVICE";
+
+const DEFAULT_SIGV4_REGION: &str = "us-east-1";
+const DEFAULT_SIGV4_SERVICE: &str = "s3";
+const SIGV4_SIGNED_HEADERS: &str = "host;x-amz-content-sha256;x-amz-date";
+
+type HmacSha256 = Hmac<Sha256>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteGatewayHttpClientConfig {
     pub base_url: String,
+    pub sigv4_auth: Option<RemoteGatewaySigV4AuthConfig>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct RemoteGatewaySigV4AuthConfig {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub region: String,
+    pub service: String,
+}
+
+impl fmt::Debug for RemoteGatewaySigV4AuthConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemoteGatewaySigV4AuthConfig")
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &"<redacted>")
+            .field("region", &self.region)
+            .field("service", &self.service)
+            .finish()
+    }
+}
+
+impl RemoteGatewaySigV4AuthConfig {
+    pub fn from_parts(
+        access_key_id: impl Into<String>,
+        secret_access_key: impl Into<String>,
+        region: impl Into<String>,
+        service: impl Into<String>,
+    ) -> Result<Self, RemoteGatewayHttpClientError> {
+        let access_key_id = access_key_id.into().trim().to_owned();
+        let secret_access_key = secret_access_key.into().trim().to_owned();
+        let region = region.into().trim().to_owned();
+        let service = service.into().trim().to_owned();
+
+        if access_key_id.is_empty() {
+            return Err(RemoteGatewayHttpClientError::MissingRemoteGatewayAccessKeyId);
+        }
+
+        if secret_access_key.is_empty() {
+            return Err(RemoteGatewayHttpClientError::MissingRemoteGatewaySecretAccessKey);
+        }
+
+        if region.is_empty() || service.is_empty() {
+            return Err(RemoteGatewayHttpClientError::InvalidSigV4Scope);
+        }
+
+        Ok(Self {
+            access_key_id,
+            secret_access_key,
+            region,
+            service,
+        })
+    }
+
+    pub fn from_env() -> Result<Option<Self>, RemoteGatewayHttpClientError> {
+        let access_key_id = optional_env(REMOTE_GATEWAY_ACCESS_KEY_ID_ENV);
+        let secret_access_key = optional_env(REMOTE_GATEWAY_SECRET_ACCESS_KEY_ENV);
+
+        match (access_key_id, secret_access_key) {
+            (None, None) => Ok(None),
+            (Some(_), None) => {
+                Err(RemoteGatewayHttpClientError::MissingRemoteGatewaySecretAccessKey)
+            }
+            (None, Some(_)) => Err(RemoteGatewayHttpClientError::MissingRemoteGatewayAccessKeyId),
+            (Some(access_key_id), Some(secret_access_key)) => {
+                let region = optional_env(REMOTE_GATEWAY_REGION_ENV)
+                    .unwrap_or_else(|| DEFAULT_SIGV4_REGION.to_owned());
+                let service = optional_env(REMOTE_GATEWAY_SERVICE_ENV)
+                    .unwrap_or_else(|| DEFAULT_SIGV4_SERVICE.to_owned());
+
+                Self::from_parts(access_key_id, secret_access_key, region, service).map(Some)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +151,15 @@ pub enum RemoteGatewayHttpClientError {
     #[error("unknown remote gateway HTTP action: {0}")]
     UnknownAction(String),
 
+    #[error("remote gateway SigV4 access key id is required when gateway auth is configured")]
+    MissingRemoteGatewayAccessKeyId,
+
+    #[error("remote gateway SigV4 secret access key is required when gateway auth is configured")]
+    MissingRemoteGatewaySecretAccessKey,
+
+    #[error("remote gateway SigV4 region and service are required")]
+    InvalidSigV4Scope,
+
     #[error("remote gateway HTTP response claimed plaintext access")]
     GatewayPlaintextAccessRejected,
 
@@ -96,7 +197,12 @@ impl From<RemoteGatewayHttpClientError> for RemoteGatewayClientError {
 }
 
 pub trait RemoteGatewayHttpTransport {
-    fn post_json(&self, url: &str, body: Vec<u8>) -> Result<Vec<u8>, RemoteGatewayHttpClientError>;
+    fn post_json(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+        headers: Vec<(String, String)>,
+    ) -> Result<Vec<u8>, RemoteGatewayHttpClientError>;
 }
 
 #[derive(Debug, Clone)]
@@ -119,11 +225,22 @@ impl Default for ReqwestRemoteGatewayHttpTransport {
 }
 
 impl RemoteGatewayHttpTransport for ReqwestRemoteGatewayHttpTransport {
-    fn post_json(&self, url: &str, body: Vec<u8>) -> Result<Vec<u8>, RemoteGatewayHttpClientError> {
-        let response = self
+    fn post_json(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+        headers: Vec<(String, String)>,
+    ) -> Result<Vec<u8>, RemoteGatewayHttpClientError> {
+        let mut request = self
             .client
             .post(url)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::CONTENT_TYPE, "application/json");
+
+        for (name, value) in headers {
+            request = request.header(name.as_str(), value);
+        }
+
+        let response = request
             .body(body)
             .send()
             .map_err(|error| RemoteGatewayHttpClientError::Transport(error.to_string()))?
@@ -149,6 +266,17 @@ impl RemoteGatewayHttpClient<ReqwestRemoteGatewayHttpTransport> {
         Self::with_transport(
             RemoteGatewayHttpClientConfig {
                 base_url: base_url.into(),
+                sigv4_auth: None,
+            },
+            ReqwestRemoteGatewayHttpTransport::new(),
+        )
+    }
+
+    pub fn from_env(base_url: impl Into<String>) -> Result<Self, RemoteGatewayHttpClientError> {
+        Self::with_transport(
+            RemoteGatewayHttpClientConfig {
+                base_url: base_url.into(),
+                sigv4_auth: RemoteGatewaySigV4AuthConfig::from_env()?,
             },
             ReqwestRemoteGatewayHttpTransport::new(),
         )
@@ -164,6 +292,10 @@ where
         transport: T,
     ) -> Result<Self, RemoteGatewayHttpClientError> {
         validate_base_url(&config.base_url)?;
+        if let Some(auth) = &config.sigv4_auth {
+            validate_sigv4_auth(auth)?;
+        }
+
         Ok(Self { config, transport })
     }
 
@@ -192,9 +324,13 @@ where
         let body = serde_json::to_vec(&envelope)
             .map_err(|error| RemoteGatewayClientError::Http(error.to_string()))?;
 
+        let endpoint_url = self.endpoint_url();
+        let headers = build_auth_headers(&self.config, &endpoint_url, &body)
+            .map_err(RemoteGatewayClientError::from)?;
+
         let response_body = self
             .transport
-            .post_json(&self.endpoint_url(), body)
+            .post_json(&endpoint_url, body, headers)
             .map_err(RemoteGatewayClientError::from)?;
 
         let response_envelope: RemoteGatewayHttpResponseEnvelope =
@@ -203,6 +339,148 @@ where
 
         http_envelope_to_response(response_envelope).map_err(RemoteGatewayClientError::from)
     }
+}
+
+fn build_auth_headers(
+    config: &RemoteGatewayHttpClientConfig,
+    url: &str,
+    body: &[u8],
+) -> Result<Vec<(String, String)>, RemoteGatewayHttpClientError> {
+    let Some(auth) = &config.sigv4_auth else {
+        return Ok(Vec::new());
+    };
+
+    let amz_date = current_amz_date();
+    build_sigv4_headers(auth, url, body, &amz_date)
+}
+
+fn build_sigv4_headers(
+    auth: &RemoteGatewaySigV4AuthConfig,
+    url: &str,
+    body: &[u8],
+    amz_date: &str,
+) -> Result<Vec<(String, String)>, RemoteGatewayHttpClientError> {
+    validate_sigv4_auth(auth)?;
+
+    let parsed_url =
+        reqwest::Url::parse(url).map_err(|_| RemoteGatewayHttpClientError::InvalidBaseUrl)?;
+    let host = host_header(&parsed_url)?;
+    let canonical_uri = if parsed_url.path().is_empty() {
+        "/"
+    } else {
+        parsed_url.path()
+    };
+    let date_scope = amz_date
+        .get(..8)
+        .ok_or(RemoteGatewayHttpClientError::InvalidSigV4Scope)?;
+
+    let payload_hash = sha256_hex(body);
+    let canonical_headers =
+        format!("host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n");
+
+    let canonical_request = format!(
+        "POST\n{canonical_uri}\n\n{canonical_headers}\n{SIGV4_SIGNED_HEADERS}\n{payload_hash}"
+    );
+
+    let credential_scope = format!("{date_scope}/{}/{}/aws4_request", auth.region, auth.service);
+
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{}",
+        sha256_hex(canonical_request.as_bytes())
+    );
+
+    let signing_key = sigv4_signing_key(
+        &auth.secret_access_key,
+        date_scope,
+        &auth.region,
+        &auth.service,
+    );
+    let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
+
+    let authorization = format!(
+        "AWS4-HMAC-SHA256 Credential={}/{credential_scope}, SignedHeaders={SIGV4_SIGNED_HEADERS}, Signature={signature}",
+        auth.access_key_id
+    );
+
+    Ok(vec![
+        ("host".to_owned(), host),
+        ("x-amz-date".to_owned(), amz_date.to_owned()),
+        ("x-amz-content-sha256".to_owned(), payload_hash),
+        ("authorization".to_owned(), authorization),
+    ])
+}
+
+fn host_header(url: &reqwest::Url) -> Result<String, RemoteGatewayHttpClientError> {
+    let Some(host) = url.host_str() else {
+        return Err(RemoteGatewayHttpClientError::InvalidBaseUrl);
+    };
+
+    let include_port = match (url.scheme(), url.port()) {
+        ("http", Some(80)) | ("https", Some(443)) | (_, None) => false,
+        (_, Some(_)) => true,
+    };
+
+    if include_port {
+        Ok(format!("{}:{}", host, url.port().unwrap()))
+    } else {
+        Ok(host.to_owned())
+    }
+}
+
+fn current_amz_date() -> String {
+    let now = OffsetDateTime::now_utc();
+
+    format!(
+        "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
+        now.year(),
+        now.month() as u8,
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second()
+    )
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn sigv4_signing_key(secret: &str, date: &str, region: &str, service: &str) -> Vec<u8> {
+    let k_date = hmac_sha256(format!("AWS4{secret}").as_bytes(), date.as_bytes());
+    let k_region = hmac_sha256(&k_date, region.as_bytes());
+    let k_service = hmac_sha256(&k_region, service.as_bytes());
+    hmac_sha256(&k_service, b"aws4_request")
+}
+
+fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts keys of any length");
+    mac.update(data);
+    mac.finalize().into_bytes().to_vec()
+}
+
+fn validate_sigv4_auth(
+    auth: &RemoteGatewaySigV4AuthConfig,
+) -> Result<(), RemoteGatewayHttpClientError> {
+    if auth.access_key_id.trim().is_empty() {
+        return Err(RemoteGatewayHttpClientError::MissingRemoteGatewayAccessKeyId);
+    }
+
+    if auth.secret_access_key.trim().is_empty() {
+        return Err(RemoteGatewayHttpClientError::MissingRemoteGatewaySecretAccessKey);
+    }
+
+    if auth.region.trim().is_empty() || auth.service.trim().is_empty() {
+        return Err(RemoteGatewayHttpClientError::InvalidSigV4Scope);
+    }
+
+    Ok(())
+}
+
+fn optional_env(name: &'static str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn request_to_http_envelope(
@@ -363,6 +641,7 @@ mod tests {
     struct MockState {
         seen_url: Option<String>,
         seen_body: Option<Vec<u8>>,
+        seen_headers: Vec<(String, String)>,
     }
 
     #[derive(Debug, Clone)]
@@ -384,6 +663,17 @@ mod tests {
             serde_json::from_slice(&body).unwrap()
         }
 
+        fn seen_headers(&self) -> Vec<(String, String)> {
+            self.state.borrow().seen_headers.clone()
+        }
+
+        fn seen_header(&self, name: &str) -> Option<String> {
+            self.seen_headers()
+                .into_iter()
+                .find(|(header, _)| header.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value)
+        }
+
         fn no_body_was_sent(&self) -> bool {
             self.state.borrow().seen_body.is_none()
         }
@@ -394,10 +684,12 @@ mod tests {
             &self,
             url: &str,
             body: Vec<u8>,
+            headers: Vec<(String, String)>,
         ) -> Result<Vec<u8>, RemoteGatewayHttpClientError> {
             let mut state = self.state.borrow_mut();
             state.seen_url = Some(url.to_owned());
             state.seen_body = Some(body);
+            state.seen_headers = headers;
             Ok(self.response.clone())
         }
     }
@@ -434,12 +726,175 @@ mod tests {
         let client = RemoteGatewayHttpClient::with_transport(
             RemoteGatewayHttpClientConfig {
                 base_url: "http://127.0.0.1:3000/".to_owned(),
+                sigv4_auth: None,
             },
             transport.clone(),
         )
         .unwrap();
 
         (client, transport)
+    }
+
+    fn sigv4_auth() -> RemoteGatewaySigV4AuthConfig {
+        RemoteGatewaySigV4AuthConfig::from_parts(
+            "s3w-dev-access-key",
+            "s3w-dev-secret-key",
+            "us-east-1",
+            "s3",
+        )
+        .unwrap()
+    }
+
+    fn client_with_sigv4_transport(
+        response: RemoteGatewayHttpResponseEnvelope,
+    ) -> (
+        RemoteGatewayHttpClient<MockHttpTransport>,
+        MockHttpTransport,
+    ) {
+        let transport = MockHttpTransport::new(response);
+        let client = RemoteGatewayHttpClient::with_transport(
+            RemoteGatewayHttpClientConfig {
+                base_url: "http://127.0.0.1:3000/".to_owned(),
+                sigv4_auth: Some(sigv4_auth()),
+            },
+            transport.clone(),
+        )
+        .unwrap();
+
+        (client, transport)
+    }
+
+    #[test]
+    #[ignore = "requires live gateway with registered dev SigV4 identity"]
+    fn live_http_client_uses_sigv4_to_put_and_get_ciphertext_object() {
+        let base_url = std::env::var("TRUSTLESS_PROXY_REMOTE_GATEWAY_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:3000".to_owned());
+
+        let client = RemoteGatewayHttpClient::from_env(base_url).unwrap();
+        let executor = TrustlessRemoteGatewayExecutor::new(client);
+
+        let bucket = format!("trustless-http-sigv4-live-{}", std::process::id());
+        let object_key = format!(
+            "docs/sigv4-{}.bin",
+            OffsetDateTime::now_utc().unix_timestamp_nanos()
+        );
+        let ciphertext = b"rust remote gateway http sigv4 ciphertext".to_vec();
+
+        let mut put = request(RemoteGatewayAction::PutCiphertextObject);
+        put.bucket = bucket.clone();
+        put.key = Some(object_key.clone());
+        put.ciphertext_payload = Some(ciphertext.clone());
+
+        let put_result = executor.execute(put).unwrap();
+
+        assert_eq!(put_result.action, RemoteGatewayAction::PutCiphertextObject);
+        assert!(put_result.metadata_only);
+        assert!(!put_result.gateway_plaintext_access);
+        assert!(put_result.ciphertext_payload.is_none());
+        assert!(put_result.encrypted_manifest_payload.is_none());
+
+        let mut get = request(RemoteGatewayAction::GetCiphertextObject);
+        get.bucket = bucket;
+        get.key = Some(object_key);
+
+        let get_result = executor.execute(get).unwrap();
+
+        assert_eq!(get_result.action, RemoteGatewayAction::GetCiphertextObject);
+        assert_eq!(get_result.ciphertext_payload, Some(ciphertext));
+        assert!(!get_result.gateway_plaintext_access);
+    }
+
+    #[test]
+    fn http_client_sends_sigv4_authorization_when_credentials_configured() {
+        let (client, transport) =
+            client_with_sigv4_transport(response(RemoteGatewayAction::PutCiphertextObject));
+        let executor = TrustlessRemoteGatewayExecutor::new(client);
+
+        let mut request = request(RemoteGatewayAction::PutCiphertextObject);
+        request.ciphertext_payload = Some(b"ciphertext".to_vec());
+
+        executor.execute(request).unwrap();
+
+        let authorization = transport.seen_header("authorization").unwrap();
+
+        assert!(authorization.starts_with("AWS4-HMAC-SHA256 Credential=s3w-dev-access-key/"));
+        assert!(authorization.contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date"));
+        assert!(authorization.contains("Signature="));
+        assert!(!authorization.contains("s3w-dev-secret-key"));
+        assert_eq!(
+            transport.seen_header("host").as_deref(),
+            Some("127.0.0.1:3000")
+        );
+        assert!(transport.seen_header("x-amz-date").is_some());
+    }
+
+    #[test]
+    fn http_client_sends_x_amz_content_sha256_matching_body() {
+        let (client, transport) =
+            client_with_sigv4_transport(response(RemoteGatewayAction::PutCiphertextObject));
+        let executor = TrustlessRemoteGatewayExecutor::new(client);
+
+        let mut request = request(RemoteGatewayAction::PutCiphertextObject);
+        request.ciphertext_payload = Some(b"ciphertext".to_vec());
+
+        executor.execute(request).unwrap();
+
+        let body = transport.state.borrow().seen_body.clone().unwrap();
+        assert_eq!(
+            transport.seen_header("x-amz-content-sha256").as_deref(),
+            Some(sha256_hex(&body).as_str())
+        );
+    }
+
+    #[test]
+    fn http_client_builds_deterministic_sigv4_headers_for_live_gateway_shape() {
+        let headers = build_sigv4_headers(
+            &sigv4_auth(),
+            "http://127.0.0.1:3000/trustless/v1/ciphertext-gateway",
+            br#"{"version":1}"#,
+            "20260602T150623Z",
+        )
+        .unwrap();
+
+        let authorization = headers
+            .iter()
+            .find(|(name, _)| name == "authorization")
+            .map(|(_, value)| value)
+            .unwrap();
+
+        assert!(
+            authorization
+                .contains("Credential=s3w-dev-access-key/20260602/us-east-1/s3/aws4_request")
+        );
+        assert!(authorization.contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date"));
+        assert!(authorization.contains("Signature="));
+    }
+
+    #[test]
+    fn http_client_does_not_log_or_debug_secret_access_key() {
+        let auth = sigv4_auth();
+        let config = RemoteGatewayHttpClientConfig {
+            base_url: "http://127.0.0.1:3000".to_owned(),
+            sigv4_auth: Some(auth),
+        };
+
+        let debug = format!("{config:?}");
+
+        assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("s3w-dev-access-key"));
+        assert!(!debug.contains("s3w-dev-secret-key"));
+    }
+
+    #[test]
+    fn http_client_rejects_empty_remote_gateway_secret_when_access_key_present() {
+        let err =
+            RemoteGatewaySigV4AuthConfig::from_parts("s3w-dev-access-key", "", "us-east-1", "s3")
+                .unwrap_err();
+
+        assert_eq!(
+            err,
+            RemoteGatewayHttpClientError::MissingRemoteGatewaySecretAccessKey
+        );
     }
 
     #[test]
@@ -598,6 +1053,7 @@ mod tests {
         let err = RemoteGatewayHttpClient::with_transport(
             RemoteGatewayHttpClientConfig {
                 base_url: " ".to_owned(),
+                sigv4_auth: None,
             },
             transport.clone(),
         )
@@ -608,6 +1064,7 @@ mod tests {
         let err = RemoteGatewayHttpClient::with_transport(
             RemoteGatewayHttpClientConfig {
                 base_url: "127.0.0.1:3000".to_owned(),
+                sigv4_auth: None,
             },
             transport,
         )
@@ -731,6 +1188,7 @@ mod tests {
             let client = RemoteGatewayHttpClient::with_transport(
                 RemoteGatewayHttpClientConfig {
                     base_url: "http://gateway.local/".to_owned(),
+                    sigv4_auth: None,
                 },
                 transport.clone(),
             )

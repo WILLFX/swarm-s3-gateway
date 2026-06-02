@@ -21,6 +21,12 @@ required_source = [
     "GatewayPlaintextAccessRejected",
     "reqwest::blocking::Client",
     "/trustless/v1/ciphertext-gateway",
+    "AWS4-HMAC-SHA256",
+    "authorization",
+    "x-amz-content-sha256",
+    "TRUSTLESS_PROXY_REMOTE_GATEWAY_SECRET_ACCESS_KEY",
+    "TRUSTLESS_PROXY_REMOTE_GATEWAY_ACCESS_KEY_ID",
+    "RemoteGatewaySigV4AuthConfig",
 ]
 
 required_tests = [
@@ -32,6 +38,10 @@ required_tests = [
     "http_client_rejects_response_claiming_gateway_plaintext_access",
     "http_client_rejects_invalid_base_url",
     "http_client_rejects_unknown_response_action",
+    "http_client_rejects_empty_remote_gateway_secret_when_access_key_present",
+    "http_client_does_not_log_or_debug_secret_access_key",
+    "http_client_sends_x_amz_content_sha256_matching_body",
+    "http_client_sends_sigv4_authorization_when_credentials_configured",
 ]
 
 required_lib = [
@@ -72,6 +82,12 @@ if "remote gateway HTTP client failed" not in remote_gateway:
 
 if "reqwest" not in cargo:
     raise SystemExit("FAILED: trustless-proxy missing reqwest dependency")
+if "time" not in cargo:
+    raise SystemExit("FAILED: trustless-proxy missing time dependency")
+if "sha2" not in cargo:
+    raise SystemExit("FAILED: trustless-proxy missing sha2 dependency")
+if "hmac" not in cargo:
+    raise SystemExit("FAILED: trustless-proxy missing hmac dependency")
 
 for token in required_workflow:
     if token not in workflow:

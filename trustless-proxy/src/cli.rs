@@ -420,7 +420,7 @@ impl LocalTrustlessCli {
         let manifest_cipher = AwsEsdkTrustlessManifestCipher::new(configured_keyring);
 
         let remote_gateway_client =
-            RemoteGatewayHttpClient::new(proxy_config.remote_gateway_url.clone())
+            RemoteGatewayHttpClient::from_env(proxy_config.remote_gateway_url.clone())
                 .map_err(|error| LocalTrustlessCliError::StartupDependency(error.to_string()))?;
 
         let remote_gateway_endpoint_url = remote_gateway_client.endpoint_url();
