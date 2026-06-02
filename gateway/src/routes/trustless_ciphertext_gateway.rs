@@ -144,13 +144,14 @@ async fn execute_ciphertext_gateway_request(
             reject_all_payloads(&request).map_err(RouteError::into_response)?;
 
             let topic = BeeClient::derive_topic(&request.bucket, key);
-            let ciphertext = bee_client
-                .get_pointer_bytes(topic)
-                .await
-                .map_err(|_| RouteError::storage_failure().into_response())?
-                .ok_or_else(|| {
-                    RouteError::not_found("ciphertext object was not found").into_response()
-                })?;
+            let ciphertext = read_pointer_target_bytes(
+                bee_client,
+                topic,
+                "ciphertext object was not found",
+                "ciphertext object payload was not found",
+            )
+            .await
+            .map_err(RouteError::into_response)?;
 
             Ok(CiphertextGatewayResponse {
                 version: WIRE_VERSION,
@@ -181,13 +182,14 @@ async fn execute_ciphertext_gateway_request(
             reject_all_payloads(&request).map_err(RouteError::into_response)?;
 
             let topic = BeeClient::derive_topic(&request.bucket, TRUSTLESS_MANIFEST_KEY);
-            let encrypted_manifest = bee_client
-                .get_pointer_bytes(topic)
-                .await
-                .map_err(|_| RouteError::storage_failure().into_response())?
-                .ok_or_else(|| {
-                    RouteError::not_found("encrypted manifest was not found").into_response()
-                })?;
+            let encrypted_manifest = read_pointer_target_bytes(
+                bee_client,
+                topic,
+                "encrypted manifest was not found",
+                "encrypted manifest payload was not found",
+            )
+            .await
+            .map_err(RouteError::into_response)?;
 
             Ok(CiphertextGatewayResponse {
                 version: WIRE_VERSION,
@@ -245,6 +247,29 @@ async fn execute_ciphertext_gateway_request(
             Ok(metadata_response(action))
         }
     }
+}
+
+async fn read_pointer_target_bytes(
+    bee_client: &dyn BeeStorage,
+    topic: [u8; 32],
+    pointer_missing_message: &'static str,
+    payload_missing_message: &'static str,
+) -> Result<Vec<u8>, RouteError> {
+    let reference_bytes = bee_client
+        .get_pointer_bytes(topic)
+        .await
+        .map_err(|_| RouteError::storage_failure())?
+        .ok_or_else(|| RouteError::not_found(pointer_missing_message))?;
+
+    let reference = hex::encode(reference_bytes);
+
+    let payload = bee_client
+        .get_bytes(&reference)
+        .await
+        .map_err(|_| RouteError::storage_failure())?
+        .ok_or_else(|| RouteError::not_found(payload_missing_message))?;
+
+    Ok(payload.to_vec())
 }
 
 fn metadata_response(action: CiphertextGatewayAction) -> CiphertextGatewayResponse {
@@ -545,6 +570,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct SmokeBeeState {
         pointers: std::collections::BTreeMap<[u8; 32], Vec<u8>>,
+        objects: std::collections::BTreeMap<String, Vec<u8>>,
         put_count: usize,
     }
 
@@ -553,16 +579,25 @@ mod tests {
             self.inner.lock().unwrap().put_count
         }
 
-        fn pointer_bytes(&self, bucket: &str, key: &str) -> Option<Vec<u8>> {
+        fn pointed_object_bytes(&self, bucket: &str, key: &str) -> Option<Vec<u8>> {
             let topic = BeeClient::derive_topic(bucket, key);
-            self.inner.lock().unwrap().pointers.get(&topic).cloned()
+            let inner = self.inner.lock().unwrap();
+            let reference = hex::encode(inner.pointers.get(&topic)?);
+            inner.objects.get(&reference).cloned()
         }
     }
 
     #[async_trait::async_trait]
     impl crate::bee::client::BeeStorage for SmokeBeeStorage {
-        async fn get_bytes(&self, _reference: &str) -> anyhow::Result<Option<Bytes>> {
-            Ok(None)
+        async fn get_bytes(&self, reference: &str) -> anyhow::Result<Option<Bytes>> {
+            Ok(self
+                .inner
+                .lock()
+                .unwrap()
+                .objects
+                .get(reference)
+                .cloned()
+                .map(Bytes::from))
         }
 
         async fn put_bytes(
@@ -587,12 +622,17 @@ mod tests {
             let topic = BeeClient::derive_topic(bucket, key);
             let mut inner = self.inner.lock().unwrap();
             inner.put_count += 1;
-            inner.pointers.insert(topic, data.to_vec());
+
+            let reference = format!("{:064x}", inner.put_count);
+            let reference_bytes = hex::decode(&reference).unwrap();
+
+            inner.objects.insert(reference.clone(), data.to_vec());
+            inner.pointers.insert(topic, reference_bytes);
 
             Ok(crate::bee::client::FeedPointerResult {
                 owner: "smoke-owner".to_owned(),
                 topic_hex: hex::encode(topic),
-                swarm_reference: format!("smoke-swarm-{}", hex::encode(topic)),
+                swarm_reference: reference,
                 manifest_reference: "smoke-manifest".to_owned(),
                 soc_reference: "smoke-soc".to_owned(),
             })
@@ -615,7 +655,7 @@ mod tests {
         assert!(put_response.metadata_only);
         assert!(!put_response.gateway_plaintext_access);
         assert_eq!(
-            bee.pointer_bytes("bucket-a", "docs/a.txt"),
+            bee.pointed_object_bytes("bucket-a", "docs/a.txt"),
             Some(ciphertext.to_vec())
         );
 
@@ -646,7 +686,7 @@ mod tests {
         assert!(put_response.metadata_only);
         assert!(!put_response.gateway_plaintext_access);
         assert_eq!(
-            bee.pointer_bytes("bucket-a", TRUSTLESS_MANIFEST_KEY),
+            bee.pointed_object_bytes("bucket-a", TRUSTLESS_MANIFEST_KEY),
             Some(encrypted_manifest.to_vec())
         );
 
@@ -663,6 +703,30 @@ mod tests {
         assert_eq!(list_response.ciphertext_hex, None);
         assert!(!list_response.metadata_only);
         assert!(!list_response.gateway_plaintext_access);
+    }
+
+    #[tokio::test]
+    async fn gateway_bee_smoke_get_fails_when_pointer_target_payload_is_missing() {
+        let bee = SmokeBeeStorage::default();
+
+        {
+            let topic = BeeClient::derive_topic("bucket-a", "docs/missing-payload.txt");
+            bee.inner
+                .lock()
+                .unwrap()
+                .pointers
+                .insert(topic, hex::decode(format!("{:064x}", 99)).unwrap());
+        }
+
+        let mut get = request("get_ciphertext_object");
+        get.key = Some("docs/missing-payload.txt".to_owned());
+
+        let err = execute_ciphertext_gateway_request(&bee, get)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        assert_eq!(err.1, "ciphertext object payload was not found");
     }
 
     #[tokio::test]
