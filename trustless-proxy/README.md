@@ -1,6 +1,6 @@
 # Trustless Local Proxy
 
-This package contains the Rust local S3-compatible proxy for trustless private buckets.
+This package contains the Rust local S3-compatible proxy for TrustlessPrivate buckets, referred to in user-facing docs as trustless private buckets.
 
 The local proxy is the client-side trust boundary. It handles local plaintext, local encryption/decryption, local private-key custody, recipient envelope creation, encrypted manifest handling, and ciphertext-only forwarding to the remote gateway.
 
@@ -17,6 +17,14 @@ Plaintext is not allowed here:
     remote gateway <-> chain/contracts
 
 The remote gateway must receive only ciphertext object bytes, encrypted manifest bytes, and metadata.
+
+The remote gateway must never receive plaintext object bytes, plaintext data keys, private encryption keys, decrypted owner catalogs, decrypted bucket manifests, or decrypted object manifests for trustless private buckets.
+
+Payload and manifest encryption use the AWS Encryption SDK for Rust with local recipient key material.
+
+## Runtime decision
+
+The production trustless proxy must not introduce a TypeScript or Node.js runtime. Python remains acceptable for repository guard scripts only.
 
 ## Main command
 
