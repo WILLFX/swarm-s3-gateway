@@ -2,11 +2,17 @@
 
 ## Status
 
-This document defines the target trustless private-access model.
+This document defines the trustless private-access model.
 
-The current Track A private mode is a hardened trusted-gateway mode. It protects privacy from public S3 responses, normal catalog/listing paths, chain metadata, stale concurrent writes, and several fail-open paths, but the gateway still participates in private encryption and decryption using operator-controlled service key material.
+The trustless local proxy MVP path has now been implemented and live-proven locally. The live proof uses a local S3-compatible proxy, local AWS ESDK Raw RSA encryption/decryption, signed remote gateway calls, Bee ciphertext/encrypted manifest storage, and local plaintext return on GET.
 
-The trustless track does not modify that existing bucket type in-place. Trustless private storage is introduced as a new bucket type with a different security boundary.
+The older Track A private mode remains a hardened trusted-gateway mode. It protects privacy from public S3 responses, normal catalog/listing paths, chain metadata, stale concurrent writes, and several fail-open paths, but the gateway still participates in private encryption and decryption using operator-controlled service key material.
+
+The trustless track does not modify that existing bucket type in-place. Trustless private storage is introduced as a separate bucket type with a different security boundary.
+
+For local startup and live demo commands, see:
+
+    docs/runbooks/trustless-local-dev.md
 
 ## Bucket types
 

@@ -1,278 +1,157 @@
 # Swarm S3 Gateway
 
-Swarm S3 Gateway is an S3-compatible gateway that stores object data on Swarm while using on-chain contracts to anchor identity and bucket state.
+Swarm S3 Gateway is an S3-compatible storage system that uses Swarm/Bee for content storage and a Substrate chain/contracts layer for identity, bucket state, and anchoring.
 
-The goal is to make Swarm usable through familiar S3-style operations while supporting both public and private bucket flows.
+The current main architecture is the trustless private storage path:
 
-This project is not only a storage proxy. It has three major parts working together:
+    S3-style client
+      -> local trustless proxy
+      -> local encryption/decryption
+      -> signed remote gateway
+      -> Bee ciphertext/encrypted manifest storage
+      -> chain/contracts anchoring
 
-1. **Gateway service**
-2. **On-chain contracts**
-3. **Swarm/Bee storage**
+The remote gateway must never receive private plaintext object bytes.
 
-Each part has a different responsibility.
-
-## Core architecture
-
-### 1. Gateway service
-
-The gateway is the S3-compatible HTTP service.
-
-It is responsible for:
-
-- Accepting S3-style requests such as PUT, GET, HEAD, LIST, and DELETE
-- Validating request authentication
-- Resolving identities from registered access keys
-- Encrypting private object payloads before writing them to Swarm
-- Decrypting private object payloads when an authorized client reads them
-- Creating and reading object/bucket manifests
-- Writing object bytes and manifest bytes to Bee/Swarm
-- Calling the chain/contracts to anchor bucket and object manifest roots
-- Hiding private Swarm references from private S3 responses
-
-The gateway is the coordination layer. It speaks S3 to clients, Bee HTTP to Swarm, and contract calls to the chain.
-
-### 2. On-chain contracts
-
-The contracts are the source of truth for identity and bucket state.
-
-The current contract-backed flows include:
-
-- Identity registration
-- Access key to owner mapping
-- Bucket contract address configuration
-- Identity contract address configuration
-- Bucket manifest root anchoring
-- Owner catalog root anchoring
-
-The contracts are important because the gateway should not be the only place that remembers ownership and bucket state. The chain gives the system an auditable state anchor.
-
-Delegation and authorization behavior is now covered at both contract and gateway-smoke level. Future work should focus on trust-minimization and production key-rotation workflows.
-
-### 3. Swarm/Bee storage
-
-Swarm/Bee is the content-addressed storage backend.
-
-It stores:
-
-- Object payload bytes
-- Encrypted private object bytes
-- Object manifests
-- Bucket manifests
-- Catalog manifests
-
-Swarm itself does not enforce privacy. If someone has a usable Swarm reference, they can try to fetch the bytes. For private objects, privacy depends on:
-
-- Encrypting object payloads
-- Keeping private manifest structure controlled by the gateway/contracts
-- Not leaking usable Swarm references in private S3 responses
-- Enforcing identity, ownership, and future delegation rules through the gateway and contracts
-
-This means the gateway must treat Swarm references as sensitive for private objects.
-
-## Public vs private buckets
-
-### Public buckets
-
-Public buckets are intended to be externally readable or verifiable.
-
-For public objects, responses may expose:
-
-    x-amz-meta-swarm-ref
-
-This is useful because the Swarm reference lets users verify or fetch public content directly.
-
-### Private buckets
-
-Private buckets are different.
-
-For private objects, exposing the Swarm reference can leak a storage/decryption path. Even if the payload is encrypted, the reference itself can reveal where the encrypted data lives and may allow direct retrieval attempts outside the gateway.
-
-For that reason, private responses omit:
-
-    x-amz-meta-swarm-ref
-
-from:
-
-- PUT object responses
-- HEAD object responses
-- GET object responses
-- ListObjectsV2 responses
-
-The gateway still stores and uses the Swarm references internally. It simply does not expose them through normal private S3-compatible responses.
-
-## Private object flow
-
-A private PUT flow works like this:
-
-1. Client sends an S3 PUT request to the gateway.
-2. Gateway validates the request identity.
-3. Gateway encrypts the object payload.
-4. Gateway writes the encrypted bytes to Bee/Swarm.
-5. Gateway writes object and bucket manifests.
-6. Gateway anchors the updated manifest root through the bucket contract.
-7. Gateway returns an S3-compatible response without leaking `x-amz-meta-swarm-ref`.
-
-A private GET flow works like this:
-
-1. Client sends an S3 GET request to the gateway.
-2. Gateway validates the request identity.
-3. Gateway resolves the private object manifest.
-4. Gateway fetches encrypted bytes from Bee/Swarm.
-5. Gateway decrypts the payload.
-6. Gateway returns the plaintext object body without leaking `x-amz-meta-swarm-ref`.
+Plaintext exists only at the local client/local proxy boundary. The remote gateway stores and returns ciphertext, encrypted manifests, metadata, and chain anchors.
 
 ## Current status
 
-The project currently has:
+The trustless local proxy path has been implemented and live-proven locally.
 
-- Public bucket/object lifecycle support
-- Private bucket/object lifecycle support
-- End-to-end private lifecycle smoke testing
-- Contract-backed identity registration
-- Contract-backed bucket anchoring
-- Private object encryption and manifest handling
-- Private response Swarm reference hiding
-- CI guards against silent development signer fallbacks
-- CI guards for unsafe secret examples in docs
-- CI guards for local and production environment templates
-- Separate local and production environment examples
+The live demo proves:
 
-## Environment templates
+    PUT plaintext locally
+    local proxy encrypts locally
+    remote gateway receives ciphertext/encrypted manifest only
+    Bee stores ciphertext/encrypted manifest only
+    GET fetches ciphertext
+    local proxy decrypts locally
+    GET returns original plaintext
+    x-s3w-gateway-plaintext-access remains false
 
-Local development:
+## Main components
 
-    .env.local.example
+### Trustless local proxy
 
-Production planning:
+Package:
 
-    .env.production.example
+    trustless-proxy/
 
-Production deployments must replace all placeholder values with real operator-controlled secrets.
+The local proxy is the client-side trust boundary.
 
-Do not use development signers, weak placeholder keys, or development fallback flags in production.
+It is responsible for local plaintext handling, local encryption/decryption, local private-key custody, recipient envelopes, encrypted manifests, and ciphertext-only forwarding to the remote gateway.
 
-## Run the gateway
+### Remote gateway
 
-Example local run:
+Package:
 
-    RUST_LOG=gateway=debug cargo run -p gateway --bin gateway
+    gateway/
 
-The gateway expects:
+The remote gateway is responsible for SigV4 authentication, authorization checks, Bee storage/retrieval, contract/pallet reads, and chain anchoring.
 
-- A running chain node
-- A reachable Bee API
-- Required environment variables exported into the shell
+For trustless private buckets, the remote gateway must not perform plaintext encryption or plaintext decryption.
 
-## Private lifecycle smoke test
+It should only see:
 
-After the gateway is running, run:
+    ciphertext object bytes
+    encrypted manifest bytes
+    encrypted metadata/envelopes
+    chain anchor data
 
-    ./scripts/private_lifecycle_smoke.sh
+### Chain and contracts
 
-Expected result:
+The chain/contracts layer anchors identity and bucket state. It is not the privacy layer. Privacy comes from client-side encryption and from keeping plaintext away from the remote gateway.
 
-    PRIVATE LIFECYCLE SMOKE PASSED
+### Bee/Swarm
 
-This verifies:
+Bee/Swarm stores content-addressed bytes. In the trustless path, Bee stores ciphertext and encrypted manifests.
 
-- Register identity
-- Create private bucket
-- PUT private object
-- HEAD private object
-- GET private object
-- LIST private bucket
-- DELETE private object
-- Confirm object is gone
-- DELETE private bucket
+## Trustless private flow
 
-## Local checks
+### PUT
 
-Run:
+    1. S3 client sends PUT plaintext to local trustless proxy.
+    2. Local proxy encrypts object bytes locally.
+    3. Local proxy updates/encrypts manifests locally.
+    4. Local proxy sends ciphertext/encrypted manifest bytes to the remote gateway.
+    5. Remote gateway stores ciphertext/encrypted manifest through Bee.
+    6. Local proxy returns an S3-style success response.
 
-    ./scripts/check_env_templates.py
-    ./scripts/check_docs_secret_safety.py
-    ./scripts/check_no_silent_dev_signers.sh
+### GET
+
+    1. S3 client sends GET to local trustless proxy.
+    2. Local proxy requests ciphertext/encrypted manifest from the remote gateway.
+    3. Remote gateway returns ciphertext only.
+    4. Local proxy decrypts locally.
+    5. Local proxy returns plaintext to the local S3 client.
+
+## Local development quick start
+
+Start or verify the local Substrate dev chain first.
+
+Expected chain RPC:
+
+    127.0.0.1:9944
+
+Bootstrap the trustless dev stack:
+
+    ./scripts/trustless_dev_stack_bootstrap.sh
+
+Expected ending:
+
+    === dev stack bootstrap passed ===
+    env file: /tmp/s3w-dev-stack-.../dev-stack.env
+    logs: /tmp/s3w-dev-stack-.../logs
+
+Run the live local proxy demo:
+
+    ./scripts/trustless_live_local_proxy_demo.sh
+
+Expected ending:
+
+    === live local proxy demo passed ===
+    run_dir=/tmp/s3w-live-local-proxy-demo-...
+    local_proxy_log=/tmp/s3w-live-local-proxy-demo-.../local-proxy.log
+
+Full runbook:
+
+    docs/runbooks/trustless-local-dev.md
+
+## Expected local ports
+
+    127.0.0.1:9944   local Substrate dev chain
+    127.0.0.1:1633   Bee dev API
+    127.0.0.1:3000   remote gateway
+    127.0.0.1:9090   trustless local proxy
+
+## Validation
+
+    cargo test -p trustless-proxy -- --nocapture
+    cargo test -p gateway -- --nocapture
+
+    cargo check -p trustless-proxy
     cargo check -p gateway
 
-Private response header behavior can be checked with:
+    ./scripts/check_trustless_live_local_proxy_demo_surface.py
+    ./scripts/check_trustless_local_proxy_cli_surface.py
+    ./scripts/check_trustless_local_proxy_scaffold.py
+    ./scripts/check_trustless_local_proxy_aws_esdk_keyring_surface.py
+    ./scripts/check_trustless_remote_gateway_http_client_surface.py
+    ./scripts/check_gateway_trustless_ciphertext_endpoint_surface.py
+    ./scripts/check_docs_secret_safety.py
+    ./scripts/check_no_silent_dev_signers.sh
 
-    cargo test -p gateway private_put_encrypts_payload_writes_manifests_anchors_and_hides_swarm_ref -- --nocapture
-    cargo test -p gateway private_get_decrypts_payload_and_omits_swarm_ref_header -- --nocapture
-    cargo test -p gateway private_head_reads_metadata_but_not_payload_and_omits_swarm_ref_header -- --nocapture
-    cargo test -p gateway private_list_reads_bucket_manifest_only_and_omits_swarm_ref_header -- --nocapture
-
-## Detailed operator guide
-
-See:
-
-    docs/private-lifecycle-operator-guide.md
-
-That guide contains deeper private lifecycle and operator setup details.
-
-## Security notes
-
-The gateway has been hardened to avoid silent production use of development signers and development fallbacks.
-
-Current safeguards include:
-
-- Required production signer environment variables
-- Explicit gating of development defaults
-- Explicit gating of Bee development fallback behavior
-- Required production Bee feed secret
-- CI guard for unsafe signer regressions
-- CI guard for unsafe secret examples in docs
-- CI guard for environment template completeness
-- Tests proving private responses omit Swarm reference headers
-
-## Remaining security work
-
-The next major security work should focus on delegation and authorization scope tests:
-
-- Contract-level delegation scope tests
-- Gateway delegation end-to-end tests
-- Negative permission tests
-- Revocation behavior tests
-- Encryption version rotation design
-
-These are the next layers needed to prove that unauthorized accounts cannot access or mutate private bucket state. 
 ## Documentation map
 
-This README is the project entry point. For deeper operational and security details, see the docs below.
+- `docs/runbooks/trustless-local-dev.md` — startup commands and live demo runbook.
+- `docs/security/trustless-private-access-model.md` — trustless security model.
+- `docs/security/chain-privacy-surface.md` — chain metadata/privacy surface.
+- `docs/security/private-encryption-version-rotation.md` — private encryption rotation limitations.
+- `docs/private-lifecycle-operator-guide.md` — older trusted-gateway private lifecycle guide.
 
-### Private lifecycle operator guide
+## Production warning
 
-See:
+The local scripts and helper binaries are for local development proof only.
 
-    docs/private-lifecycle-operator-guide.md
-
-This guide covers the full private bucket lifecycle and local operator setup, including:
-
-- required local dependencies
-- local Substrate/contracts chain
-- Bee/Swarm node requirements
-- S3 gateway server setup
-- identity and bucket contract registration
-- private lifecycle smoke testing
-- required signer environment variables
-- Bee development fallback notes
-- production secret safety notes
-
-Use this guide when setting up or validating the gateway locally.
-
-### Chain privacy surface
-
-See:
-
-    docs/security/chain-privacy-surface.md
-
-This document explains what the public chain exposes and what remains private. It covers:
-
-- expected public metadata leakage
-- owner and bucket root exposure
-- why private manifests must be encrypted before anchoring
-- bucket-name hash guessing risk
-- timing and size metadata risks
-- what the chain must not store or emit
-
-Use this document when reviewing the privacy model.
+Do not use dev signers, dev fallback flags, generated demo key material, local demo unlock keys, or placeholder master keys in production.
