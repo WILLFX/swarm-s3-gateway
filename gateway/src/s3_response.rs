@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use aws_smithy_xml::encode::XmlWriter;
 use axum::{
-    http::{HeaderValue, StatusCode, header},
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
@@ -20,6 +20,7 @@ pub enum S3ErrorKind {
     InvalidBucketName,
     InvalidRequest,
     InternalError,
+    EntityTooLarge,
     NotImplemented,
     ServiceUnavailable,
     SignatureDoesNotMatch,
@@ -40,6 +41,7 @@ impl S3ErrorKind {
             Self::InvalidBucketName => "InvalidBucketName",
             Self::InvalidRequest => "InvalidRequest",
             Self::InternalError => "InternalError",
+            Self::EntityTooLarge => "EntityTooLarge",
             Self::NotImplemented => "NotImplemented",
             Self::ServiceUnavailable => "ServiceUnavailable",
             Self::SignatureDoesNotMatch => "SignatureDoesNotMatch",
@@ -62,6 +64,7 @@ impl S3ErrorKind {
             Self::InvalidBucketName => "The specified bucket is not valid",
             Self::InvalidRequest => "Invalid Request",
             Self::InternalError => "We encountered an internal error. Please try again.",
+            Self::EntityTooLarge => "Your proposed upload exceeds the maximum allowed size",
             Self::NotImplemented => {
                 "A header or feature you provided implies functionality that is not implemented"
             }
@@ -87,9 +90,10 @@ impl S3ErrorKind {
             | Self::BucketAlreadyOwnedByYou
             | Self::InvalidBucketName
             | Self::InvalidRequest
+            | Self::EntityTooLarge
             | Self::SignatureDoesNotMatch
-            | Self::InvalidAccessKeyId
-            | Self::PreconditionFailed => StatusCode::BAD_REQUEST,
+            | Self::InvalidAccessKeyId => StatusCode::BAD_REQUEST,
+            Self::PreconditionFailed => StatusCode::PRECONDITION_FAILED,
             Self::BucketNotEmpty => StatusCode::CONFLICT,
             Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
             Self::NotImplemented => StatusCode::NOT_IMPLEMENTED,
@@ -309,6 +313,8 @@ pub fn list_objects_v2_response(
     prefix: Option<&str>,
     max_keys: usize,
     continuation_token: Option<&str>,
+    is_truncated: bool,
+    next_continuation_token: Option<&str>,
     objects: &[ListObjectsV2Entry],
 ) -> Response {
     let mut xml = String::new();
@@ -323,10 +329,18 @@ pub fn list_objects_v2_response(
     write_text_element(&mut root, "Prefix", prefix.unwrap_or(""));
     write_text_element(&mut root, "MaxKeys", &max_keys.to_string());
     write_text_element(&mut root, "KeyCount", &objects.len().to_string());
-    write_text_element(&mut root, "IsTruncated", "false");
+    write_text_element(
+        &mut root,
+        "IsTruncated",
+        if is_truncated { "true" } else { "false" },
+    );
 
     if let Some(token) = continuation_token {
         write_text_element(&mut root, "ContinuationToken", token);
+    }
+
+    if let Some(token) = next_continuation_token {
+        write_text_element(&mut root, "NextContinuationToken", token);
     }
 
     for object in objects {
@@ -357,9 +371,27 @@ pub fn bee_unavailable_response(err: impl Display) -> Response {
 }
 
 pub fn chain_error_response(err: impl Display) -> Response {
-    S3ErrorResponse::new(S3ErrorKind::InternalError)
-        .with_message(format!("Chain backend error: {err}"))
+    let message = format!("Chain backend error: {err}");
+
+    S3ErrorResponse::new(chain_error_kind(&message))
+        .with_message(message)
         .into_response()
+}
+
+fn chain_error_kind(message: &str) -> S3ErrorKind {
+    let normalized = message
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect::<String>();
+
+    if normalized.contains("stalebucketmanifestroot")
+        || normalized.contains("staleownercatalogroot")
+    {
+        S3ErrorKind::PreconditionFailed
+    } else {
+        S3ErrorKind::InternalError
+    }
 }
 
 fn write_text_element(
@@ -425,6 +457,24 @@ mod private_response_header_tests {
                 .to_str()
                 .unwrap(),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+    }
+
+    #[test]
+    fn stale_contract_root_errors_are_precondition_failures() {
+        assert_eq!(
+            chain_error_kind(
+                "bucket contract error for bucket::update_bucket_manifest_root_for_put_cas: StaleBucketManifestRoot"
+            ),
+            S3ErrorKind::PreconditionFailed
+        );
+        assert_eq!(
+            chain_error_kind("bucket contract error: StaleOwnerCatalogRoot"),
+            S3ErrorKind::PreconditionFailed
+        );
+        assert_eq!(
+            chain_error_kind("failed to submit contract call"),
+            S3ErrorKind::InternalError
         );
     }
 }

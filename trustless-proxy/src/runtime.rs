@@ -283,6 +283,7 @@ impl LocalTrustlessRuntime {
 
                 Ok(CiphertextGatewayBoundary::get_ciphertext_request(
                     &route_plan,
+                    None,
                 )?)
             }
             LocalS3Operation::HeadObject => {
@@ -295,6 +296,7 @@ impl LocalTrustlessRuntime {
 
                 Ok(CiphertextGatewayBoundary::head_ciphertext_request(
                     &route_plan,
+                    None,
                 )?)
             }
             LocalS3Operation::ListObjectsV2 => {
@@ -335,6 +337,7 @@ impl LocalTrustlessRuntime {
                 Ok(CiphertextGatewayBoundary::delete_ciphertext_request(
                     &route_plan,
                     encrypted_manifest,
+                    None,
                 )?)
             }
             LocalS3Operation::CreateTrustlessBucket => {
@@ -766,7 +769,7 @@ impl LocalTrustlessRuntime {
         request: CiphertextGatewayRequest,
         config: &TrustlessProxyConfig,
     ) -> Result<CiphertextGatewayResponse, LocalTrustlessRuntimeError> {
-        let client = RemoteGatewayHttpClient::new(config.remote_gateway_url.clone())
+        let client = RemoteGatewayHttpClient::from_env(config.remote_gateway_url.clone())
             .map_err(RemoteGatewayClientError::from)?;
         let executor = TrustlessRemoteGatewayExecutor::new(client);
 
@@ -1238,6 +1241,8 @@ mod tests {
                 action: RemoteGatewayAction::GetCiphertextObject,
                 ciphertext_payload: Some(b"ciphertext".to_vec()),
                 encrypted_manifest_payload: None,
+                ciphertext_reference_hex: Some("ab".repeat(32)),
+                encrypted_manifest_reference_hex: None,
                 metadata_only: false,
                 gateway_plaintext_access: false,
             },
@@ -1252,6 +1257,8 @@ mod tests {
                 action: RemoteGatewayAction::GetCiphertextObject,
                 ciphertext_payload: None,
                 encrypted_manifest_payload: None,
+                ciphertext_reference_hex: None,
+                expected_manifest_reference_hex: None,
                 plaintext_payload_present: false,
             },
             &executor,
@@ -1303,6 +1310,8 @@ mod tests {
                 action: RemoteGatewayAction::PutCiphertextObject,
                 ciphertext_payload: None,
                 encrypted_manifest_payload: None,
+                ciphertext_reference_hex: Some("cd".repeat(32)),
+                encrypted_manifest_reference_hex: None,
                 metadata_only: true,
                 gateway_plaintext_access: false,
             },
@@ -1316,6 +1325,8 @@ mod tests {
                 action: RemoteGatewayAction::GetCiphertextObject,
                 ciphertext_payload: None,
                 encrypted_manifest_payload: None,
+                ciphertext_reference_hex: None,
+                expected_manifest_reference_hex: None,
                 plaintext_payload_present: false,
             },
             &executor,
@@ -1356,6 +1367,8 @@ mod tests {
                     action: RemoteGatewayAction::CreateTrustlessBucket,
                     ciphertext_payload: None,
                     encrypted_manifest_payload: None,
+                    ciphertext_reference_hex: None,
+                    encrypted_manifest_reference_hex: None,
                     metadata_only: true,
                     gateway_plaintext_access: false,
                 })
@@ -1383,6 +1396,8 @@ mod tests {
                 action: RemoteGatewayAction::CreateTrustlessBucket,
                 ciphertext_payload: None,
                 encrypted_manifest_payload: None,
+                ciphertext_reference_hex: None,
+                expected_manifest_reference_hex: None,
                 plaintext_payload_present: false,
             },
             &executor,
@@ -1745,6 +1760,8 @@ mod tests {
                     action: RemoteGatewayAction::PutCiphertextObject,
                     ciphertext_payload: None,
                     encrypted_manifest_payload: None,
+                    ciphertext_reference_hex: Some("ab".repeat(32)),
+                    encrypted_manifest_reference_hex: None,
                     metadata_only: true,
                     gateway_plaintext_access: false,
                 },
@@ -1818,6 +1835,8 @@ mod tests {
                     action: RemoteGatewayAction::GetCiphertextObject,
                     ciphertext_payload: Some(ciphertext),
                     encrypted_manifest_payload: None,
+                    ciphertext_reference_hex: Some("cd".repeat(32)),
+                    encrypted_manifest_reference_hex: None,
                     metadata_only: false,
                     gateway_plaintext_access: false,
                 },
@@ -1852,6 +1871,8 @@ mod tests {
                     action: RemoteGatewayAction::DeleteCiphertextObject,
                     ciphertext_payload: None,
                     encrypted_manifest_payload: None,
+                    ciphertext_reference_hex: None,
+                    encrypted_manifest_reference_hex: Some("ef".repeat(32)),
                     metadata_only: true,
                     gateway_plaintext_access: false,
                 },
@@ -1910,6 +1931,8 @@ mod tests {
                 action: RemoteGatewayAction::GetCiphertextObject,
                 ciphertext_payload: None,
                 encrypted_manifest_payload: None,
+                ciphertext_reference_hex: None,
+                expected_manifest_reference_hex: None,
                 plaintext_payload_present: false,
             },
             &TrustlessProxyConfig {
@@ -2083,6 +2106,8 @@ mod tests {
                 action: RemoteGatewayAction::GetCiphertextObject,
                 ciphertext_payload: Some(b"ciphertext".to_vec()),
                 encrypted_manifest_payload: None,
+                ciphertext_reference_hex: Some("ab".repeat(32)),
+                encrypted_manifest_reference_hex: None,
                 metadata_only: false,
                 gateway_plaintext_access: false,
             },
@@ -2194,6 +2219,8 @@ mod tests {
                     action: RemoteGatewayAction::PutCiphertextObject,
                     ciphertext_payload: Some(b"real-ciphertext".to_vec()),
                     encrypted_manifest_payload: None,
+                    ciphertext_reference_hex: None,
+                    expected_manifest_reference_hex: None,
                     plaintext_payload_present: false,
                 },
                 encrypted_manifest: encrypted_manifest(b"encrypted-manifest-after-put"),
@@ -2224,6 +2251,8 @@ mod tests {
                     action: RemoteGatewayAction::DeleteCiphertextObject,
                     ciphertext_payload: None,
                     encrypted_manifest_payload: Some(b"real-encrypted-manifest".to_vec()),
+                    ciphertext_reference_hex: None,
+                    expected_manifest_reference_hex: None,
                     plaintext_payload_present: false,
                 },
                 encrypted_manifest: encrypted_manifest(b"real-encrypted-manifest"),
@@ -2286,6 +2315,8 @@ mod tests {
                 action: RemoteGatewayAction::PutCiphertextObject,
                 ciphertext_payload: None,
                 encrypted_manifest_payload: None,
+                ciphertext_reference_hex: Some("ab".repeat(32)),
+                encrypted_manifest_reference_hex: None,
                 metadata_only: true,
                 gateway_plaintext_access: false,
             },
@@ -2301,6 +2332,8 @@ mod tests {
                     action: RemoteGatewayAction::PutCiphertextObject,
                     ciphertext_payload: Some(b"real-ciphertext".to_vec()),
                     encrypted_manifest_payload: None,
+                    ciphertext_reference_hex: None,
+                    expected_manifest_reference_hex: None,
                     plaintext_payload_present: false,
                 },
                 encrypted_manifest: EncryptedTrustlessManifest {
@@ -2376,6 +2409,8 @@ mod tests {
                     action: RemoteGatewayAction::DeleteCiphertextObject,
                     ciphertext_payload: Some(b"real-ciphertext".to_vec()),
                     encrypted_manifest_payload: None,
+                    ciphertext_reference_hex: None,
+                    expected_manifest_reference_hex: None,
                     plaintext_payload_present: false,
                 },
                 encrypted_manifest: encrypted_manifest(false),
@@ -2402,6 +2437,8 @@ mod tests {
                     action: RemoteGatewayAction::PutCiphertextObject,
                     ciphertext_payload: Some(b"real-ciphertext".to_vec()),
                     encrypted_manifest_payload: None,
+                    ciphertext_reference_hex: None,
+                    expected_manifest_reference_hex: None,
                     plaintext_payload_present: false,
                 },
                 encrypted_manifest: encrypted_manifest(false),
@@ -2429,6 +2466,8 @@ mod tests {
                     action: RemoteGatewayAction::DeleteCiphertextObject,
                     ciphertext_payload: None,
                     encrypted_manifest_payload: Some(b"encrypted-manifest".to_vec()),
+                    ciphertext_reference_hex: None,
+                    expected_manifest_reference_hex: None,
                     plaintext_payload_present: false,
                 },
                 encrypted_manifest: encrypted_manifest(true),
@@ -2729,6 +2768,8 @@ mod tests {
                 action: RemoteGatewayAction::PutCiphertextObject,
                 ciphertext_payload: None,
                 encrypted_manifest_payload: None,
+                ciphertext_reference_hex: Some("ab".repeat(32)),
+                encrypted_manifest_reference_hex: None,
                 metadata_only: true,
                 gateway_plaintext_access: false,
             },

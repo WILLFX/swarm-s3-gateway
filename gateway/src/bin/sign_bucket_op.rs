@@ -1,6 +1,6 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use gateway::{chain::registry::ChainRegistryClient, crypto::bucket_name_hash};
-use sp_core::{Pair as _, sr25519};
+use sp_core::{sr25519, Pair as _};
 use std::env;
 
 fn decode_32_hex(value: &str, name: &str) -> Result<[u8; 32]> {

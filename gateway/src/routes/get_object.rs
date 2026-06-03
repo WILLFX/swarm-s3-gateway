@@ -13,8 +13,8 @@ use crate::{
     manifest::{BucketManifest, ObjectManifest},
     routes::private_object_read::{private_object_payload_aad, resolve_private_object_from_bucket},
     s3_response::{
-        S3ErrorKind, S3ErrorResponse, bee_error_response, bee_unavailable_response,
-        chain_error_response, get_object_response, omit_swarm_ref_for_private_response,
+        bee_error_response, bee_unavailable_response, chain_error_response, get_object_response,
+        omit_swarm_ref_for_private_response, S3ErrorKind, S3ErrorResponse,
     },
 };
 

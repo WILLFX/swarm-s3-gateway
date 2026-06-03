@@ -8,6 +8,10 @@ mod s3_identity_contract {
         AccountId32, DelegationEntry, EncryptionKeyRecord, IdentityRecord, OP_ALL,
     };
 
+    const MAX_ENCRYPTED_SIGV4_SECRET_BYTES: usize = 1024;
+    const MAX_ENCRYPTION_PUBLIC_KEY_BYTES: usize = 8192;
+    const MAX_ENCRYPTION_KEY_TYPE_BYTES: usize = 128;
+
     #[derive(scale::Encode, scale::Decode, scale_info::TypeInfo, Debug, PartialEq, Eq)]
     pub enum Error {
         IdentityAlreadyExists,
@@ -23,6 +27,10 @@ mod s3_identity_contract {
         EncryptionKeyAlreadyDisabled,
         EncryptionPublicKeyEmpty,
         EncryptionKeyTypeEmpty,
+        EncryptedSecretEmpty,
+        EncryptedSecretTooLarge,
+        EncryptionPublicKeyTooLarge,
+        EncryptionKeyTypeTooLarge,
     }
 
     pub type Result<T> = core::result::Result<T, Error>;
@@ -57,6 +65,8 @@ mod s3_identity_contract {
                 return Err(Error::IdentityAlreadyExists);
             }
 
+            Self::ensure_encrypted_sigv4_secret(&encrypted_secret)?;
+
             let caller = Self::account_to_bytes(self.env().caller());
             let record = IdentityRecord {
                 owner: caller,
@@ -88,6 +98,8 @@ mod s3_identity_contract {
             if caller != owner {
                 self.ensure_delegate_scope(owner, caller, OP_ALL)?;
             }
+
+            Self::ensure_encrypted_sigv4_secret(&new_secret)?;
 
             let next_version = match record.key_version.checked_add(1) {
                 Some(v) => v,
@@ -321,6 +333,26 @@ mod s3_identity_contract {
                 return Err(Error::EncryptionKeyTypeEmpty);
             }
 
+            if public_key.len() > MAX_ENCRYPTION_PUBLIC_KEY_BYTES {
+                return Err(Error::EncryptionPublicKeyTooLarge);
+            }
+
+            if key_type.len() > MAX_ENCRYPTION_KEY_TYPE_BYTES {
+                return Err(Error::EncryptionKeyTypeTooLarge);
+            }
+
+            Ok(())
+        }
+
+        fn ensure_encrypted_sigv4_secret(encrypted_secret: &[u8]) -> Result<()> {
+            if encrypted_secret.is_empty() {
+                return Err(Error::EncryptedSecretEmpty);
+            }
+
+            if encrypted_secret.len() > MAX_ENCRYPTED_SIGV4_SECRET_BYTES {
+                return Err(Error::EncryptedSecretTooLarge);
+            }
+
             Ok(())
         }
 
@@ -403,6 +435,28 @@ mod s3_identity_contract {
                 assert_eq!(record.key_version, 1);
                 assert!(record.enabled);
             }
+        }
+
+        #[ink::test]
+        fn register_identity_rejects_empty_or_oversized_secret_blob() {
+            let governance = account(9);
+            let mut c = S3IdentityContract::new(governance);
+
+            set_caller(account(1));
+
+            assert_eq!(
+                c.register_identity(sample_hash(7), Vec::new(), [4; 12]),
+                Err(Error::EncryptedSecretEmpty)
+            );
+
+            assert_eq!(
+                c.register_identity(
+                    sample_hash(8),
+                    vec![1; MAX_ENCRYPTED_SIGV4_SECRET_BYTES + 1],
+                    [4; 12]
+                ),
+                Err(Error::EncryptedSecretTooLarge)
+            );
         }
 
         #[ink::test]
@@ -494,6 +548,26 @@ mod s3_identity_contract {
         }
 
         #[ink::test]
+        fn rotate_key_rejects_empty_or_oversized_secret_blob() {
+            let governance = account(9);
+            let mut c = S3IdentityContract::new(governance);
+
+            set_caller(account(1));
+            let hash = sample_hash(7);
+            assert_eq!(c.register_identity(hash, vec![1], [2; 12]), Ok(()));
+
+            assert_eq!(
+                c.rotate_key(hash, Vec::new(), [8; 12]),
+                Err(Error::EncryptedSecretEmpty)
+            );
+
+            assert_eq!(
+                c.rotate_key(hash, vec![9; MAX_ENCRYPTED_SIGV4_SECRET_BYTES + 1], [8; 12]),
+                Err(Error::EncryptedSecretTooLarge)
+            );
+        }
+
+        #[ink::test]
         fn rotate_key_rejects_insufficient_scope_delegate() {
             let governance = account(9);
             let mut c = S3IdentityContract::new(governance);
@@ -531,10 +605,9 @@ mod s3_identity_contract {
                 account_bytes(2),
                 s3_contracts_common::OP_PUT_OBJECT
             ));
-            assert!(
-                c.get_delegation(account_bytes(1), account_bytes(2))
-                    .is_some()
-            );
+            assert!(c
+                .get_delegation(account_bytes(1), account_bytes(2))
+                .is_some());
 
             assert_eq!(c.revoke_delegation(account(2)), Ok(()));
 
@@ -543,10 +616,9 @@ mod s3_identity_contract {
                 account_bytes(2),
                 s3_contracts_common::OP_PUT_OBJECT
             ));
-            assert!(
-                c.get_delegation(account_bytes(1), account_bytes(2))
-                    .is_none()
-            );
+            assert!(c
+                .get_delegation(account_bytes(1), account_bytes(2))
+                .is_none());
         }
 
         #[ink::test]
@@ -708,6 +780,27 @@ mod s3_identity_contract {
         }
 
         #[ink::test]
+        fn register_encryption_key_rejects_oversized_material() {
+            let governance = account(9);
+            let mut c = S3IdentityContract::new(governance);
+
+            set_caller(account(1));
+
+            assert_eq!(
+                c.register_encryption_key(
+                    vec![1; MAX_ENCRYPTION_PUBLIC_KEY_BYTES + 1],
+                    b"aws-esdk-custom-v1".to_vec()
+                ),
+                Err(Error::EncryptionPublicKeyTooLarge)
+            );
+
+            assert_eq!(
+                c.register_encryption_key(vec![1], vec![2; MAX_ENCRYPTION_KEY_TYPE_BYTES + 1]),
+                Err(Error::EncryptionKeyTypeTooLarge)
+            );
+        }
+
+        #[ink::test]
         fn rotate_encryption_key_increments_version_and_reenables() {
             let governance = account(9);
             let mut c = S3IdentityContract::new(governance);
@@ -738,6 +831,31 @@ mod s3_identity_contract {
                 assert!(record.enabled);
                 assert_eq!(record.updated_at, 200);
             }
+        }
+
+        #[ink::test]
+        fn rotate_encryption_key_rejects_oversized_material() {
+            let governance = account(9);
+            let mut c = S3IdentityContract::new(governance);
+
+            set_caller(account(1));
+            assert_eq!(
+                c.register_encryption_key(vec![1], b"aws-esdk-custom-v1".to_vec()),
+                Ok(())
+            );
+
+            assert_eq!(
+                c.rotate_encryption_key(
+                    vec![1; MAX_ENCRYPTION_PUBLIC_KEY_BYTES + 1],
+                    b"aws-esdk-custom-v2".to_vec()
+                ),
+                Err(Error::EncryptionPublicKeyTooLarge)
+            );
+
+            assert_eq!(
+                c.rotate_encryption_key(vec![1], vec![2; MAX_ENCRYPTION_KEY_TYPE_BYTES + 1]),
+                Err(Error::EncryptionKeyTypeTooLarge)
+            );
         }
 
         #[ink::test]

@@ -2,11 +2,12 @@ use crate::auth::sigv4::RegistryBackedSigV4Validator;
 use crate::auth::unwrap::EnvKeyUnwrapper;
 use crate::bee::client::{BeeClient, BeeStorage};
 use crate::chain::{anchor_client::ContractAnchorClient, registry::ChainRegistryClient};
+use crate::request_limits::max_request_body_bytes_from_env;
 use crate::traits::{AnchorClient, RegistryClient, SecretUnwrapper};
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use common::types::SubstrateAddress32;
 use std::{env, fmt, str::FromStr, sync::Arc};
-use subxt_signer::{SecretUri, sr25519::Keypair};
+use subxt_signer::{sr25519::Keypair, SecretUri};
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
@@ -29,6 +30,7 @@ pub struct AppState {
     pub bee_client: Arc<dyn BeeStorage>,
     pub anchor_client: Arc<dyn AnchorClient>,
     pub master_service_key: [u8; 32],
+    pub max_request_body_bytes: usize,
     pub identity_contract_address: Option<SubstrateAddress32>,
     pub bucket_contract_address: Option<SubstrateAddress32>,
 }
@@ -42,6 +44,7 @@ impl fmt::Debug for AppState {
             .field("bee_client", &"Arc<dyn BeeStorage>")
             .field("anchor_client", &"Arc<dyn AnchorClient>")
             .field("master_service_key", &"<redacted>")
+            .field("max_request_body_bytes", &self.max_request_body_bytes)
             .field(
                 "identity_contract_address",
                 &self.identity_contract_address.as_ref().map(hex::encode),
@@ -56,6 +59,7 @@ impl fmt::Debug for AppState {
 
 pub async fn build_production_state() -> Result<AppState> {
     let master_service_key = load_master_service_key()?;
+    let max_request_body_bytes = max_request_body_bytes_from_env()?;
 
     let expected_service = env::var("S3GW_EXPECTED_SERVICE").unwrap_or_else(|_| "s3".to_string());
 
@@ -125,6 +129,7 @@ pub async fn build_production_state() -> Result<AppState> {
         bee_client,
         anchor_client,
         master_service_key,
+        max_request_body_bytes,
         identity_contract_address,
         bucket_contract_address: Some(bucket_contract_address),
     })

@@ -10,11 +10,11 @@ use crate::{
     app_state::AppState,
     crypto::bucket_name_hash,
     manifest::{
-        BucketManifest, ObjectManifest, PrivateBucketManifestV2, read_private_bucket_manifest_v2,
+        read_private_bucket_manifest_v2, BucketManifest, ObjectManifest, PrivateBucketManifestV2,
     },
     s3_response::{
-        ListObjectsV2Entry, S3ErrorKind, S3ErrorResponse, chain_error_response,
-        list_objects_v2_response, omit_swarm_ref_for_private_response,
+        chain_error_response, list_objects_v2_response, omit_swarm_ref_for_private_response,
+        ListObjectsV2Entry, S3ErrorKind, S3ErrorResponse,
     },
 };
 
@@ -57,7 +57,7 @@ pub async fn handle(
     let prefix = query.prefix.unwrap_or_default();
     let max_keys = query.max_keys.unwrap_or(1000);
 
-    let mut objects = if chain_bucket.is_private {
+    let objects = if chain_bucket.is_private {
         let bucket_type = match state.registry_client.fetch_bucket_type(bucket_id).await {
             Ok(value) => value,
             Err(err) => return chain_error_response(err),
@@ -112,8 +112,7 @@ pub async fn handle(
         }
     };
 
-    objects.sort_by(|a, b| a.key.cmp(&b.key));
-    objects.truncate(max_keys);
+    let page = page_list_objects(objects, max_keys, query.continuation_token.as_deref());
 
     omit_swarm_ref_for_private_response(
         list_objects_v2_response(
@@ -125,10 +124,49 @@ pub async fn handle(
             },
             max_keys,
             query.continuation_token.as_deref(),
-            &objects,
+            page.is_truncated,
+            page.next_continuation_token.as_deref(),
+            &page.objects,
         ),
         chain_bucket.is_private,
     )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ListObjectsPage {
+    objects: Vec<ListObjectsV2Entry>,
+    is_truncated: bool,
+    next_continuation_token: Option<String>,
+}
+
+fn page_list_objects(
+    mut objects: Vec<ListObjectsV2Entry>,
+    max_keys: usize,
+    continuation_token: Option<&str>,
+) -> ListObjectsPage {
+    objects.sort_by(|a, b| a.key.cmp(&b.key));
+
+    let mut after_token = objects
+        .into_iter()
+        .filter(|object| continuation_token.is_none_or(|token| object.key.as_str() > token))
+        .collect::<Vec<_>>();
+
+    let is_truncated = after_token.len() > max_keys;
+    let next_continuation_token = if is_truncated && max_keys > 0 {
+        after_token
+            .get(max_keys - 1)
+            .map(|object| object.key.clone())
+    } else {
+        None
+    };
+
+    after_token.truncate(max_keys);
+
+    ListObjectsPage {
+        objects: after_token,
+        is_truncated,
+        next_continuation_token,
+    }
 }
 
 async fn load_private_objects_from_anchored_bucket(
@@ -260,6 +298,16 @@ mod tests {
     use crate::manifest::PrivateBucketObjectEntry;
     use std::collections::BTreeMap;
 
+    fn list_entry(key: &str) -> ListObjectsV2Entry {
+        ListObjectsV2Entry {
+            key: key.to_string(),
+            last_modified: "2026-05-14T00:00:00Z".to_string(),
+            etag: format!("etag-{key}"),
+            size: 1,
+            storage_class: "STANDARD".to_string(),
+        }
+    }
+
     fn private_entry(
         object_key: &str,
         object_manifest_reference: &str,
@@ -275,6 +323,52 @@ mod tests {
             content_type: "text/plain".to_string(),
             last_modified: "2026-05-14T00:00:00Z".to_string(),
         }
+    }
+
+    #[test]
+    fn list_pagination_sorts_truncates_and_returns_next_token() {
+        let page = page_list_objects(
+            vec![
+                list_entry("docs/c.txt"),
+                list_entry("docs/a.txt"),
+                list_entry("docs/b.txt"),
+            ],
+            2,
+            None,
+        );
+
+        assert_eq!(
+            page.objects
+                .iter()
+                .map(|object| object.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["docs/a.txt", "docs/b.txt"]
+        );
+        assert!(page.is_truncated);
+        assert_eq!(page.next_continuation_token.as_deref(), Some("docs/b.txt"));
+    }
+
+    #[test]
+    fn list_pagination_resumes_after_continuation_token() {
+        let page = page_list_objects(
+            vec![
+                list_entry("docs/c.txt"),
+                list_entry("docs/a.txt"),
+                list_entry("docs/b.txt"),
+            ],
+            2,
+            Some("docs/b.txt"),
+        );
+
+        assert_eq!(
+            page.objects
+                .iter()
+                .map(|object| object.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["docs/c.txt"]
+        );
+        assert!(!page.is_truncated);
+        assert!(page.next_continuation_token.is_none());
     }
 
     #[test]

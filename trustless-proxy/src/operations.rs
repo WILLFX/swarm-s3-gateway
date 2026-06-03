@@ -140,6 +140,7 @@ where
     ) -> Result<CiphertextGatewayRequest, TrustlessOperationError> {
         Ok(CiphertextGatewayBoundary::get_ciphertext_request(
             &preflight.route_plan,
+            None,
         )?)
     }
 
@@ -212,6 +213,7 @@ where
         let delete_request = CiphertextGatewayBoundary::delete_ciphertext_request(
             &input.preflight.route_plan,
             manifest_write.encrypted_manifest.ciphertext.clone(),
+            None,
         )?;
 
         Ok(TrustlessDeleteOperationPlan {
@@ -439,6 +441,8 @@ mod tests {
                     action: RemoteGatewayAction::GetCiphertextObject,
                     ciphertext_payload: Some(b"ciphertext:secret".to_vec()),
                     encrypted_manifest_payload: None,
+                    ciphertext_reference_hex: None,
+                    encrypted_manifest_reference_hex: None,
                     metadata_only: false,
                     gateway_plaintext_access: false,
                 },
@@ -464,6 +468,8 @@ mod tests {
                     action: RemoteGatewayAction::ListCiphertextManifest,
                     ciphertext_payload: None,
                     encrypted_manifest_payload: Some(b"encrypted-manifest".to_vec()),
+                    ciphertext_reference_hex: None,
+                    encrypted_manifest_reference_hex: Some("ab".repeat(32)),
                     metadata_only: false,
                     gateway_plaintext_access: false,
                 },
@@ -508,6 +514,8 @@ mod tests {
                     action: RemoteGatewayAction::GetCiphertextObject,
                     ciphertext_payload: None,
                     encrypted_manifest_payload: None,
+                    ciphertext_reference_hex: None,
+                    encrypted_manifest_reference_hex: None,
                     metadata_only: false,
                     gateway_plaintext_access: false,
                 },
@@ -523,6 +531,8 @@ mod tests {
                     action: RemoteGatewayAction::ListCiphertextManifest,
                     ciphertext_payload: None,
                     encrypted_manifest_payload: None,
+                    ciphertext_reference_hex: None,
+                    encrypted_manifest_reference_hex: None,
                     metadata_only: false,
                     gateway_plaintext_access: false,
                 },
@@ -546,6 +556,8 @@ mod tests {
                     action: RemoteGatewayAction::GetCiphertextObject,
                     ciphertext_payload: Some(b"ciphertext:secret".to_vec()),
                     encrypted_manifest_payload: None,
+                    ciphertext_reference_hex: None,
+                    encrypted_manifest_reference_hex: None,
                     metadata_only: false,
                     gateway_plaintext_access: true,
                 },

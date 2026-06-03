@@ -1,5 +1,5 @@
 use crate::traits::{RegistryClient, SecretUnwrapper};
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use axum::http::{HeaderMap, Method, Request};
 use bytes::Bytes;
 use common::types::{AccessKeyHash, AwsPrincipal};
@@ -363,10 +363,10 @@ mod tests {
     use crate::auth::unwrap::EnvKeyUnwrapper;
     use crate::traits::{RegistryClient, SecretUnwrapper};
     use aes_gcm::{
-        Aes256Gcm, Nonce,
         aead::{Aead, KeyInit, Payload},
+        Aes256Gcm, Nonce,
     };
-    use anyhow::{Result, anyhow};
+    use anyhow::{anyhow, Result};
     use async_trait::async_trait;
     use axum::http::{HeaderValue, Method, Request, Uri};
     use bytes::Bytes;

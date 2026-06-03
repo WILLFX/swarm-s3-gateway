@@ -1,14 +1,11 @@
 use anyhow::Result;
 use axum::{
-    Router,
     extract::DefaultBodyLimit,
     middleware,
     routing::{get, post, put},
+    Router,
 };
-use gateway::{
-    app_state::build_production_state, auth, request_limits::max_request_body_bytes_from_env,
-    routes,
-};
+use gateway::{app_state::build_production_state, auth, routes};
 use std::{env, net::SocketAddr};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -22,7 +19,7 @@ async fn main() -> Result<()> {
         .init();
 
     let state = build_production_state().await?;
-    let max_request_body_bytes = max_request_body_bytes_from_env()?;
+    let max_request_body_bytes = state.max_request_body_bytes;
 
     tracing::info!(
         max_request_body_bytes,

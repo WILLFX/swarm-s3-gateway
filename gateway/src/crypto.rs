@@ -1,11 +1,11 @@
 use aes_gcm::{
+    aead::{generic_array::GenericArray, AeadInPlace, KeyInit},
     Aes256Gcm,
-    aead::{AeadInPlace, KeyInit, generic_array::GenericArray},
 };
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use blake2::{
+    digest::{consts::U32, Digest},
     Blake2b,
-    digest::{Digest, consts::U32},
 };
 use hmac::{Hmac, Mac};
 use sha2::Sha256;

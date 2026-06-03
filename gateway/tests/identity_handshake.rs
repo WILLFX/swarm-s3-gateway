@@ -1,8 +1,8 @@
 use aes_gcm::{
-    Aes256Gcm, Nonce,
     aead::{Aead, KeyInit, Payload},
+    Aes256Gcm, Nonce,
 };
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, Uri};
 use bytes::Bytes;

@@ -298,6 +298,8 @@ mod tests {
             action,
             ciphertext_payload: None,
             encrypted_manifest_payload: None,
+            ciphertext_reference_hex: None,
+            encrypted_manifest_reference_hex: None,
             metadata_only: true,
             gateway_plaintext_access: false,
         }

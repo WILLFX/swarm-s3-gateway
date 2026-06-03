@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use async_trait::async_trait;
 use axum::{
     extract::{Extension, Path, State},
@@ -15,8 +15,8 @@ use gateway::{
     bee::client::{BeePutBytesResult, BeeStorage, FeedPointerResult},
     crypto::{bucket_name_hash, derive_private_object_index_key, private_object_key_id},
     manifest::{
-        PrivateBucketManifestV2, PrivateBucketObjectEntry, read_private_bucket_manifest_v2,
-        write_private_bucket_manifest_v2,
+        read_private_bucket_manifest_v2, write_private_bucket_manifest_v2, PrivateBucketManifestV2,
+        PrivateBucketObjectEntry,
     },
     routes::delete_object,
     traits::{AnchorClient, RegistryClient, SecretUnwrapper},
@@ -350,6 +350,7 @@ async fn private_delete_fixture() -> Result<PrivateDeleteFixture> {
         bee_client,
         anchor_client,
         master_service_key,
+        max_request_body_bytes: 64 * 1024 * 1024,
         identity_contract_address: None,
         bucket_contract_address: None,
     };

@@ -18,10 +18,20 @@ pub async fn sigv4_auth_middleware(
 ) -> Response {
     let (parts, body) = req.into_parts();
 
-    let body_bytes = match to_bytes(body, usize::MAX).await {
+    let body_bytes = match to_bytes(body, state.max_request_body_bytes).await {
         Ok(bytes) => bytes,
         Err(err) => {
-            return S3ErrorResponse::new(S3ErrorKind::InvalidRequest)
+            let kind = if err
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("length limit")
+            {
+                S3ErrorKind::EntityTooLarge
+            } else {
+                S3ErrorKind::InvalidRequest
+            };
+
+            return S3ErrorResponse::new(kind)
                 .with_message(format!("failed to read request body: {err}"))
                 .into_response();
         }

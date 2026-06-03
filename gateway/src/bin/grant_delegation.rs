@@ -1,15 +1,15 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use gateway::{
     chain::registry::ChainRegistryClient,
-    contracts_abi::{IdentityError, decode_exec_result, encode_identity_grant_delegation},
+    contracts_abi::{decode_exec_result, encode_identity_grant_delegation, IdentityError},
     s3_runtime::api,
 };
 use std::{env, str::FromStr};
 use subxt::{
-    OnlineClient, PolkadotConfig,
     utils::{AccountId32, MultiAddress},
+    OnlineClient, PolkadotConfig,
 };
-use subxt_signer::{SecretUri, sr25519::Keypair};
+use subxt_signer::{sr25519::Keypair, SecretUri};
 
 const ALICE_OWNER_HEX: &str = "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d";
 

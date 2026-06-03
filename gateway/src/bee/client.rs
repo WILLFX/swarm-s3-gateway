@@ -1,8 +1,8 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use reqwest::{Client, StatusCode};
-use secp256k1::{Message, PublicKey, Secp256k1, SecretKey, ecdsa::RecoverableSignature};
+use secp256k1::{ecdsa::RecoverableSignature, Message, PublicKey, Secp256k1, SecretKey};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sha3::Keccak256;

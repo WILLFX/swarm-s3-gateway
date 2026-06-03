@@ -5,8 +5,8 @@ use crate::{
     app_state::{AppState, ObjectMetadata},
     crypto::{derive_private_object_index_key, private_object_key_id},
     manifest::{
-        PrivateBucketManifestV2, PrivateBucketObjectEntry, PrivateObjectManifestV2,
-        read_private_bucket_manifest_v2, read_private_object_manifest_v2,
+        read_private_bucket_manifest_v2, read_private_object_manifest_v2, PrivateBucketManifestV2,
+        PrivateBucketObjectEntry, PrivateObjectManifestV2,
     },
 };
 

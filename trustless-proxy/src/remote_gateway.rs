@@ -33,6 +33,12 @@ pub enum RemoteGatewayClientError {
     #[error("request action does not allow encrypted manifest payload: {0:?}")]
     UnexpectedEncryptedManifestPayload(RemoteGatewayAction),
 
+    #[error("request action does not allow ciphertext reference: {0:?}")]
+    UnexpectedCiphertextReference(RemoteGatewayAction),
+
+    #[error("request action does not allow expected manifest reference: {0:?}")]
+    UnexpectedExpectedManifestReference(RemoteGatewayAction),
+
     #[error("remote gateway response claimed plaintext access")]
     GatewayPlaintextAccessRejected,
 
@@ -98,6 +104,18 @@ fn validate_request(request: &CiphertextGatewayRequest) -> Result<(), RemoteGate
                     RemoteGatewayClientError::UnexpectedEncryptedManifestPayload(request.action),
                 );
             }
+
+            if request.ciphertext_reference_hex.is_some() {
+                return Err(RemoteGatewayClientError::UnexpectedCiphertextReference(
+                    request.action,
+                ));
+            }
+
+            if request.expected_manifest_reference_hex.is_some() {
+                return Err(
+                    RemoteGatewayClientError::UnexpectedExpectedManifestReference(request.action),
+                );
+            }
         }
         RemoteGatewayAction::PutEncryptedManifest => {
             let Some(encrypted_manifest) = &request.encrypted_manifest_payload else {
@@ -110,6 +128,12 @@ fn validate_request(request: &CiphertextGatewayRequest) -> Result<(), RemoteGate
 
             if request.ciphertext_payload.is_some() {
                 return Err(RemoteGatewayClientError::UnexpectedCiphertextPayload(
+                    request.action,
+                ));
+            }
+
+            if request.ciphertext_reference_hex.is_some() {
+                return Err(RemoteGatewayClientError::UnexpectedCiphertextReference(
                     request.action,
                 ));
             }
@@ -128,10 +152,14 @@ fn validate_request(request: &CiphertextGatewayRequest) -> Result<(), RemoteGate
                     request.action,
                 ));
             }
+
+            if request.ciphertext_reference_hex.is_some() {
+                return Err(RemoteGatewayClientError::UnexpectedCiphertextReference(
+                    request.action,
+                ));
+            }
         }
-        RemoteGatewayAction::GetCiphertextObject
-        | RemoteGatewayAction::HeadCiphertextObject
-        | RemoteGatewayAction::ListCiphertextManifest => {
+        RemoteGatewayAction::GetCiphertextObject | RemoteGatewayAction::HeadCiphertextObject => {
             if request.ciphertext_payload.is_some() {
                 return Err(RemoteGatewayClientError::UnexpectedCiphertextPayload(
                     request.action,
@@ -141,6 +169,37 @@ fn validate_request(request: &CiphertextGatewayRequest) -> Result<(), RemoteGate
             if request.encrypted_manifest_payload.is_some() {
                 return Err(
                     RemoteGatewayClientError::UnexpectedEncryptedManifestPayload(request.action),
+                );
+            }
+
+            if request.expected_manifest_reference_hex.is_some() {
+                return Err(
+                    RemoteGatewayClientError::UnexpectedExpectedManifestReference(request.action),
+                );
+            }
+        }
+        RemoteGatewayAction::ListCiphertextManifest => {
+            if request.ciphertext_payload.is_some() {
+                return Err(RemoteGatewayClientError::UnexpectedCiphertextPayload(
+                    request.action,
+                ));
+            }
+
+            if request.encrypted_manifest_payload.is_some() {
+                return Err(
+                    RemoteGatewayClientError::UnexpectedEncryptedManifestPayload(request.action),
+                );
+            }
+
+            if request.ciphertext_reference_hex.is_some() {
+                return Err(RemoteGatewayClientError::UnexpectedCiphertextReference(
+                    request.action,
+                ));
+            }
+
+            if request.expected_manifest_reference_hex.is_some() {
+                return Err(
+                    RemoteGatewayClientError::UnexpectedExpectedManifestReference(request.action),
                 );
             }
         }
@@ -154,6 +213,18 @@ fn validate_request(request: &CiphertextGatewayRequest) -> Result<(), RemoteGate
             if request.encrypted_manifest_payload.is_some() {
                 return Err(
                     RemoteGatewayClientError::UnexpectedEncryptedManifestPayload(request.action),
+                );
+            }
+
+            if request.ciphertext_reference_hex.is_some() {
+                return Err(RemoteGatewayClientError::UnexpectedCiphertextReference(
+                    request.action,
+                ));
+            }
+
+            if request.expected_manifest_reference_hex.is_some() {
+                return Err(
+                    RemoteGatewayClientError::UnexpectedExpectedManifestReference(request.action),
                 );
             }
         }
@@ -204,6 +275,8 @@ mod tests {
             action,
             ciphertext_payload: None,
             encrypted_manifest_payload: None,
+            ciphertext_reference_hex: None,
+            expected_manifest_reference_hex: None,
             plaintext_payload_present: false,
         }
     }
@@ -213,6 +286,8 @@ mod tests {
             action,
             ciphertext_payload: None,
             encrypted_manifest_payload: None,
+            ciphertext_reference_hex: None,
+            encrypted_manifest_reference_hex: None,
             metadata_only: false,
             gateway_plaintext_access: false,
         }
@@ -266,6 +341,7 @@ mod tests {
         let mut request = request(RemoteGatewayAction::PutEncryptedManifest);
         request.key = None;
         request.encrypted_manifest_payload = Some(b"encrypted-manifest".to_vec());
+        request.expected_manifest_reference_hex = Some("01".repeat(32));
 
         let client =
             MockRemoteGatewayClient::new(response(RemoteGatewayAction::PutEncryptedManifest));
@@ -291,12 +367,43 @@ mod tests {
                 .ciphertext_payload
                 .is_none()
         );
+        assert_eq!(
+            executor
+                .client
+                .seen_request()
+                .unwrap()
+                .expected_manifest_reference_hex,
+            Some("01".repeat(32))
+        );
         assert!(
             !executor
                 .client
                 .seen_request()
                 .unwrap()
                 .plaintext_payload_present
+        );
+    }
+
+    #[test]
+    fn remote_gateway_accepts_direct_ciphertext_reference_for_reads() {
+        let mut request = request(RemoteGatewayAction::GetCiphertextObject);
+        request.ciphertext_reference_hex = Some("ab".repeat(32));
+
+        let client = MockRemoteGatewayClient::new(CiphertextGatewayResponse {
+            ciphertext_payload: Some(b"ciphertext".to_vec()),
+            ..response(RemoteGatewayAction::GetCiphertextObject)
+        });
+        let executor = TrustlessRemoteGatewayExecutor::new(client);
+
+        executor.execute(request).unwrap();
+
+        assert_eq!(
+            executor
+                .client
+                .seen_request()
+                .unwrap()
+                .ciphertext_reference_hex,
+            Some("ab".repeat(32))
         );
     }
 
@@ -326,6 +433,7 @@ mod tests {
     fn executor_forwards_delete_with_encrypted_manifest_only() {
         let mut request = request(RemoteGatewayAction::DeleteCiphertextObject);
         request.encrypted_manifest_payload = Some(b"encrypted-manifest".to_vec());
+        request.expected_manifest_reference_hex = Some("02".repeat(32));
 
         let client =
             MockRemoteGatewayClient::new(response(RemoteGatewayAction::DeleteCiphertextObject));
@@ -350,6 +458,14 @@ mod tests {
                 .unwrap()
                 .ciphertext_payload
                 .is_none()
+        );
+        assert_eq!(
+            executor
+                .client
+                .seen_request()
+                .unwrap()
+                .expected_manifest_reference_hex,
+            Some("02".repeat(32))
         );
     }
 
@@ -413,6 +529,44 @@ mod tests {
         assert_eq!(
             err,
             RemoteGatewayClientError::UnexpectedCiphertextPayload(
+                RemoteGatewayAction::GetCiphertextObject
+            )
+        );
+        assert!(executor.client.seen_request().is_none());
+    }
+
+    #[test]
+    fn executor_rejects_references_on_wrong_actions() {
+        let mut put_request = request(RemoteGatewayAction::PutCiphertextObject);
+        put_request.ciphertext_payload = Some(b"ciphertext".to_vec());
+        put_request.ciphertext_reference_hex = Some("ab".repeat(32));
+
+        let client =
+            MockRemoteGatewayClient::new(response(RemoteGatewayAction::PutCiphertextObject));
+        let executor = TrustlessRemoteGatewayExecutor::new(client);
+
+        let err = executor.execute(put_request).unwrap_err();
+
+        assert_eq!(
+            err,
+            RemoteGatewayClientError::UnexpectedCiphertextReference(
+                RemoteGatewayAction::PutCiphertextObject
+            )
+        );
+        assert!(executor.client.seen_request().is_none());
+
+        let mut get_request = request(RemoteGatewayAction::GetCiphertextObject);
+        get_request.expected_manifest_reference_hex = Some("01".repeat(32));
+
+        let client =
+            MockRemoteGatewayClient::new(response(RemoteGatewayAction::GetCiphertextObject));
+        let executor = TrustlessRemoteGatewayExecutor::new(client);
+
+        let err = executor.execute(get_request).unwrap_err();
+
+        assert_eq!(
+            err,
+            RemoteGatewayClientError::UnexpectedExpectedManifestReference(
                 RemoteGatewayAction::GetCiphertextObject
             )
         );

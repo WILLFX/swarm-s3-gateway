@@ -4,9 +4,8 @@
 mod s3_bucket_contract {
     use ink::{
         env::{
-            DefaultEnvironment,
-            call::{ExecutionInput, Selector, build_call},
-            sr25519_verify,
+            call::{build_call, ExecutionInput, Selector},
+            sr25519_verify, DefaultEnvironment,
         },
         prelude::vec::Vec,
         storage::Mapping,
@@ -719,8 +718,8 @@ mod s3_bucket_contract {
     mod tests {
         use super::*;
         use ink::env::{self, test};
-        use sp_core::Pair;
         use sp_core::sr25519;
+        use sp_core::Pair;
 
         fn set_caller(caller: AccountId) {
             test::set_caller::<env::DefaultEnvironment>(caller);

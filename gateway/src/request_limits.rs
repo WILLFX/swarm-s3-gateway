@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use std::env;
 
 pub const MAX_REQUEST_BODY_BYTES_ENV: &str = "S3GW_MAX_REQUEST_BODY_BYTES";

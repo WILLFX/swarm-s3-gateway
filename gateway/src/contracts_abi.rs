@@ -90,6 +90,14 @@ pub enum IdentityError {
     Error11,
     #[codec(index = 12)]
     Error12,
+    #[codec(index = 13)]
+    Error13,
+    #[codec(index = 14)]
+    Error14,
+    #[codec(index = 15)]
+    Error15,
+    #[codec(index = 16)]
+    Error16,
 }
 
 /// Gateway-side labels only.
