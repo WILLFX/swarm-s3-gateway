@@ -6,6 +6,7 @@ def fail(msg: str) -> None:
 
 main = Path("gateway/src/main.rs").read_text()
 lib = Path("gateway/src/lib.rs").read_text()
+app_state = Path("gateway/src/app_state.rs").read_text()
 limits = Path("gateway/src/request_limits.rs").read_text()
 local_env = Path(".env.local.example").read_text()
 prod_env = Path(".env.production.example").read_text()
@@ -16,8 +17,8 @@ required = [
     (limits, "DEFAULT_MAX_REQUEST_BODY_BYTES"),
     (limits, "max_request_body_bytes_from_env"),
     (limits, "must be greater than zero"),
+    (app_state, "max_request_body_bytes_from_env()?"),
     (main, "DefaultBodyLimit::max(max_request_body_bytes)"),
-    (main, "max_request_body_bytes_from_env()?"),
     (local_env, "S3GW_MAX_REQUEST_BODY_BYTES=67108864"),
     (prod_env, "S3GW_MAX_REQUEST_BODY_BYTES=67108864"),
 ]
