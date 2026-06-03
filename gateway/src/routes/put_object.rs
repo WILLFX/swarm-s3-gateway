@@ -1,21 +1,21 @@
 use crate::{
     app_state::{AppState, ObjectMetadata},
+    bee::client::BeeStorage,
     crypto::{
         bucket_name_hash, derive_private_object_index_key, derive_private_object_payload_key,
         encrypt_blob_random, private_object_key_id,
     },
     manifest::{
-        read_bucket_manifest, read_private_bucket_manifest_v2, write_bucket_manifest,
-        write_object_manifest, write_private_bucket_manifest_v2, write_private_object_manifest_v2,
-        BucketManifest, ObjectManifest, PrivateBucketManifestV2, PrivateBucketObjectEntry,
-        PrivateObjectManifestV2,
+        read_private_bucket_manifest_v2, write_bucket_manifest, write_object_manifest,
+        write_private_bucket_manifest_v2, write_private_object_manifest_v2, BucketManifest,
+        ObjectManifest, PrivateBucketManifestV2, PrivateBucketObjectEntry, PrivateObjectManifestV2,
     },
     s3_response::{
         bee_error_response, bee_unavailable_response, chain_error_response,
         omit_swarm_ref_for_private_response, put_object_response, S3ErrorKind, S3ErrorResponse,
     },
 };
-use anyhow::{Error as AnyhowError, Result};
+use anyhow::{Context, Error as AnyhowError, Result};
 use axum::{
     body::Bytes,
     extract::{Extension, Path, State},
@@ -136,7 +136,14 @@ pub async fn handle(
         encryption_version: None,
     };
 
-    let bucket_manifest_root = match write_public_manifests(&state, &bucket, &key, &metadata).await
+    let bucket_manifest_root = match write_public_manifests(
+        state.bee_client.as_ref(),
+        &bucket,
+        &key,
+        &metadata,
+        &chain_bucket.bucket_manifest_root,
+    )
+    .await
     {
         Ok(bucket_manifest_root) => bucket_manifest_root,
         Err(err) => {
@@ -168,11 +175,15 @@ pub async fn handle(
 }
 
 async fn write_public_manifests(
-    state: &AppState,
+    bee: &dyn BeeStorage,
     bucket: &str,
     key: &str,
     metadata: &ObjectMetadata,
+    current_bucket_manifest_root: &[u8],
 ) -> Result<String> {
+    let mut bucket_manifest =
+        read_public_bucket_manifest_from_root(bee, current_bucket_manifest_root).await?;
+
     let object_manifest = ObjectManifest {
         swarm_reference: metadata.swarm_reference.clone(),
         size: metadata.size,
@@ -181,22 +192,40 @@ async fn write_public_manifests(
         last_modified: metadata.last_modified.clone(),
     };
 
-    let object_record =
-        write_object_manifest(state.bee_client.as_ref(), bucket, key, &object_manifest).await?;
-
-    let mut bucket_manifest = match read_bucket_manifest(state.bee_client.as_ref(), bucket).await? {
-        Some(record) => record.manifest,
-        None => BucketManifest::default(),
-    };
+    let object_record = write_object_manifest(bee, bucket, key, &object_manifest).await?;
 
     bucket_manifest
         .objects
         .insert(key.to_string(), object_record.manifest_reference);
 
-    let bucket_record =
-        write_bucket_manifest(state.bee_client.as_ref(), bucket, &bucket_manifest).await?;
+    let bucket_record = write_bucket_manifest(bee, bucket, &bucket_manifest).await?;
 
     Ok(bucket_record.manifest_reference)
+}
+
+async fn read_public_bucket_manifest_from_root(
+    bee: &dyn BeeStorage,
+    bucket_manifest_root: &[u8],
+) -> Result<BucketManifest> {
+    if bucket_manifest_root.is_empty() {
+        return Ok(BucketManifest::default());
+    }
+
+    if bucket_manifest_root.len() != 32 {
+        anyhow::bail!(
+            "bucket_manifest_root must be 32 bytes, got {}",
+            bucket_manifest_root.len()
+        );
+    }
+
+    let manifest_reference = hex::encode(bucket_manifest_root);
+
+    let manifest_bytes = bee
+        .get_bytes(&manifest_reference)
+        .await?
+        .context("anchored bucket manifest root not found in Swarm")?;
+
+    serde_json::from_slice(&manifest_bytes).context("failed to decode bucket manifest JSON")
 }
 
 async fn handle_private_put_object(
@@ -392,4 +421,187 @@ fn is_bee_unreachable(err: &AnyhowError) -> bool {
             .map(|e| e.is_connect() || e.is_timeout())
             .unwrap_or(false)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bee::client::{BeePutBytesResult, FeedPointerResult};
+    use std::{collections::HashMap, sync::Mutex};
+
+    #[derive(Default)]
+    struct MockBeeStorage {
+        inner: Mutex<MockBeeInner>,
+    }
+
+    #[derive(Default)]
+    struct MockBeeInner {
+        bytes: HashMap<String, Bytes>,
+        pointer_payload: Option<Vec<u8>>,
+        get_pointer_calls: usize,
+    }
+
+    impl MockBeeStorage {
+        fn set_pointer_reference(&self, reference: &str) -> Result<()> {
+            self.inner.lock().unwrap().pointer_payload = Some(hex::decode(reference)?);
+            Ok(())
+        }
+
+        fn get_pointer_calls(&self) -> usize {
+            self.inner.lock().unwrap().get_pointer_calls
+        }
+
+        fn stored_bytes_len(&self) -> usize {
+            self.inner.lock().unwrap().bytes.len()
+        }
+
+        fn read_bucket_manifest(&self, reference: &str) -> BucketManifest {
+            let inner = self.inner.lock().unwrap();
+            let bytes = inner
+                .bytes
+                .get(reference)
+                .expect("bucket manifest reference must be stored");
+
+            serde_json::from_slice(bytes).expect("stored bucket manifest must decode")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BeeStorage for MockBeeStorage {
+        async fn get_bytes(&self, reference: &str) -> Result<Option<Bytes>> {
+            Ok(self.inner.lock().unwrap().bytes.get(reference).cloned())
+        }
+
+        async fn put_bytes(&self, data: Bytes) -> Result<BeePutBytesResult> {
+            let reference = hex::encode(sha256_32(&data));
+            self.inner
+                .lock()
+                .unwrap()
+                .bytes
+                .insert(reference.clone(), data);
+            Ok(BeePutBytesResult { reference })
+        }
+
+        async fn get_pointer_bytes(&self, _topic: [u8; 32]) -> Result<Option<Vec<u8>>> {
+            let mut inner = self.inner.lock().unwrap();
+            inner.get_pointer_calls += 1;
+            Ok(inner.pointer_payload.clone())
+        }
+
+        async fn put_object_and_update_pointer(
+            &self,
+            _bucket: &str,
+            _key: &str,
+            data: Bytes,
+        ) -> Result<FeedPointerResult> {
+            let reference = hex::encode(sha256_32(&data));
+            self.inner
+                .lock()
+                .unwrap()
+                .bytes
+                .insert(reference.clone(), data);
+
+            Ok(FeedPointerResult {
+                owner: "owner".to_string(),
+                topic_hex: hex::encode([0u8; 32]),
+                swarm_reference: reference.clone(),
+                manifest_reference: reference.clone(),
+                soc_reference: reference,
+            })
+        }
+    }
+
+    fn public_metadata(swarm_reference: &str) -> ObjectMetadata {
+        ObjectMetadata {
+            swarm_reference: swarm_reference.to_string(),
+            size: 11,
+            etag: "etag".to_string(),
+            content_type: "text/plain".to_string(),
+            last_modified: "2026-06-04T00:00:00Z".to_string(),
+            is_private: false,
+            encryption_version: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn public_manifest_write_uses_chain_root_not_bee_pointer() -> Result<()> {
+        let bee = MockBeeStorage::default();
+
+        let mut anchored_manifest = BucketManifest::default();
+        anchored_manifest.objects.insert(
+            "existing.txt".to_string(),
+            "existing-object-manifest-ref".to_string(),
+        );
+        let anchored_record = write_bucket_manifest(&bee, "bucket", &anchored_manifest).await?;
+
+        let mut poisoned_manifest = BucketManifest::default();
+        poisoned_manifest
+            .objects
+            .insert("stale.txt".to_string(), "stale-ref".to_string());
+        let poisoned_record = write_bucket_manifest(&bee, "bucket", &poisoned_manifest).await?;
+        bee.set_pointer_reference(&poisoned_record.manifest_reference)?;
+
+        let current_root = hex::decode(&anchored_record.manifest_reference)?;
+        let new_root = write_public_manifests(
+            &bee,
+            "bucket",
+            "new.txt",
+            &public_metadata("new-object-ref"),
+            &current_root,
+        )
+        .await?;
+
+        let updated_manifest = bee.read_bucket_manifest(&new_root);
+        assert_eq!(
+            updated_manifest.objects.get("existing.txt"),
+            Some(&"existing-object-manifest-ref".to_string())
+        );
+        assert!(updated_manifest.objects.contains_key("new.txt"));
+        assert!(!updated_manifest.objects.contains_key("stale.txt"));
+        assert_eq!(bee.get_pointer_calls(), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn public_manifest_write_allows_empty_chain_root() -> Result<()> {
+        let bee = MockBeeStorage::default();
+
+        let new_root = write_public_manifests(
+            &bee,
+            "bucket",
+            "new.txt",
+            &public_metadata("new-object-ref"),
+            &[],
+        )
+        .await?;
+
+        let updated_manifest = bee.read_bucket_manifest(&new_root);
+        assert_eq!(updated_manifest.objects.len(), 1);
+        assert!(updated_manifest.objects.contains_key("new.txt"));
+        assert_eq!(bee.get_pointer_calls(), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn public_manifest_write_rejects_malformed_chain_root_before_writes() {
+        let bee = MockBeeStorage::default();
+
+        let error = write_public_manifests(
+            &bee,
+            "bucket",
+            "new.txt",
+            &public_metadata("new-object-ref"),
+            &[1, 2, 3],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("bucket_manifest_root must be 32 bytes"));
+        assert_eq!(bee.stored_bytes_len(), 0);
+        assert_eq!(bee.get_pointer_calls(), 0);
+    }
 }
