@@ -1,10 +1,10 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use std::{env, str::FromStr};
 use subxt::{
+    dynamic::{tx, Value},
     OnlineClient, PolkadotConfig,
-    dynamic::{Value, tx},
 };
-use subxt_signer::{SecretUri, sr25519::Keypair};
+use subxt_signer::{sr25519::Keypair, SecretUri};
 
 #[tokio::main]
 async fn main() -> Result<()> {

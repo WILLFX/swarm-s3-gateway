@@ -4,13 +4,13 @@ use axum::{
     response::Response,
 };
 use common::types::AwsPrincipal;
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::{
     app_state::AppState,
     crypto::bucket_name_hash,
     manifest::read_owner_catalog_manifest,
-    s3_response::{BucketSummary, S3ErrorKind, S3ErrorResponse, list_buckets_response},
+    s3_response::{list_buckets_response, BucketSummary, S3ErrorKind, S3ErrorResponse},
 };
 
 pub async fn handle(

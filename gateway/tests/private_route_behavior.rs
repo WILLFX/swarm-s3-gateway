@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use async_trait::async_trait;
 use axum::{
     body::to_bytes,
@@ -19,8 +19,8 @@ use gateway::{
         private_object_key_id,
     },
     manifest::{
-        PrivateBucketManifestV2, PrivateBucketObjectEntry, PrivateObjectManifestV2,
         write_private_bucket_manifest_v2, write_private_object_manifest_v2,
+        PrivateBucketManifestV2, PrivateBucketObjectEntry, PrivateObjectManifestV2,
     },
     routes::{
         get_object, head_object,
@@ -330,6 +330,7 @@ async fn private_fixture() -> Result<PrivateFixture> {
         bee_client,
         anchor_client,
         master_service_key,
+        max_request_body_bytes: 64 * 1024 * 1024,
         identity_contract_address: None,
         bucket_contract_address: None,
     };

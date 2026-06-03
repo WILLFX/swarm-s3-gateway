@@ -9,7 +9,7 @@ use crate::{
     app_state::AppState,
     crypto::bucket_name_hash,
     manifest::{read_owner_catalog_manifest, write_owner_catalog_manifest},
-    s3_response::{S3ErrorKind, S3ErrorResponse, chain_error_response, create_bucket_response},
+    s3_response::{chain_error_response, create_bucket_response, S3ErrorKind, S3ErrorResponse},
 };
 
 const OWNER_SIGNATURE_HEADER: &str = "x-s3gw-owner-signature";

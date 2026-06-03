@@ -1,5 +1,4 @@
-use std::env;
-use std::fmt;
+use std::{env, fmt, time::Duration};
 
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -19,9 +18,12 @@ const REMOTE_GATEWAY_SECRET_ACCESS_KEY_ENV: &str =
     "TRUSTLESS_PROXY_REMOTE_GATEWAY_SECRET_ACCESS_KEY";
 const REMOTE_GATEWAY_REGION_ENV: &str = "TRUSTLESS_PROXY_REMOTE_GATEWAY_REGION";
 const REMOTE_GATEWAY_SERVICE_ENV: &str = "TRUSTLESS_PROXY_REMOTE_GATEWAY_SERVICE";
+const REMOTE_GATEWAY_HTTP_TIMEOUT_SECS_ENV: &str =
+    "TRUSTLESS_PROXY_REMOTE_GATEWAY_HTTP_TIMEOUT_SECS";
 
 const DEFAULT_SIGV4_REGION: &str = "us-east-1";
 const DEFAULT_SIGV4_SERVICE: &str = "s3";
+const DEFAULT_REMOTE_GATEWAY_HTTP_TIMEOUT_SECS: u64 = 30;
 const SIGV4_SIGNED_HEADERS: &str = "host;x-amz-content-sha256;x-amz-date";
 
 type HmacSha256 = Hmac<Sha256>;
@@ -113,6 +115,8 @@ struct RemoteGatewayHttpRequestEnvelope {
     key: Option<String>,
     ciphertext_hex: Option<String>,
     encrypted_manifest_hex: Option<String>,
+    ciphertext_reference_hex: Option<String>,
+    expected_manifest_reference_hex: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +125,8 @@ struct RemoteGatewayHttpResponseEnvelope {
     action: String,
     ciphertext_hex: Option<String>,
     encrypted_manifest_hex: Option<String>,
+    ciphertext_reference_hex: Option<String>,
+    encrypted_manifest_reference_hex: Option<String>,
     metadata_only: bool,
     gateway_plaintext_access: bool,
 }
@@ -147,6 +153,12 @@ pub enum RemoteGatewayHttpClientError {
 
     #[error("request action does not allow encrypted manifest payload: {0:?}")]
     UnexpectedEncryptedManifestPayload(RemoteGatewayAction),
+
+    #[error("request action does not allow ciphertext reference: {0:?}")]
+    UnexpectedCiphertextReference(RemoteGatewayAction),
+
+    #[error("request action does not allow expected manifest reference: {0:?}")]
+    UnexpectedExpectedManifestReference(RemoteGatewayAction),
 
     #[error("unknown remote gateway HTTP action: {0}")]
     UnknownAction(String),
@@ -188,6 +200,12 @@ impl From<RemoteGatewayHttpClientError> for RemoteGatewayClientError {
             RemoteGatewayHttpClientError::UnexpectedEncryptedManifestPayload(action) => {
                 RemoteGatewayClientError::UnexpectedEncryptedManifestPayload(action)
             }
+            RemoteGatewayHttpClientError::UnexpectedCiphertextReference(action) => {
+                RemoteGatewayClientError::UnexpectedCiphertextReference(action)
+            }
+            RemoteGatewayHttpClientError::UnexpectedExpectedManifestReference(action) => {
+                RemoteGatewayClientError::UnexpectedExpectedManifestReference(action)
+            }
             RemoteGatewayHttpClientError::GatewayPlaintextAccessRejected => {
                 RemoteGatewayClientError::GatewayPlaintextAccessRejected
             }
@@ -213,7 +231,10 @@ pub struct ReqwestRemoteGatewayHttpTransport {
 impl ReqwestRemoteGatewayHttpTransport {
     pub fn new() -> Self {
         Self {
-            client: reqwest::blocking::Client::new(),
+            client: reqwest::blocking::Client::builder()
+                .timeout(remote_gateway_http_timeout_from_env())
+                .build()
+                .expect("reqwest client builder accepts configured timeout"),
         }
     }
 }
@@ -483,6 +504,30 @@ fn optional_env(name: &'static str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn remote_gateway_http_timeout_from_env() -> Duration {
+    parse_remote_gateway_http_timeout_secs(
+        env::var(REMOTE_GATEWAY_HTTP_TIMEOUT_SECS_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn parse_remote_gateway_http_timeout_secs(raw: Option<&str>) -> Duration {
+    let Some(raw) = raw else {
+        return Duration::from_secs(DEFAULT_REMOTE_GATEWAY_HTTP_TIMEOUT_SECS);
+    };
+
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Duration::from_secs(DEFAULT_REMOTE_GATEWAY_HTTP_TIMEOUT_SECS);
+    }
+
+    match trimmed.parse::<u64>() {
+        Ok(seconds) if seconds > 0 => Duration::from_secs(seconds),
+        _ => Duration::from_secs(DEFAULT_REMOTE_GATEWAY_HTTP_TIMEOUT_SECS),
+    }
+}
+
 fn request_to_http_envelope(
     request: CiphertextGatewayRequest,
 ) -> Result<RemoteGatewayHttpRequestEnvelope, RemoteGatewayHttpClientError> {
@@ -507,6 +552,20 @@ fn request_to_http_envelope(
                     ),
                 );
             }
+
+            if request.ciphertext_reference_hex.is_some() {
+                return Err(RemoteGatewayHttpClientError::UnexpectedCiphertextReference(
+                    request.action,
+                ));
+            }
+
+            if request.expected_manifest_reference_hex.is_some() {
+                return Err(
+                    RemoteGatewayHttpClientError::UnexpectedExpectedManifestReference(
+                        request.action,
+                    ),
+                );
+            }
         }
         RemoteGatewayAction::PutEncryptedManifest | RemoteGatewayAction::DeleteCiphertextObject => {
             let Some(encrypted_manifest) = &request.encrypted_manifest_payload else {
@@ -522,10 +581,37 @@ fn request_to_http_envelope(
                     request.action,
                 ));
             }
+
+            if request.ciphertext_reference_hex.is_some() {
+                return Err(RemoteGatewayHttpClientError::UnexpectedCiphertextReference(
+                    request.action,
+                ));
+            }
         }
-        RemoteGatewayAction::GetCiphertextObject
-        | RemoteGatewayAction::HeadCiphertextObject
-        | RemoteGatewayAction::ListCiphertextManifest
+        RemoteGatewayAction::GetCiphertextObject | RemoteGatewayAction::HeadCiphertextObject => {
+            if request.ciphertext_payload.is_some() {
+                return Err(RemoteGatewayHttpClientError::UnexpectedCiphertextPayload(
+                    request.action,
+                ));
+            }
+
+            if request.encrypted_manifest_payload.is_some() {
+                return Err(
+                    RemoteGatewayHttpClientError::UnexpectedEncryptedManifestPayload(
+                        request.action,
+                    ),
+                );
+            }
+
+            if request.expected_manifest_reference_hex.is_some() {
+                return Err(
+                    RemoteGatewayHttpClientError::UnexpectedExpectedManifestReference(
+                        request.action,
+                    ),
+                );
+            }
+        }
+        RemoteGatewayAction::ListCiphertextManifest
         | RemoteGatewayAction::CreateTrustlessBucket => {
             if request.ciphertext_payload.is_some() {
                 return Err(RemoteGatewayHttpClientError::UnexpectedCiphertextPayload(
@@ -540,6 +626,20 @@ fn request_to_http_envelope(
                     ),
                 );
             }
+
+            if request.ciphertext_reference_hex.is_some() {
+                return Err(RemoteGatewayHttpClientError::UnexpectedCiphertextReference(
+                    request.action,
+                ));
+            }
+
+            if request.expected_manifest_reference_hex.is_some() {
+                return Err(
+                    RemoteGatewayHttpClientError::UnexpectedExpectedManifestReference(
+                        request.action,
+                    ),
+                );
+            }
         }
     }
 
@@ -550,6 +650,8 @@ fn request_to_http_envelope(
         key: request.key,
         ciphertext_hex: request.ciphertext_payload.map(hex::encode),
         encrypted_manifest_hex: request.encrypted_manifest_payload.map(hex::encode),
+        ciphertext_reference_hex: request.ciphertext_reference_hex,
+        expected_manifest_reference_hex: request.expected_manifest_reference_hex,
     })
 }
 
@@ -571,6 +673,8 @@ fn http_envelope_to_response(
         action: wire_to_action(&envelope.action)?,
         ciphertext_payload: decode_optional_hex(envelope.ciphertext_hex)?,
         encrypted_manifest_payload: decode_optional_hex(envelope.encrypted_manifest_hex)?,
+        ciphertext_reference_hex: envelope.ciphertext_reference_hex,
+        encrypted_manifest_reference_hex: envelope.encrypted_manifest_reference_hex,
         metadata_only: envelope.metadata_only,
         gateway_plaintext_access: false,
     })
@@ -701,6 +805,8 @@ mod tests {
             action,
             ciphertext_payload: None,
             encrypted_manifest_payload: None,
+            ciphertext_reference_hex: None,
+            expected_manifest_reference_hex: None,
             plaintext_payload_present: false,
         }
     }
@@ -711,6 +817,8 @@ mod tests {
             action: action_to_wire(action).to_owned(),
             ciphertext_hex: None,
             encrypted_manifest_hex: None,
+            ciphertext_reference_hex: None,
+            encrypted_manifest_reference_hex: None,
             metadata_only: false,
             gateway_plaintext_access: false,
         }
@@ -792,10 +900,12 @@ mod tests {
         assert!(!put_result.gateway_plaintext_access);
         assert!(put_result.ciphertext_payload.is_none());
         assert!(put_result.encrypted_manifest_payload.is_none());
+        assert!(put_result.ciphertext_reference_hex.is_some());
 
         let mut get = request(RemoteGatewayAction::GetCiphertextObject);
         get.bucket = bucket;
         get.key = Some(object_key);
+        get.ciphertext_reference_hex = put_result.ciphertext_reference_hex;
 
         let get_result = executor.execute(get).unwrap();
 
@@ -898,6 +1008,30 @@ mod tests {
     }
 
     #[test]
+    fn http_timeout_parser_defaults_or_accepts_positive_seconds() {
+        assert_eq!(
+            parse_remote_gateway_http_timeout_secs(None),
+            Duration::from_secs(DEFAULT_REMOTE_GATEWAY_HTTP_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            parse_remote_gateway_http_timeout_secs(Some("   ")),
+            Duration::from_secs(DEFAULT_REMOTE_GATEWAY_HTTP_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            parse_remote_gateway_http_timeout_secs(Some("0")),
+            Duration::from_secs(DEFAULT_REMOTE_GATEWAY_HTTP_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            parse_remote_gateway_http_timeout_secs(Some("not-a-number")),
+            Duration::from_secs(DEFAULT_REMOTE_GATEWAY_HTTP_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            parse_remote_gateway_http_timeout_secs(Some("5")),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
     fn http_client_sends_put_ciphertext_json_without_plaintext() {
         let (client, transport) =
             client_with_transport(response(RemoteGatewayAction::PutCiphertextObject));
@@ -918,6 +1052,8 @@ mod tests {
         assert_eq!(body["bucket"], "bucket");
         assert_eq!(body["key"], "secret.txt");
         assert_eq!(body["ciphertext_hex"], hex::encode(b"ciphertext"));
+        assert!(body["ciphertext_reference_hex"].is_null());
+        assert!(body["expected_manifest_reference_hex"].is_null());
         assert!(body.get("plaintext_payload").is_none());
         assert!(body.get("plaintext_body").is_none());
     }
@@ -926,6 +1062,7 @@ mod tests {
     fn http_client_fetches_get_ciphertext_response() {
         let mut response = response(RemoteGatewayAction::GetCiphertextObject);
         response.ciphertext_hex = Some(hex::encode(b"ciphertext"));
+        response.ciphertext_reference_hex = Some("ab".repeat(32));
 
         let (client, _transport) = client_with_transport(response);
         let executor = TrustlessRemoteGatewayExecutor::new(client);
@@ -936,6 +1073,7 @@ mod tests {
 
         assert_eq!(result.action, RemoteGatewayAction::GetCiphertextObject);
         assert_eq!(result.ciphertext_payload, Some(b"ciphertext".to_vec()));
+        assert_eq!(result.ciphertext_reference_hex, Some("ab".repeat(32)));
         assert!(!result.gateway_plaintext_access);
     }
 
@@ -943,6 +1081,7 @@ mod tests {
     fn http_client_fetches_encrypted_manifest_response() {
         let mut response = response(RemoteGatewayAction::ListCiphertextManifest);
         response.encrypted_manifest_hex = Some(hex::encode(b"encrypted-manifest"));
+        response.encrypted_manifest_reference_hex = Some("cd".repeat(32));
         response.metadata_only = true;
 
         let (client, _transport) = client_with_transport(response);
@@ -957,8 +1096,32 @@ mod tests {
             result.encrypted_manifest_payload,
             Some(b"encrypted-manifest".to_vec())
         );
+        assert_eq!(
+            result.encrypted_manifest_reference_hex,
+            Some("cd".repeat(32))
+        );
         assert!(result.metadata_only);
         assert!(!result.gateway_plaintext_access);
+    }
+
+    #[test]
+    fn http_client_sends_direct_ciphertext_reference_for_read() {
+        let (client, transport) =
+            client_with_transport(response(RemoteGatewayAction::GetCiphertextObject));
+        let executor = TrustlessRemoteGatewayExecutor::new(client);
+
+        let mut request = request(RemoteGatewayAction::GetCiphertextObject);
+        request.ciphertext_reference_hex = Some("ab".repeat(32));
+
+        executor.execute(request).unwrap();
+
+        let body = transport.seen_body_json();
+
+        assert_eq!(body["action"], "get_ciphertext_object");
+        assert_eq!(body["ciphertext_reference_hex"], "ab".repeat(32));
+        assert!(body["expected_manifest_reference_hex"].is_null());
+        assert!(body["ciphertext_hex"].is_null());
+        assert!(body["encrypted_manifest_hex"].is_null());
     }
 
     #[test]
@@ -970,6 +1133,7 @@ mod tests {
         let mut request = request(RemoteGatewayAction::PutEncryptedManifest);
         request.key = None;
         request.encrypted_manifest_payload = Some(b"encrypted-manifest".to_vec());
+        request.expected_manifest_reference_hex = Some("ef".repeat(32));
 
         let result = executor.execute(request).unwrap();
 
@@ -983,7 +1147,9 @@ mod tests {
             body["encrypted_manifest_hex"],
             hex::encode(b"encrypted-manifest")
         );
+        assert_eq!(body["expected_manifest_reference_hex"], "ef".repeat(32));
         assert!(body["ciphertext_hex"].is_null());
+        assert!(body["ciphertext_reference_hex"].is_null());
         assert!(body.get("plaintext_payload").is_none());
         assert!(body.get("plaintext_body").is_none());
     }
@@ -996,6 +1162,7 @@ mod tests {
 
         let mut request = request(RemoteGatewayAction::DeleteCiphertextObject);
         request.encrypted_manifest_payload = Some(b"encrypted-manifest".to_vec());
+        request.expected_manifest_reference_hex = Some("12".repeat(32));
 
         let result = executor.execute(request).unwrap();
 
@@ -1008,8 +1175,48 @@ mod tests {
             body["encrypted_manifest_hex"],
             hex::encode(b"encrypted-manifest")
         );
+        assert_eq!(body["expected_manifest_reference_hex"], "12".repeat(32));
         assert!(body["ciphertext_hex"].is_null());
+        assert!(body["ciphertext_reference_hex"].is_null());
         assert!(body.get("plaintext_payload").is_none());
+    }
+
+    #[test]
+    fn http_client_rejects_references_on_wrong_actions_before_transport() {
+        let (client, transport) =
+            client_with_transport(response(RemoteGatewayAction::PutCiphertextObject));
+        let executor = TrustlessRemoteGatewayExecutor::new(client);
+
+        let mut put_request = request(RemoteGatewayAction::PutCiphertextObject);
+        put_request.ciphertext_payload = Some(b"ciphertext".to_vec());
+        put_request.ciphertext_reference_hex = Some("ab".repeat(32));
+
+        let err = executor.execute(put_request).unwrap_err();
+
+        assert_eq!(
+            err,
+            RemoteGatewayClientError::UnexpectedCiphertextReference(
+                RemoteGatewayAction::PutCiphertextObject
+            )
+        );
+        assert!(transport.no_body_was_sent());
+
+        let (client, transport) =
+            client_with_transport(response(RemoteGatewayAction::GetCiphertextObject));
+        let executor = TrustlessRemoteGatewayExecutor::new(client);
+
+        let mut get_request = request(RemoteGatewayAction::GetCiphertextObject);
+        get_request.expected_manifest_reference_hex = Some("cd".repeat(32));
+
+        let err = executor.execute(get_request).unwrap_err();
+
+        assert_eq!(
+            err,
+            RemoteGatewayClientError::UnexpectedExpectedManifestReference(
+                RemoteGatewayAction::GetCiphertextObject
+            )
+        );
+        assert!(transport.no_body_was_sent());
     }
 
     #[test]
@@ -1174,6 +1381,33 @@ mod tests {
             response_metadata_only,
         ) in cases
         {
+            let request_ciphertext_reference_hex = matches!(
+                action,
+                RemoteGatewayAction::GetCiphertextObject
+                    | RemoteGatewayAction::HeadCiphertextObject
+            )
+            .then(|| "ab".repeat(32));
+            let request_expected_manifest_reference_hex = matches!(
+                action,
+                RemoteGatewayAction::PutEncryptedManifest
+                    | RemoteGatewayAction::DeleteCiphertextObject
+            )
+            .then(|| "cd".repeat(32));
+            let response_ciphertext_reference_hex = matches!(
+                action,
+                RemoteGatewayAction::PutCiphertextObject
+                    | RemoteGatewayAction::GetCiphertextObject
+                    | RemoteGatewayAction::HeadCiphertextObject
+            )
+            .then(|| "ef".repeat(32));
+            let response_encrypted_manifest_reference_hex = matches!(
+                action,
+                RemoteGatewayAction::ListCiphertextManifest
+                    | RemoteGatewayAction::PutEncryptedManifest
+                    | RemoteGatewayAction::DeleteCiphertextObject
+            )
+            .then(|| "12".repeat(32));
+
             let transport = MockHttpTransport::new(RemoteGatewayHttpResponseEnvelope {
                 version: WIRE_VERSION,
                 action: expected_wire_action.to_owned(),
@@ -1181,6 +1415,8 @@ mod tests {
                 encrypted_manifest_hex: response_encrypted_manifest_payload
                     .as_ref()
                     .map(hex::encode),
+                ciphertext_reference_hex: response_ciphertext_reference_hex.clone(),
+                encrypted_manifest_reference_hex: response_encrypted_manifest_reference_hex.clone(),
                 metadata_only: response_metadata_only,
                 gateway_plaintext_access: false,
             });
@@ -1201,6 +1437,9 @@ mod tests {
                     action,
                     ciphertext_payload: ciphertext_payload.clone(),
                     encrypted_manifest_payload: encrypted_manifest_payload.clone(),
+                    ciphertext_reference_hex: request_ciphertext_reference_hex.clone(),
+                    expected_manifest_reference_hex: request_expected_manifest_reference_hex
+                        .clone(),
                     plaintext_payload_present: false,
                 })
                 .unwrap();
@@ -1213,13 +1452,15 @@ mod tests {
             let body = transport.seen_body_json();
             let object = body.as_object().unwrap();
 
-            assert_eq!(object.len(), 6);
+            assert_eq!(object.len(), 8);
             assert!(object.contains_key("version"));
             assert!(object.contains_key("action"));
             assert!(object.contains_key("bucket"));
             assert!(object.contains_key("key"));
             assert!(object.contains_key("ciphertext_hex"));
             assert!(object.contains_key("encrypted_manifest_hex"));
+            assert!(object.contains_key("ciphertext_reference_hex"));
+            assert!(object.contains_key("expected_manifest_reference_hex"));
 
             assert_eq!(body["version"], WIRE_VERSION);
             assert_eq!(body["action"], expected_wire_action);
@@ -1247,11 +1488,33 @@ mod tests {
                 None => assert!(body["encrypted_manifest_hex"].is_null()),
             }
 
+            match request_ciphertext_reference_hex {
+                Some(expected_reference) => {
+                    assert_eq!(body["ciphertext_reference_hex"], expected_reference);
+                }
+                None => assert!(body["ciphertext_reference_hex"].is_null()),
+            }
+
+            match request_expected_manifest_reference_hex {
+                Some(expected_reference) => {
+                    assert_eq!(body["expected_manifest_reference_hex"], expected_reference);
+                }
+                None => assert!(body["expected_manifest_reference_hex"].is_null()),
+            }
+
             assert_eq!(response.action, action);
             assert_eq!(response.ciphertext_payload, response_ciphertext_payload);
             assert_eq!(
                 response.encrypted_manifest_payload,
                 response_encrypted_manifest_payload
+            );
+            assert_eq!(
+                response.ciphertext_reference_hex,
+                response_ciphertext_reference_hex
+            );
+            assert_eq!(
+                response.encrypted_manifest_reference_hex,
+                response_encrypted_manifest_reference_hex
             );
             assert_eq!(response.metadata_only, response_metadata_only);
             assert!(!response.gateway_plaintext_access);

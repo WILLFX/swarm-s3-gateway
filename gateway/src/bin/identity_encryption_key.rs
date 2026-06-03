@@ -1,18 +1,19 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use gateway::{
     chain::registry::ChainRegistryClient,
     contracts_abi::{
-        IdentityError, decode_exec_result, encode_identity_disable_encryption_key,
+        decode_exec_result, encode_identity_disable_encryption_key,
         encode_identity_register_encryption_key, encode_identity_rotate_encryption_key,
+        IdentityError,
     },
     s3_runtime::api,
 };
 use std::{env, str::FromStr};
 use subxt::{
-    OnlineClient, PolkadotConfig,
     utils::{AccountId32, MultiAddress},
+    OnlineClient, PolkadotConfig,
 };
-use subxt_signer::{SecretUri, sr25519::Keypair};
+use subxt_signer::{sr25519::Keypair, SecretUri};
 
 #[tokio::main]
 async fn main() -> Result<()> {

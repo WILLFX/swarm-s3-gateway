@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use async_trait::async_trait;
 use axum::{
     extract::{Extension, Path, State},
@@ -15,9 +15,9 @@ use gateway::{
     bee::client::{BeePutBytesResult, BeeStorage, FeedPointerResult},
     crypto::bucket_name_hash,
     manifest::{
-        PrivateBucketManifestV2, PrivateBucketObjectEntry, RootCatalogManifest,
         read_owner_catalog_manifest, write_owner_catalog_manifest,
-        write_private_bucket_manifest_v2,
+        write_private_bucket_manifest_v2, PrivateBucketManifestV2, PrivateBucketObjectEntry,
+        RootCatalogManifest,
     },
     routes::{create_bucket, delete_bucket},
     traits::{AnchorClient, RegistryClient, SecretUnwrapper},
@@ -351,6 +351,7 @@ fn build_state(
         bee_client,
         anchor_client,
         master_service_key,
+        max_request_body_bytes: 64 * 1024 * 1024,
         identity_contract_address: None,
         bucket_contract_address: None,
     }
@@ -467,8 +468,8 @@ async fn private_create_bucket_writes_owner_catalog_and_create_anchor() -> Resul
 }
 
 #[tokio::test]
-async fn trustless_create_bucket_uses_client_supplied_catalog_roots_without_bee_writes()
--> Result<()> {
+async fn trustless_create_bucket_uses_client_supplied_catalog_roots_without_bee_writes(
+) -> Result<()> {
     let master_service_key = [42u8; 32];
     let owner = [7u8; 32];
     let bucket = "trustless-bucket".to_string();
@@ -538,8 +539,8 @@ async fn trustless_create_bucket_uses_client_supplied_catalog_roots_without_bee_
 }
 
 #[tokio::test]
-async fn trustless_private_delete_bucket_fails_before_gateway_manifest_or_catalog_writes()
--> Result<()> {
+async fn trustless_private_delete_bucket_fails_before_gateway_manifest_or_catalog_writes(
+) -> Result<()> {
     let master_service_key = [42u8; 32];
     let owner = [7u8; 32];
     let bucket = "trustless-bucket".to_string();
@@ -695,8 +696,8 @@ async fn private_delete_empty_bucket_removes_owner_catalog_entry_and_delete_anch
 }
 
 #[tokio::test]
-async fn private_delete_non_empty_bucket_rejects_before_catalog_update_or_delete_anchor()
--> Result<()> {
+async fn private_delete_non_empty_bucket_rejects_before_catalog_update_or_delete_anchor(
+) -> Result<()> {
     let master_service_key = [42u8; 32];
     let owner = [7u8; 32];
     let bucket = "private-bucket".to_string();

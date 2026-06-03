@@ -1,8 +1,8 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use async_trait::async_trait;
 use axum::{
     extract::{Extension, Path, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
 };
 use bytes::Bytes;
 use common::types::{
@@ -268,6 +268,7 @@ fn build_state(
         bee_client,
         anchor_client,
         master_service_key,
+        max_request_body_bytes: 64 * 1024 * 1024,
         identity_contract_address: None,
         bucket_contract_address: None,
     }
@@ -470,6 +471,7 @@ async fn trustless_private_put_fails_before_gateway_payload_manifest_or_anchor_w
         bee_client,
         anchor_client,
         master_service_key,
+        max_request_body_bytes: 64 * 1024 * 1024,
         identity_contract_address: None,
         bucket_contract_address: None,
     };

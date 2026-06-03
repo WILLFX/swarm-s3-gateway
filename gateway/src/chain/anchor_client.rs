@@ -1,19 +1,19 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use common::types::SubstrateAddress32;
 use subxt::{
-    OnlineClient, PolkadotConfig,
     utils::{AccountId32 as SubxtAccountId32, MultiAddress},
+    OnlineClient, PolkadotConfig,
 };
 use subxt_signer::sr25519::Keypair;
 use tracing::debug;
 
 use crate::{
     contracts_abi::{
-        BucketError, decode_exec_result, encode_bucket_create_bucket_cas,
+        decode_exec_result, encode_bucket_create_bucket_cas,
         encode_bucket_create_trustless_bucket_cas, encode_bucket_delete_bucket_cas,
         encode_bucket_update_bucket_manifest_root_for_delete_cas,
-        encode_bucket_update_bucket_manifest_root_for_put_cas,
+        encode_bucket_update_bucket_manifest_root_for_put_cas, BucketError,
     },
     s3_runtime::api,
     traits::AnchorClient,

@@ -5,27 +5,27 @@ use crate::{
         encrypt_blob_random, private_object_key_id,
     },
     manifest::{
+        read_bucket_manifest, read_private_bucket_manifest_v2, write_bucket_manifest,
+        write_object_manifest, write_private_bucket_manifest_v2, write_private_object_manifest_v2,
         BucketManifest, ObjectManifest, PrivateBucketManifestV2, PrivateBucketObjectEntry,
-        PrivateObjectManifestV2, read_bucket_manifest, read_private_bucket_manifest_v2,
-        write_bucket_manifest, write_object_manifest, write_private_bucket_manifest_v2,
-        write_private_object_manifest_v2,
+        PrivateObjectManifestV2,
     },
     s3_response::{
-        S3ErrorKind, S3ErrorResponse, bee_error_response, bee_unavailable_response,
-        chain_error_response, omit_swarm_ref_for_private_response, put_object_response,
+        bee_error_response, bee_unavailable_response, chain_error_response,
+        omit_swarm_ref_for_private_response, put_object_response, S3ErrorKind, S3ErrorResponse,
     },
 };
 use anyhow::{Error as AnyhowError, Result};
 use axum::{
     body::Bytes,
     extract::{Extension, Path, State},
-    http::{HeaderMap, header},
+    http::{header, HeaderMap},
     response::Response,
 };
 use common::types::{AwsPrincipal, ChainBucketRecord, ChainBucketType};
 use reqwest::Error as ReqwestError;
 use sha2::{Digest, Sha256};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 pub async fn handle(
     Path((bucket, key)): Path<(String, String)>,

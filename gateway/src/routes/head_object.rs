@@ -11,8 +11,8 @@ use crate::{
     manifest::{BucketManifest, ObjectManifest},
     routes::private_object_read::resolve_private_object_from_bucket,
     s3_response::{
-        S3ErrorKind, S3ErrorResponse, chain_error_response, head_object_response,
-        omit_swarm_ref_for_private_response,
+        chain_error_response, head_object_response, omit_swarm_ref_for_private_response,
+        S3ErrorKind, S3ErrorResponse,
     },
 };
 

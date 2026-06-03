@@ -8,8 +8,8 @@ use common::types::{AwsPrincipal, ChainBucketRecord, ChainBucketType};
 use crate::{
     app_state::AppState,
     crypto::bucket_name_hash,
-    manifest::{BucketManifest, read_private_bucket_manifest_v2, write_private_bucket_manifest_v2},
-    s3_response::{S3ErrorKind, S3ErrorResponse, chain_error_response, no_content_response},
+    manifest::{read_private_bucket_manifest_v2, write_private_bucket_manifest_v2, BucketManifest},
+    s3_response::{chain_error_response, no_content_response, S3ErrorKind, S3ErrorResponse},
     traits::AnchorClient,
 };
 
