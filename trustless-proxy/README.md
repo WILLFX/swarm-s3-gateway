@@ -22,9 +22,6 @@ The remote gateway must never receive plaintext object bytes, plaintext data key
 
 Payload and manifest encryption use the AWS Encryption SDK for Rust with local recipient key material.
 
-## Runtime decision
-
-The production trustless proxy must not introduce a TypeScript or Node.js runtime. Python remains acceptable for repository guard scripts only.
 
 ## Main command
 
