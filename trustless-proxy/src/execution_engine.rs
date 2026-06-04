@@ -36,7 +36,7 @@ pub struct LocalTrustlessExecutionEngine<C, RK, LK, G> {
 pub struct LocalTrustlessExecutionInput {
     pub http_request: LocalTrustlessHttpRequest,
     pub http_context: LocalTrustlessHttpRequestContext,
-    pub manifest_entry: TrustlessManifestEntry,
+    pub manifest_entry: Option<TrustlessManifestEntry>,
     pub envelope_context: RecipientEnvelopeContext,
 }
 
@@ -68,6 +68,9 @@ pub enum LocalTrustlessExecutionEngineError {
 
     #[error("gateway plaintext access is not allowed")]
     GatewayPlaintextAccessRejected,
+
+    #[error("PUT execution requires a local manifest entry")]
+    MissingManifestEntryForPut,
 
     #[error("remote gateway returned unexpected action: expected {expected:?}, got {actual:?}")]
     UnexpectedRemoteResponseAction {
@@ -154,6 +157,10 @@ where
             LocalS3Operation::PutObject => {
                 let runtime_prepared =
                     &prepared.handler_prepared_response.runtime_prepared_response;
+                let manifest_entry = input
+                    .manifest_entry
+                    .clone()
+                    .ok_or(LocalTrustlessExecutionEngineError::MissingManifestEntryForPut)?;
 
                 let current_manifest = self.fetch_and_decrypt_current_manifest(
                     runtime_prepared,
@@ -164,7 +171,7 @@ where
                     LocalTrustlessRuntime::build_prepared_put_operation_plan_with_configured_aws_esdk(
                         runtime_prepared,
                         current_manifest.manifest,
-                        input.manifest_entry,
+                        manifest_entry,
                         input.envelope_context.clone(),
                         &self.proxy_config,
                         &self.preflight_builder,
@@ -218,15 +225,25 @@ where
                     return Err(LocalTrustlessExecutionEngineError::GatewayPlaintextAccessRejected);
                 }
 
-                Ok(prepared.http_response)
+                Ok(completed_metadata_http_response(prepared.operation))
             }
             LocalS3Operation::GetObject => {
                 let runtime_prepared =
                     &prepared.handler_prepared_response.runtime_prepared_response;
+                let current_manifest = self.fetch_and_decrypt_current_manifest(
+                    runtime_prepared,
+                    &input.envelope_context,
+                )?;
+                let manifest_entry = manifest_entry_for_runtime_request(
+                    &current_manifest.manifest,
+                    runtime_prepared,
+                )?;
 
                 let request = LocalTrustlessRuntime::build_prepared_remote_request(
                     runtime_prepared,
-                    LocalTrustlessRuntimeRemotePayload::None,
+                    LocalTrustlessRuntimeRemotePayload::CiphertextReference(
+                        manifest_entry.ciphertext_ref,
+                    ),
                 )?;
 
                 let gateway_response = LocalTrustlessRuntime::execute_prepared_remote_request(
@@ -251,6 +268,114 @@ where
                 }
 
                 Ok(completion.http_response)
+            }
+            LocalS3Operation::HeadObject => {
+                let runtime_prepared =
+                    &prepared.handler_prepared_response.runtime_prepared_response;
+                let current_manifest = self.fetch_and_decrypt_current_manifest(
+                    runtime_prepared,
+                    &input.envelope_context,
+                )?;
+                let manifest_entry = manifest_entry_for_runtime_request(
+                    &current_manifest.manifest,
+                    runtime_prepared,
+                )?;
+
+                let request = LocalTrustlessRuntime::build_prepared_remote_request(
+                    runtime_prepared,
+                    LocalTrustlessRuntimeRemotePayload::CiphertextReference(
+                        manifest_entry.ciphertext_ref,
+                    ),
+                )?;
+
+                let gateway_response = LocalTrustlessRuntime::execute_prepared_remote_request(
+                    runtime_prepared,
+                    request,
+                    &self.remote_gateway_executor,
+                )?;
+
+                self.require_response_action(
+                    &gateway_response,
+                    RemoteGatewayAction::HeadCiphertextObject,
+                )?;
+
+                if gateway_response.gateway_plaintext_access
+                    || prepared.http_response.gateway_plaintext_access
+                {
+                    return Err(LocalTrustlessExecutionEngineError::GatewayPlaintextAccessRejected);
+                }
+
+                Ok(completed_metadata_http_response(prepared.operation))
+            }
+            LocalS3Operation::ListObjectsV2 => {
+                let runtime_prepared =
+                    &prepared.handler_prepared_response.runtime_prepared_response;
+                let current_manifest = self.fetch_and_decrypt_current_manifest(
+                    runtime_prepared,
+                    &input.envelope_context,
+                )?;
+
+                let prefix = runtime_prepared_prefix(runtime_prepared);
+                let list_result = TrustlessManifestBoundary::new(self.manifest_cipher.clone())
+                    .list_metadata_locally(&current_manifest.manifest, prefix.as_deref())?;
+
+                if list_result.gateway_plaintext_access
+                    || prepared.http_response.gateway_plaintext_access
+                {
+                    return Err(LocalTrustlessExecutionEngineError::GatewayPlaintextAccessRejected);
+                }
+
+                Ok(completed_metadata_http_response(prepared.operation))
+            }
+            LocalS3Operation::DeleteObject => {
+                let runtime_prepared =
+                    &prepared.handler_prepared_response.runtime_prepared_response;
+                let current_manifest = self.fetch_and_decrypt_current_manifest(
+                    runtime_prepared,
+                    &input.envelope_context,
+                )?;
+
+                let plan = LocalTrustlessRuntime::build_prepared_delete_operation_plan_with_configured_aws_esdk(
+                    runtime_prepared,
+                    current_manifest.manifest,
+                    current_manifest.encrypted_manifest_reference_hex.clone(),
+                    input.envelope_context.clone(),
+                    &self.proxy_config,
+                    &self.preflight_builder,
+                    self.manifest_cipher.clone(),
+                )?;
+
+                if plan.gateway_plaintext_access
+                    || plan.encrypted_manifest.gateway_plaintext_access
+                    || plan.delete_request.plaintext_payload_present
+                {
+                    return Err(LocalTrustlessExecutionEngineError::GatewayPlaintextAccessRejected);
+                }
+
+                let request =
+                    LocalTrustlessRuntime::build_prepared_delete_operation_remote_request(
+                        runtime_prepared,
+                        plan,
+                    )?;
+
+                let gateway_response = LocalTrustlessRuntime::execute_prepared_remote_request(
+                    runtime_prepared,
+                    request,
+                    &self.remote_gateway_executor,
+                )?;
+
+                self.require_response_action(
+                    &gateway_response,
+                    RemoteGatewayAction::DeleteCiphertextObject,
+                )?;
+
+                if gateway_response.gateway_plaintext_access
+                    || prepared.http_response.gateway_plaintext_access
+                {
+                    return Err(LocalTrustlessExecutionEngineError::GatewayPlaintextAccessRejected);
+                }
+
+                Ok(completed_metadata_http_response(prepared.operation))
             }
             operation => Err(LocalTrustlessExecutionEngineError::UnsupportedOperation(
                 operation,
@@ -331,6 +456,85 @@ fn runtime_prepared_bucket(prepared: &LocalTrustlessRuntimePreparedResponse) -> 
         .preflight_request
         .bucket
         .clone()
+}
+
+fn completed_metadata_http_response(operation: LocalS3Operation) -> LocalTrustlessHttpResponse {
+    let status_code = match operation {
+        LocalS3Operation::DeleteObject => 204,
+        LocalS3Operation::HeadObject | LocalS3Operation::ListObjectsV2 => 200,
+        LocalS3Operation::PutObject
+        | LocalS3Operation::GetObject
+        | LocalS3Operation::CreateTrustlessBucket => 200,
+    };
+
+    LocalTrustlessHttpResponse {
+        status_code,
+        body: None,
+        headers: vec![
+            (
+                "x-s3w-trustless-state".to_owned(),
+                "ReadyMetadataOnly".to_owned(),
+            ),
+            (
+                "x-s3w-remote-gateway-required".to_owned(),
+                "true".to_owned(),
+            ),
+            (
+                "x-s3w-gateway-plaintext-access".to_owned(),
+                "false".to_owned(),
+            ),
+        ],
+        metadata_only: true,
+        plaintext_returned_locally: false,
+        gateway_plaintext_access: false,
+    }
+}
+
+fn runtime_prepared_object_key_id(
+    prepared: &LocalTrustlessRuntimePreparedResponse,
+) -> Result<String, LocalTrustlessExecutionEngineError> {
+    prepared
+        .handler_response
+        .request_preparation
+        .prepared_operation
+        .pipeline_plan
+        .request_context
+        .preflight_request
+        .object_key_id
+        .clone()
+        .filter(|object_key_id| !object_key_id.trim().is_empty())
+        .ok_or_else(|| {
+            LocalTrustlessExecutionEngineError::Runtime(
+                LocalTrustlessRuntimeError::PreparedRemoteRequestMissingObjectKeyId,
+            )
+        })
+}
+
+fn runtime_prepared_prefix(prepared: &LocalTrustlessRuntimePreparedResponse) -> Option<String> {
+    prepared
+        .handler_response
+        .request_preparation
+        .s3_request
+        .prefix
+        .clone()
+}
+
+fn manifest_entry_for_runtime_request(
+    manifest: &TrustlessManifest,
+    prepared: &LocalTrustlessRuntimePreparedResponse,
+) -> Result<TrustlessManifestEntry, LocalTrustlessExecutionEngineError> {
+    let object_key_id = runtime_prepared_object_key_id(prepared)?;
+
+    manifest
+        .entries
+        .iter()
+        .find(|entry| entry.object_key_id == object_key_id)
+        .cloned()
+        .ok_or_else(|| {
+            LocalTrustlessExecutionEngineError::Manifest(
+                TrustlessManifestError::ManifestEntryNotFound(object_key_id),
+            )
+        })
 }
 
 #[cfg(test)]
@@ -647,7 +851,7 @@ mod tests {
         TrustlessManifest {
             bucket_id: hex::encode([1u8; 32]),
             manifest_version: 1,
-            entries: Vec::new(),
+            entries: vec![engine_manifest_entry()],
         }
     }
 
@@ -655,7 +859,7 @@ mod tests {
         TrustlessManifestEntry {
             object_key: "secret.txt".to_owned(),
             object_key_id: hex::encode([2u8; 32]),
-            ciphertext_ref: "bee://engine-ciphertext-ref".to_owned(),
+            ciphertext_ref: "12".repeat(32),
             ciphertext_size: 64,
             content_type: Some("text/plain".to_owned()),
             etag: Some("engine-etag".to_owned()),
@@ -670,7 +874,7 @@ mod tests {
         LocalTrustlessExecutionInput {
             http_request: http_request(method, body),
             http_context: http_context(),
-            manifest_entry: engine_manifest_entry(),
+            manifest_entry: Some(engine_manifest_entry()),
             envelope_context: envelope_context(public_key_pem),
         }
     }
@@ -722,6 +926,30 @@ mod tests {
     fn put_manifest_response() -> CiphertextGatewayResponse {
         CiphertextGatewayResponse {
             action: RemoteGatewayAction::PutEncryptedManifest,
+            ciphertext_payload: None,
+            encrypted_manifest_payload: None,
+            ciphertext_reference_hex: None,
+            encrypted_manifest_reference_hex: Some("ef".repeat(32)),
+            metadata_only: true,
+            gateway_plaintext_access: false,
+        }
+    }
+
+    fn head_object_response() -> CiphertextGatewayResponse {
+        CiphertextGatewayResponse {
+            action: RemoteGatewayAction::HeadCiphertextObject,
+            ciphertext_payload: None,
+            encrypted_manifest_payload: None,
+            ciphertext_reference_hex: Some("12".repeat(32)),
+            encrypted_manifest_reference_hex: None,
+            metadata_only: true,
+            gateway_plaintext_access: false,
+        }
+    }
+
+    fn delete_object_response() -> CiphertextGatewayResponse {
+        CiphertextGatewayResponse {
+            action: RemoteGatewayAction::DeleteCiphertextObject,
             ciphertext_payload: None,
             encrypted_manifest_payload: None,
             ciphertext_reference_hex: None,
@@ -881,15 +1109,18 @@ mod tests {
 
         let seen_requests = Rc::new(RefCell::new(Vec::new()));
         let engine = test_engine(
-            vec![CiphertextGatewayResponse {
-                action: RemoteGatewayAction::GetCiphertextObject,
-                ciphertext_payload: Some(ciphertext),
-                encrypted_manifest_payload: None,
-                ciphertext_reference_hex: Some("cd".repeat(32)),
-                encrypted_manifest_reference_hex: None,
-                metadata_only: false,
-                gateway_plaintext_access: false,
-            }],
+            vec![
+                list_manifest_response(),
+                CiphertextGatewayResponse {
+                    action: RemoteGatewayAction::GetCiphertextObject,
+                    ciphertext_payload: Some(ciphertext),
+                    encrypted_manifest_payload: None,
+                    ciphertext_reference_hex: Some("cd".repeat(32)),
+                    encrypted_manifest_reference_hex: None,
+                    metadata_only: false,
+                    gateway_plaintext_access: false,
+                },
+            ],
             seen_requests.clone(),
             &private_key_pem,
             &public_key_pem,
@@ -909,11 +1140,131 @@ mod tests {
         assert!(!response.gateway_plaintext_access);
 
         let requests = seen_requests.borrow();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].action,
+            RemoteGatewayAction::ListCiphertextManifest
+        );
+        assert_eq!(requests[1].action, RemoteGatewayAction::GetCiphertextObject);
+        assert_eq!(requests[1].ciphertext_reference_hex, Some("12".repeat(32)));
+        assert!(requests[1].ciphertext_payload.is_none());
+        assert!(requests[1].encrypted_manifest_payload.is_none());
+        assert!(!requests[1].plaintext_payload_present);
+    }
+
+    #[test]
+    fn engine_executes_head_with_manifest_ciphertext_reference() {
+        let (private_key_pem, public_key_pem) = generate_test_rsa_pem_pair();
+        let seen_requests = Rc::new(RefCell::new(Vec::new()));
+        let engine = test_engine(
+            vec![list_manifest_response(), head_object_response()],
+            seen_requests.clone(),
+            &private_key_pem,
+            &public_key_pem,
+        );
+
+        let response = engine
+            .execute_http_request(execution_input(
+                LocalTrustlessHttpMethod::Head,
+                None,
+                &public_key_pem,
+            ))
+            .unwrap();
+
+        assert_eq!(response.status_code, 200);
+        assert!(response.body.is_none());
+        assert!(!response.gateway_plaintext_access);
+
+        let requests = seen_requests.borrow();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].action,
+            RemoteGatewayAction::ListCiphertextManifest
+        );
+        assert_eq!(
+            requests[1].action,
+            RemoteGatewayAction::HeadCiphertextObject
+        );
+        assert_eq!(requests[1].ciphertext_reference_hex, Some("12".repeat(32)));
+        assert!(requests[1].ciphertext_payload.is_none());
+        assert!(requests[1].encrypted_manifest_payload.is_none());
+        assert!(!requests[1].plaintext_payload_present);
+    }
+
+    #[test]
+    fn engine_executes_list_from_decrypted_manifest_metadata() {
+        let (private_key_pem, public_key_pem) = generate_test_rsa_pem_pair();
+        let seen_requests = Rc::new(RefCell::new(Vec::new()));
+        let engine = test_engine(
+            vec![list_manifest_response()],
+            seen_requests.clone(),
+            &private_key_pem,
+            &public_key_pem,
+        );
+
+        let mut input = execution_input(LocalTrustlessHttpMethod::Get, None, &public_key_pem);
+        input.http_request.path = "/bucket".to_owned();
+        input.http_request.query = Some("list-type=2&prefix=secret".to_owned());
+        input.http_context.object_key_id = None;
+        input.manifest_entry = None;
+
+        let response = engine.execute_http_request(input).unwrap();
+
+        assert_eq!(response.status_code, 200);
+        assert!(response.body.is_none());
+        assert!(!response.gateway_plaintext_access);
+
+        let requests = seen_requests.borrow();
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].action, RemoteGatewayAction::GetCiphertextObject);
+        assert_eq!(
+            requests[0].action,
+            RemoteGatewayAction::ListCiphertextManifest
+        );
         assert!(requests[0].ciphertext_payload.is_none());
         assert!(requests[0].encrypted_manifest_payload.is_none());
         assert!(!requests[0].plaintext_payload_present);
+    }
+
+    #[test]
+    fn engine_executes_delete_with_manifest_cas_reference() {
+        let (private_key_pem, public_key_pem) = generate_test_rsa_pem_pair();
+        let seen_requests = Rc::new(RefCell::new(Vec::new()));
+        let engine = test_engine(
+            vec![list_manifest_response(), delete_object_response()],
+            seen_requests.clone(),
+            &private_key_pem,
+            &public_key_pem,
+        );
+
+        let response = engine
+            .execute_http_request(execution_input(
+                LocalTrustlessHttpMethod::Delete,
+                None,
+                &public_key_pem,
+            ))
+            .unwrap();
+
+        assert_eq!(response.status_code, 204);
+        assert!(response.body.is_none());
+        assert!(!response.gateway_plaintext_access);
+
+        let requests = seen_requests.borrow();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].action,
+            RemoteGatewayAction::ListCiphertextManifest
+        );
+        assert_eq!(
+            requests[1].action,
+            RemoteGatewayAction::DeleteCiphertextObject
+        );
+        assert!(requests[1].ciphertext_payload.is_none());
+        assert!(requests[1].encrypted_manifest_payload.is_some());
+        assert_eq!(
+            requests[1].expected_manifest_reference_hex,
+            Some("ab".repeat(32))
+        );
+        assert!(!requests[1].plaintext_payload_present);
     }
 
     #[test]
@@ -921,15 +1272,18 @@ mod tests {
         let (private_key_pem, public_key_pem) = generate_test_rsa_pem_pair();
         let seen_requests = Rc::new(RefCell::new(Vec::new()));
         let engine = test_engine(
-            vec![CiphertextGatewayResponse {
-                action: RemoteGatewayAction::GetCiphertextObject,
-                ciphertext_payload: Some(b"ciphertext".to_vec()),
-                encrypted_manifest_payload: None,
-                ciphertext_reference_hex: None,
-                encrypted_manifest_reference_hex: None,
-                metadata_only: false,
-                gateway_plaintext_access: true,
-            }],
+            vec![
+                list_manifest_response(),
+                CiphertextGatewayResponse {
+                    action: RemoteGatewayAction::GetCiphertextObject,
+                    ciphertext_payload: Some(b"ciphertext".to_vec()),
+                    encrypted_manifest_payload: None,
+                    ciphertext_reference_hex: None,
+                    encrypted_manifest_reference_hex: None,
+                    metadata_only: false,
+                    gateway_plaintext_access: true,
+                },
+            ],
             seen_requests,
             &private_key_pem,
             &public_key_pem,

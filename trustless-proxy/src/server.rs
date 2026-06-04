@@ -225,6 +225,7 @@ impl LocalTrustlessServer {
         &self,
         prepared: &LocalTrustlessServerPreparedResponse,
         current_manifest: TrustlessManifest,
+        expected_manifest_reference_hex: Option<String>,
         manifest_envelope_context: RecipientEnvelopeContext,
         proxy_config: &TrustlessProxyConfig,
         preflight_builder: &TrustlessOperationPreflightBuilder<RK, LK>,
@@ -243,6 +244,7 @@ impl LocalTrustlessServer {
             LocalTrustlessRuntime::execute_prepared_delete_operation_with_configured_aws_esdk(
                 &prepared.handler_prepared_response.runtime_prepared_response,
                 current_manifest,
+                expected_manifest_reference_hex,
                 manifest_envelope_context,
                 proxy_config,
                 preflight_builder,
@@ -862,6 +864,7 @@ mod tests {
                     entries: vec![server_real_esdk_manifest_entry()],
                     ..server_real_esdk_manifest()
                 },
+                Some("cd".repeat(32)),
                 server_real_esdk_envelope_context(&public_key_pem),
                 &proxy_config,
                 &preflight_builder,
@@ -881,6 +884,10 @@ mod tests {
 
         let request = seen_request.borrow().clone().unwrap();
         assert_eq!(request.action, RemoteGatewayAction::DeleteCiphertextObject);
+        assert_eq!(
+            request.expected_manifest_reference_hex,
+            Some("cd".repeat(32))
+        );
         assert!(request.ciphertext_payload.is_none());
         assert!(!request.plaintext_payload_present);
 
