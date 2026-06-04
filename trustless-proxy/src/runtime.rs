@@ -66,8 +66,12 @@ pub struct LocalTrustlessRuntimeCompletion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocalTrustlessRuntimeRemotePayload {
     None,
+    CiphertextReference(String),
     PutCiphertext(Vec<u8>),
-    DeleteEncryptedManifest(Vec<u8>),
+    DeleteEncryptedManifest {
+        encrypted_manifest: Vec<u8>,
+        expected_manifest_reference_hex: Option<String>,
+    },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -119,6 +123,9 @@ pub enum LocalTrustlessRuntimeError {
 
     #[error("prepared DELETE remote request requires encrypted manifest payload")]
     MissingDeleteEncryptedManifestPayload,
+
+    #[error("prepared object metadata remote request requires ciphertext reference")]
+    MissingCiphertextReference,
 
     #[error("prepared remote request payload is not valid for operation {operation:?}")]
     UnexpectedRemotePayloadForOperation { operation: LocalS3Operation },
@@ -247,7 +254,8 @@ impl LocalTrustlessRuntime {
                     | LocalTrustlessRuntimeRemotePayload::None => {
                         return Err(LocalTrustlessRuntimeError::MissingPutCiphertextPayload);
                     }
-                    LocalTrustlessRuntimeRemotePayload::DeleteEncryptedManifest(_) => {
+                    LocalTrustlessRuntimeRemotePayload::CiphertextReference(_)
+                    | LocalTrustlessRuntimeRemotePayload::DeleteEncryptedManifest { .. } => {
                         return Err(
                             LocalTrustlessRuntimeError::UnexpectedRemotePayloadForOperation {
                                 operation: prepared.operation,
@@ -274,7 +282,8 @@ impl LocalTrustlessRuntime {
                 )?)
             }
             LocalS3Operation::GetObject => {
-                require_no_remote_payload(prepared.operation, payload)?;
+                let ciphertext_reference_hex =
+                    object_ciphertext_reference_payload(prepared.operation, payload)?;
 
                 let route_plan = TrustlessRoutePlanner::plan_get_object(
                     preflight_request.bucket.clone(),
@@ -283,11 +292,12 @@ impl LocalTrustlessRuntime {
 
                 Ok(CiphertextGatewayBoundary::get_ciphertext_request(
                     &route_plan,
-                    None,
+                    ciphertext_reference_hex,
                 )?)
             }
             LocalS3Operation::HeadObject => {
-                require_no_remote_payload(prepared.operation, payload)?;
+                let ciphertext_reference_hex =
+                    object_ciphertext_reference_payload(prepared.operation, payload)?;
 
                 let route_plan = TrustlessRoutePlanner::plan_head_object(
                     preflight_request.bucket.clone(),
@@ -296,7 +306,7 @@ impl LocalTrustlessRuntime {
 
                 Ok(CiphertextGatewayBoundary::head_ciphertext_request(
                     &route_plan,
-                    None,
+                    ciphertext_reference_hex,
                 )?)
             }
             LocalS3Operation::ListObjectsV2 => {
@@ -310,17 +320,21 @@ impl LocalTrustlessRuntime {
                 )?)
             }
             LocalS3Operation::DeleteObject => {
-                let encrypted_manifest = match payload {
-                    LocalTrustlessRuntimeRemotePayload::DeleteEncryptedManifest(
+                let (encrypted_manifest, expected_manifest_reference_hex) = match payload {
+                    LocalTrustlessRuntimeRemotePayload::DeleteEncryptedManifest {
                         encrypted_manifest,
-                    ) if !encrypted_manifest.is_empty() => encrypted_manifest,
-                    LocalTrustlessRuntimeRemotePayload::DeleteEncryptedManifest(_)
+                        expected_manifest_reference_hex,
+                    } if !encrypted_manifest.is_empty() => {
+                        (encrypted_manifest, expected_manifest_reference_hex)
+                    }
+                    LocalTrustlessRuntimeRemotePayload::DeleteEncryptedManifest { .. }
                     | LocalTrustlessRuntimeRemotePayload::None => {
                         return Err(
                             LocalTrustlessRuntimeError::MissingDeleteEncryptedManifestPayload,
                         );
                     }
-                    LocalTrustlessRuntimeRemotePayload::PutCiphertext(_) => {
+                    LocalTrustlessRuntimeRemotePayload::CiphertextReference(_)
+                    | LocalTrustlessRuntimeRemotePayload::PutCiphertext(_) => {
                         return Err(
                             LocalTrustlessRuntimeError::UnexpectedRemotePayloadForOperation {
                                 operation: prepared.operation,
@@ -337,7 +351,7 @@ impl LocalTrustlessRuntime {
                 Ok(CiphertextGatewayBoundary::delete_ciphertext_request(
                     &route_plan,
                     encrypted_manifest,
-                    None,
+                    expected_manifest_reference_hex,
                 )?)
             }
             LocalS3Operation::CreateTrustlessBucket => {
@@ -389,6 +403,7 @@ impl LocalTrustlessRuntime {
     pub fn build_prepared_delete_operation_plan<K, C, RK, LK>(
         prepared: &LocalTrustlessRuntimePreparedResponse,
         current_manifest: TrustlessManifest,
+        expected_manifest_reference_hex: Option<String>,
         manifest_envelope_context: RecipientEnvelopeContext,
         preflight_builder: &TrustlessOperationPreflightBuilder<RK, LK>,
         assembler: &TrustlessOperationAssembler<K, C>,
@@ -415,6 +430,7 @@ impl LocalTrustlessRuntime {
             preflight,
             current_manifest,
             object_key_id,
+            expected_manifest_reference_hex,
             manifest_envelope_context,
         })?)
     }
@@ -450,6 +466,7 @@ impl LocalTrustlessRuntime {
     pub fn execute_prepared_delete_operation<K, C, RK, LK, G>(
         prepared: &LocalTrustlessRuntimePreparedResponse,
         current_manifest: TrustlessManifest,
+        expected_manifest_reference_hex: Option<String>,
         manifest_envelope_context: RecipientEnvelopeContext,
         preflight_builder: &TrustlessOperationPreflightBuilder<RK, LK>,
         assembler: &TrustlessOperationAssembler<K, C>,
@@ -465,6 +482,7 @@ impl LocalTrustlessRuntime {
         let plan = Self::build_prepared_delete_operation_plan(
             prepared,
             current_manifest,
+            expected_manifest_reference_hex,
             manifest_envelope_context,
             preflight_builder,
             assembler,
@@ -523,6 +541,7 @@ impl LocalTrustlessRuntime {
     pub fn build_prepared_delete_operation_plan_with_configured_aws_esdk<C, RK, LK>(
         prepared: &LocalTrustlessRuntimePreparedResponse,
         current_manifest: TrustlessManifest,
+        expected_manifest_reference_hex: Option<String>,
         manifest_envelope_context: RecipientEnvelopeContext,
         config: &TrustlessProxyConfig,
         preflight_builder: &TrustlessOperationPreflightBuilder<RK, LK>,
@@ -556,6 +575,7 @@ impl LocalTrustlessRuntime {
             preflight,
             current_manifest,
             object_key_id,
+            expected_manifest_reference_hex,
             manifest_envelope_context,
         })?)
     }
@@ -592,6 +612,7 @@ impl LocalTrustlessRuntime {
     pub fn execute_prepared_delete_operation_with_configured_aws_esdk<C, RK, LK, G>(
         prepared: &LocalTrustlessRuntimePreparedResponse,
         current_manifest: TrustlessManifest,
+        expected_manifest_reference_hex: Option<String>,
         manifest_envelope_context: RecipientEnvelopeContext,
         config: &TrustlessProxyConfig,
         preflight_builder: &TrustlessOperationPreflightBuilder<RK, LK>,
@@ -607,6 +628,7 @@ impl LocalTrustlessRuntime {
         let plan = Self::build_prepared_delete_operation_plan_with_configured_aws_esdk(
             prepared,
             current_manifest,
+            expected_manifest_reference_hex,
             manifest_envelope_context,
             config,
             preflight_builder,
@@ -940,9 +962,12 @@ fn delete_operation_plan_payload(
         return Err(LocalTrustlessRuntimeError::MissingDeleteEncryptedManifestPayload);
     }
 
-    Ok(LocalTrustlessRuntimeRemotePayload::DeleteEncryptedManifest(
-        encrypted_manifest,
-    ))
+    Ok(
+        LocalTrustlessRuntimeRemotePayload::DeleteEncryptedManifest {
+            encrypted_manifest,
+            expected_manifest_reference_hex: plan.delete_request.expected_manifest_reference_hex,
+        },
+    )
 }
 
 fn validate_operation_plan_remote_boundary(
@@ -974,8 +999,30 @@ fn require_no_remote_payload(
 ) -> Result<(), LocalTrustlessRuntimeError> {
     match payload {
         LocalTrustlessRuntimeRemotePayload::None => Ok(()),
+        LocalTrustlessRuntimeRemotePayload::CiphertextReference(_)
+        | LocalTrustlessRuntimeRemotePayload::PutCiphertext(_)
+        | LocalTrustlessRuntimeRemotePayload::DeleteEncryptedManifest { .. } => {
+            Err(LocalTrustlessRuntimeError::UnexpectedRemotePayloadForOperation { operation })
+        }
+    }
+}
+
+fn object_ciphertext_reference_payload(
+    operation: LocalS3Operation,
+    payload: LocalTrustlessRuntimeRemotePayload,
+) -> Result<Option<String>, LocalTrustlessRuntimeError> {
+    match payload {
+        LocalTrustlessRuntimeRemotePayload::None => Ok(None),
+        LocalTrustlessRuntimeRemotePayload::CiphertextReference(reference)
+            if !reference.trim().is_empty() =>
+        {
+            Ok(Some(reference))
+        }
+        LocalTrustlessRuntimeRemotePayload::CiphertextReference(_) => {
+            Err(LocalTrustlessRuntimeError::MissingCiphertextReference)
+        }
         LocalTrustlessRuntimeRemotePayload::PutCiphertext(_)
-        | LocalTrustlessRuntimeRemotePayload::DeleteEncryptedManifest(_) => {
+        | LocalTrustlessRuntimeRemotePayload::DeleteEncryptedManifest { .. } => {
             Err(LocalTrustlessRuntimeError::UnexpectedRemotePayloadForOperation { operation })
         }
     }
@@ -1886,6 +1933,7 @@ mod tests {
                     entries: vec![real_esdk_runtime_manifest_entry()],
                     ..real_esdk_runtime_manifest()
                 },
+                Some("cd".repeat(32)),
                 real_esdk_runtime_envelope_context(&public_key_pem),
                 &config,
                 &preflight_builder,
@@ -1899,6 +1947,10 @@ mod tests {
 
         let request = seen_request.borrow().clone().unwrap();
         assert_eq!(request.action, RemoteGatewayAction::DeleteCiphertextObject);
+        assert_eq!(
+            request.expected_manifest_reference_hex,
+            Some("cd".repeat(32))
+        );
         assert!(request.ciphertext_payload.is_none());
         assert!(!request.plaintext_payload_present);
 
@@ -1970,9 +2022,20 @@ mod tests {
         assert_eq!(get_request.bucket, "bucket");
         assert_eq!(get_request.key, Some("secret.txt".to_owned()));
         assert_eq!(get_request.action, RemoteGatewayAction::GetCiphertextObject);
+        assert!(get_request.ciphertext_reference_hex.is_none());
         assert!(get_request.ciphertext_payload.is_none());
         assert!(get_request.encrypted_manifest_payload.is_none());
         assert!(!get_request.plaintext_payload_present);
+
+        let direct_get_request = LocalTrustlessRuntime::build_prepared_remote_request(
+            &get_prepared,
+            LocalTrustlessRuntimeRemotePayload::CiphertextReference("ab".repeat(32)),
+        )
+        .unwrap();
+        assert_eq!(
+            direct_get_request.ciphertext_reference_hex,
+            Some("ab".repeat(32))
+        );
 
         let head_prepared =
             LocalTrustlessRuntime::prepare_request(request_input(LocalS3Operation::HeadObject))
@@ -1990,9 +2053,20 @@ mod tests {
             head_request.action,
             RemoteGatewayAction::HeadCiphertextObject
         );
+        assert!(head_request.ciphertext_reference_hex.is_none());
         assert!(head_request.ciphertext_payload.is_none());
         assert!(head_request.encrypted_manifest_payload.is_none());
         assert!(!head_request.plaintext_payload_present);
+
+        let direct_head_request = LocalTrustlessRuntime::build_prepared_remote_request(
+            &head_prepared,
+            LocalTrustlessRuntimeRemotePayload::CiphertextReference("bc".repeat(32)),
+        )
+        .unwrap();
+        assert_eq!(
+            direct_head_request.ciphertext_reference_hex,
+            Some("bc".repeat(32))
+        );
 
         let list_prepared = LocalTrustlessRuntime::prepare_request(LocalTrustlessRequestInput {
             operation: LocalS3Operation::ListObjectsV2,
@@ -2049,9 +2123,10 @@ mod tests {
 
         let delete_request = LocalTrustlessRuntime::build_prepared_remote_request(
             &delete_prepared,
-            LocalTrustlessRuntimeRemotePayload::DeleteEncryptedManifest(
-                b"encrypted-manifest".to_vec(),
-            ),
+            LocalTrustlessRuntimeRemotePayload::DeleteEncryptedManifest {
+                encrypted_manifest: b"encrypted-manifest".to_vec(),
+                expected_manifest_reference_hex: Some("de".repeat(32)),
+            },
         )
         .unwrap();
 
@@ -2065,6 +2140,10 @@ mod tests {
         assert_eq!(
             delete_request.encrypted_manifest_payload,
             Some(b"encrypted-manifest".to_vec())
+        );
+        assert_eq!(
+            delete_request.expected_manifest_reference_hex,
+            Some("de".repeat(32))
         );
         assert!(!delete_request.plaintext_payload_present);
     }
@@ -2252,7 +2331,7 @@ mod tests {
                     ciphertext_payload: None,
                     encrypted_manifest_payload: Some(b"real-encrypted-manifest".to_vec()),
                     ciphertext_reference_hex: None,
-                    expected_manifest_reference_hex: None,
+                    expected_manifest_reference_hex: Some("fa".repeat(32)),
                     plaintext_payload_present: false,
                 },
                 encrypted_manifest: encrypted_manifest(b"real-encrypted-manifest"),
@@ -2270,6 +2349,10 @@ mod tests {
         assert_eq!(
             delete_request.encrypted_manifest_payload,
             Some(b"real-encrypted-manifest".to_vec())
+        );
+        assert_eq!(
+            delete_request.expected_manifest_reference_hex,
+            Some("fa".repeat(32))
         );
         assert!(!delete_request.plaintext_payload_present);
     }
@@ -2709,6 +2792,7 @@ mod tests {
         let delete_plan = LocalTrustlessRuntime::build_prepared_delete_operation_plan(
             &delete_prepared,
             runtime_manifest(),
+            Some("ef".repeat(32)),
             runtime_envelope_context(),
             &runtime_preflight_builder(),
             &runtime_assembler(),
@@ -2725,6 +2809,10 @@ mod tests {
                 .delete_request
                 .encrypted_manifest_payload
                 .is_some()
+        );
+        assert_eq!(
+            delete_plan.delete_request.expected_manifest_reference_hex,
+            Some("ef".repeat(32))
         );
         assert!(delete_plan.remote_payloads_are_ciphertext_only);
         assert!(!delete_plan.gateway_plaintext_access);

@@ -1010,7 +1010,7 @@ x-s3w-manifest-ciphertext-size: 64\r\n\
         let input = seen_input.lock().unwrap().clone().unwrap();
         assert_eq!(input.http_request.path, "/bucket/live.txt");
         assert_eq!(input.http_request.body, Some(body.to_vec()));
-        assert_eq!(input.manifest_entry.object_key, "live.txt");
+        assert_eq!(input.manifest_entry.unwrap().object_key, "live.txt");
         assert_eq!(input.envelope_context.recipients.len(), 1);
     }
 

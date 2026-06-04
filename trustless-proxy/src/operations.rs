@@ -39,6 +39,7 @@ pub struct TrustlessDeleteOperationInput {
     pub preflight: TrustlessLocalDecryptPreflight,
     pub current_manifest: TrustlessManifest,
     pub object_key_id: String,
+    pub expected_manifest_reference_hex: Option<String>,
     pub manifest_envelope_context: RecipientEnvelopeContext,
 }
 
@@ -137,10 +138,22 @@ where
     pub fn prepare_get_request(
         &self,
         preflight: &TrustlessLocalDecryptPreflight,
+        ciphertext_reference_hex: Option<String>,
     ) -> Result<CiphertextGatewayRequest, TrustlessOperationError> {
         Ok(CiphertextGatewayBoundary::get_ciphertext_request(
             &preflight.route_plan,
-            None,
+            ciphertext_reference_hex,
+        )?)
+    }
+
+    pub fn prepare_head_request(
+        &self,
+        preflight: &TrustlessLocalDecryptPreflight,
+        ciphertext_reference_hex: Option<String>,
+    ) -> Result<CiphertextGatewayRequest, TrustlessOperationError> {
+        Ok(CiphertextGatewayBoundary::head_ciphertext_request(
+            &preflight.route_plan,
+            ciphertext_reference_hex,
         )?)
     }
 
@@ -213,7 +226,7 @@ where
         let delete_request = CiphertextGatewayBoundary::delete_ciphertext_request(
             &input.preflight.route_plan,
             manifest_write.encrypted_manifest.ciphertext.clone(),
-            None,
+            input.expected_manifest_reference_hex,
         )?;
 
         Ok(TrustlessDeleteOperationPlan {
@@ -359,6 +372,16 @@ mod tests {
         }
     }
 
+    fn head_preflight() -> TrustlessLocalDecryptPreflight {
+        TrustlessLocalDecryptPreflight {
+            route_plan: route_plan(
+                TrustlessProxyOperation::HeadObject,
+                RemoteGatewayAction::HeadCiphertextObject,
+            ),
+            local_private_key: local_private_key(),
+        }
+    }
+
     fn list_preflight() -> TrustlessLocalDecryptPreflight {
         let mut plan = route_plan(
             TrustlessProxyOperation::ListObjectsV2,
@@ -429,9 +452,13 @@ mod tests {
 
     #[test]
     fn get_operation_prepares_ciphertext_request_and_decrypts_response_locally() {
-        let request = assembler().prepare_get_request(&get_preflight()).unwrap();
+        let ciphertext_ref = "aa".repeat(32);
+        let request = assembler()
+            .prepare_get_request(&get_preflight(), Some(ciphertext_ref.clone()))
+            .unwrap();
 
         assert_eq!(request.action, RemoteGatewayAction::GetCiphertextObject);
+        assert_eq!(request.ciphertext_reference_hex, Some(ciphertext_ref));
         assert!(!request.plaintext_payload_present);
 
         let result = assembler()
@@ -453,6 +480,20 @@ mod tests {
         assert_eq!(result.plaintext, b"secret".to_vec());
         assert!(result.decrypted_locally);
         assert!(!result.gateway_plaintext_access);
+    }
+
+    #[test]
+    fn head_operation_prepares_ciphertext_request_with_manifest_reference() {
+        let ciphertext_ref = "bb".repeat(32);
+        let request = assembler()
+            .prepare_head_request(&head_preflight(), Some(ciphertext_ref.clone()))
+            .unwrap();
+
+        assert_eq!(request.action, RemoteGatewayAction::HeadCiphertextObject);
+        assert_eq!(request.ciphertext_reference_hex, Some(ciphertext_ref));
+        assert!(request.ciphertext_payload.is_none());
+        assert!(request.encrypted_manifest_payload.is_none());
+        assert!(!request.plaintext_payload_present);
     }
 
     #[test]
@@ -486,11 +527,13 @@ mod tests {
 
     #[test]
     fn delete_operation_updates_and_encrypts_manifest_locally() {
+        let expected_manifest_ref = "cc".repeat(32);
         let plan = assembler()
             .prepare_delete(TrustlessDeleteOperationInput {
                 preflight: delete_preflight(),
                 current_manifest: manifest(),
                 object_key_id: "object-a".to_owned(),
+                expected_manifest_reference_hex: Some(expected_manifest_ref.clone()),
                 manifest_envelope_context: envelope_context(),
             })
             .unwrap();
@@ -501,6 +544,10 @@ mod tests {
         );
         assert!(plan.delete_request.ciphertext_payload.is_none());
         assert!(plan.delete_request.encrypted_manifest_payload.is_some());
+        assert_eq!(
+            plan.delete_request.expected_manifest_reference_hex,
+            Some(expected_manifest_ref)
+        );
         assert!(plan.remote_payloads_are_ciphertext_only);
         assert!(!plan.gateway_plaintext_access);
     }
