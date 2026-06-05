@@ -175,6 +175,9 @@ jobs:
       - name: Check bucket type contract surface
         run: ./scripts/check_bucket_type_contract_surface.py
 
+      - name: Check bucket enumeration surface
+        run: ./scripts/check_bucket_enumeration_surface.py
+
       - name: Check identity encryption key CLI surface
         run: ./scripts/check_identity_encryption_key_cli_surface.py
 
