@@ -360,6 +360,7 @@ async fn private_delete_fixture() -> Result<PrivateDeleteFixture> {
         secret_unwrapper: unwrapper,
         bee_client,
         anchor_client,
+        orphan_journal: None,
         master_service_key,
         max_request_body_bytes: 64 * 1024 * 1024,
         identity_contract_address: None,

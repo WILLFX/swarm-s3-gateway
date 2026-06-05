@@ -10,6 +10,10 @@ use crate::{
         write_private_bucket_manifest_v2, write_private_object_manifest_v2, BucketManifest,
         ObjectManifest, PrivateBucketManifestV2, PrivateBucketObjectEntry, PrivateObjectManifestV2,
     },
+    orphan_reconciliation::{
+        record_anchor_attempt, record_anchor_failure, record_anchor_success, AnchorAttemptEvent,
+        AnchorJournalAction, GatewayBeeReference, GatewayBeeReferenceKind, JournalBucketType,
+    },
     s3_response::{
         bee_error_response, bee_unavailable_response, chain_error_response,
         omit_swarm_ref_for_private_response, put_object_response, S3ErrorKind, S3ErrorResponse,
@@ -26,6 +30,7 @@ use common::types::{AwsPrincipal, ChainBucketRecord, ChainBucketType};
 use reqwest::Error as ReqwestError;
 use sha2::{Digest, Sha256};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use tracing::warn;
 
 pub async fn handle(
     Path((bucket, key)): Path<(String, String)>,
@@ -136,7 +141,7 @@ pub async fn handle(
         encryption_version: None,
     };
 
-    let bucket_manifest_root = match write_public_manifests(
+    let manifest_write = match write_public_manifests(
         state.bee_client.as_ref(),
         &bucket,
         &key,
@@ -145,7 +150,7 @@ pub async fn handle(
     )
     .await
     {
-        Ok(bucket_manifest_root) => bucket_manifest_root,
+        Ok(manifest_write) => manifest_write,
         Err(err) => {
             return S3ErrorResponse::new(S3ErrorKind::InternalError)
                 .with_message(format!("failed to write public bucket manifest: {err}"))
@@ -154,7 +159,44 @@ pub async fn handle(
         }
     };
 
-    if let Err(err) = state
+    let attempt_event_id = match record_anchor_attempt(
+        state.orphan_journal.as_ref(),
+        AnchorAttemptEvent {
+            action: AnchorJournalAction::PublicPut,
+            bucket: bucket.clone(),
+            owner_hex: hex::encode(principal.owner),
+            bucket_id_hex: hex::encode(bucket_id),
+            bucket_type: JournalBucketType::Public,
+            expected_bucket_manifest_root_hex: hex::encode(&chain_bucket.bucket_manifest_root),
+            new_bucket_manifest_root_hex: manifest_write.bucket_manifest_reference.clone(),
+            references: vec![
+                GatewayBeeReference::new(
+                    put.swarm_reference.clone(),
+                    GatewayBeeReferenceKind::PublicObjectPayload,
+                ),
+                GatewayBeeReference::new(
+                    manifest_write.object_manifest_reference.clone(),
+                    GatewayBeeReferenceKind::PublicObjectManifest,
+                ),
+                GatewayBeeReference::new(
+                    manifest_write.bucket_manifest_reference.clone(),
+                    GatewayBeeReferenceKind::PublicBucketManifest,
+                ),
+            ],
+        },
+    )
+    .await
+    {
+        Ok(attempt_event_id) => attempt_event_id,
+        Err(err) => {
+            return S3ErrorResponse::new(S3ErrorKind::InternalError)
+                .with_message(format!("failed to record public PUT anchor attempt: {err}"))
+                .with_resource(format!("/{bucket}/{key}"))
+                .into_response();
+        }
+    };
+
+    match state
         .anchor_client
         .submit_anchor_object(
             principal.owner,
@@ -162,16 +204,37 @@ pub async fn handle(
             object_key_id,
             put.swarm_reference.clone(),
             hex::encode(&chain_bucket.bucket_manifest_root),
-            bucket_manifest_root,
+            manifest_write.bucket_manifest_reference.clone(),
             size,
             etag_bytes,
         )
         .await
     {
-        return chain_error_response(err);
+        Ok(tx_hash) => {
+            if let Err(err) =
+                record_anchor_success(state.orphan_journal.as_ref(), attempt_event_id, tx_hash)
+                    .await
+            {
+                warn!("failed to record public PUT anchor success: {err}");
+            }
+        }
+        Err(err) => {
+            if let Err(journal_err) =
+                record_anchor_failure(state.orphan_journal.as_ref(), attempt_event_id, &err).await
+            {
+                warn!("failed to record public PUT anchor failure: {journal_err}");
+            }
+            return chain_error_response(err);
+        }
     }
 
     put_object_response(&put.swarm_reference)
+}
+
+#[derive(Debug)]
+struct PublicManifestWrite {
+    object_manifest_reference: String,
+    bucket_manifest_reference: String,
 }
 
 async fn write_public_manifests(
@@ -180,7 +243,7 @@ async fn write_public_manifests(
     key: &str,
     metadata: &ObjectMetadata,
     current_bucket_manifest_root: &[u8],
-) -> Result<String> {
+) -> Result<PublicManifestWrite> {
     let mut bucket_manifest =
         read_public_bucket_manifest_from_root(bee, current_bucket_manifest_root).await?;
 
@@ -196,11 +259,14 @@ async fn write_public_manifests(
 
     bucket_manifest
         .objects
-        .insert(key.to_string(), object_record.manifest_reference);
+        .insert(key.to_string(), object_record.manifest_reference.clone());
 
     let bucket_record = write_bucket_manifest(bee, bucket, &bucket_manifest).await?;
 
-    Ok(bucket_record.manifest_reference)
+    Ok(PublicManifestWrite {
+        object_manifest_reference: object_record.manifest_reference,
+        bucket_manifest_reference: bucket_record.manifest_reference,
+    })
 }
 
 async fn read_public_bucket_manifest_from_root(
@@ -338,7 +404,7 @@ async fn handle_private_put_object(
         PrivateBucketObjectEntry {
             object_key: key.to_string(),
             object_key_id,
-            object_manifest_reference: object_manifest_record.manifest_reference,
+            object_manifest_reference: object_manifest_record.manifest_reference.clone(),
             encryption_version,
             size,
             etag: etag.clone(),
@@ -366,7 +432,46 @@ async fn handle_private_put_object(
         }
     };
 
-    if let Err(err) = state
+    let attempt_event_id = match record_anchor_attempt(
+        state.orphan_journal.as_ref(),
+        AnchorAttemptEvent {
+            action: AnchorJournalAction::TrustedPrivatePut,
+            bucket: bucket.to_string(),
+            owner_hex: hex::encode(principal.owner),
+            bucket_id_hex: hex::encode(bucket_id),
+            bucket_type: JournalBucketType::TrustedGatewayPrivate,
+            expected_bucket_manifest_root_hex: hex::encode(&chain_bucket.bucket_manifest_root),
+            new_bucket_manifest_root_hex: bucket_manifest_record.manifest_reference.clone(),
+            references: vec![
+                GatewayBeeReference::new(
+                    encrypted_put.reference.clone(),
+                    GatewayBeeReferenceKind::PrivateObjectPayload,
+                ),
+                GatewayBeeReference::new(
+                    object_manifest_record.manifest_reference.clone(),
+                    GatewayBeeReferenceKind::PrivateObjectManifest,
+                ),
+                GatewayBeeReference::new(
+                    bucket_manifest_record.manifest_reference.clone(),
+                    GatewayBeeReferenceKind::PrivateBucketManifest,
+                ),
+            ],
+        },
+    )
+    .await
+    {
+        Ok(attempt_event_id) => attempt_event_id,
+        Err(err) => {
+            return S3ErrorResponse::new(S3ErrorKind::InternalError)
+                .with_message(format!(
+                    "failed to record private PUT anchor attempt: {err}"
+                ))
+                .with_resource(format!("/{bucket}/{key}"))
+                .into_response();
+        }
+    };
+
+    match state
         .anchor_client
         .submit_anchor_object(
             principal.owner,
@@ -380,7 +485,22 @@ async fn handle_private_put_object(
         )
         .await
     {
-        return chain_error_response(err);
+        Ok(tx_hash) => {
+            if let Err(err) =
+                record_anchor_success(state.orphan_journal.as_ref(), attempt_event_id, tx_hash)
+                    .await
+            {
+                warn!("failed to record private PUT anchor success: {err}");
+            }
+        }
+        Err(err) => {
+            if let Err(journal_err) =
+                record_anchor_failure(state.orphan_journal.as_ref(), attempt_event_id, &err).await
+            {
+                warn!("failed to record private PUT anchor failure: {journal_err}");
+            }
+            return chain_error_response(err);
+        }
     }
 
     omit_swarm_ref_for_private_response(put_object_response(&encrypted_put.reference), true)
@@ -542,7 +662,7 @@ mod tests {
         bee.set_pointer_reference(&poisoned_record.manifest_reference)?;
 
         let current_root = hex::decode(&anchored_record.manifest_reference)?;
-        let new_root = write_public_manifests(
+        let manifest_write = write_public_manifests(
             &bee,
             "bucket",
             "new.txt",
@@ -551,7 +671,7 @@ mod tests {
         )
         .await?;
 
-        let updated_manifest = bee.read_bucket_manifest(&new_root);
+        let updated_manifest = bee.read_bucket_manifest(&manifest_write.bucket_manifest_reference);
         assert_eq!(
             updated_manifest.objects.get("existing.txt"),
             Some(&"existing-object-manifest-ref".to_string())
@@ -567,7 +687,7 @@ mod tests {
     async fn public_manifest_write_allows_empty_chain_root() -> Result<()> {
         let bee = MockBeeStorage::default();
 
-        let new_root = write_public_manifests(
+        let manifest_write = write_public_manifests(
             &bee,
             "bucket",
             "new.txt",
@@ -576,7 +696,7 @@ mod tests {
         )
         .await?;
 
-        let updated_manifest = bee.read_bucket_manifest(&new_root);
+        let updated_manifest = bee.read_bucket_manifest(&manifest_write.bucket_manifest_reference);
         assert_eq!(updated_manifest.objects.len(), 1);
         assert!(updated_manifest.objects.contains_key("new.txt"));
         assert_eq!(bee.get_pointer_calls(), 0);

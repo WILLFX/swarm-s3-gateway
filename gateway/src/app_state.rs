@@ -2,6 +2,7 @@ use crate::auth::sigv4::RegistryBackedSigV4Validator;
 use crate::auth::unwrap::EnvKeyUnwrapper;
 use crate::bee::client::{BeeClient, BeeStorage};
 use crate::chain::{anchor_client::ContractAnchorClient, registry::ChainRegistryClient};
+use crate::orphan_reconciliation::{GatewayWriteJournal, JournaledBeeStorage};
 use crate::request_limits::max_request_body_bytes_from_env;
 use crate::traits::{AnchorClient, RegistryClient, SecretUnwrapper};
 use anyhow::{bail, Context, Result};
@@ -29,6 +30,7 @@ pub struct AppState {
     pub secret_unwrapper: Arc<dyn SecretUnwrapper>,
     pub bee_client: Arc<dyn BeeStorage>,
     pub anchor_client: Arc<dyn AnchorClient>,
+    pub orphan_journal: Option<Arc<GatewayWriteJournal>>,
     pub master_service_key: [u8; 32],
     pub max_request_body_bytes: usize,
     pub identity_contract_address: Option<SubstrateAddress32>,
@@ -43,6 +45,13 @@ impl fmt::Debug for AppState {
             .field("secret_unwrapper", &"Arc<dyn SecretUnwrapper>")
             .field("bee_client", &"Arc<dyn BeeStorage>")
             .field("anchor_client", &"Arc<dyn AnchorClient>")
+            .field(
+                "orphan_journal",
+                &self
+                    .orphan_journal
+                    .as_ref()
+                    .map(|journal| journal.path().display().to_string()),
+            )
             .field("master_service_key", &"<redacted>")
             .field("max_request_body_bytes", &self.max_request_body_bytes)
             .field(
@@ -72,10 +81,24 @@ pub async fn build_production_state() -> Result<AppState> {
 
     let bee_api_url = required_env("S3GW_BEE_API_URL")?;
 
-    let bee_client: Arc<dyn BeeStorage> = Arc::new(
+    let raw_bee_client: Arc<dyn BeeStorage> = Arc::new(
         BeeClient::from_env(&bee_api_url)
             .with_context(|| format!("failed to build Bee client for {bee_api_url}"))?,
     );
+    let orphan_journal = GatewayWriteJournal::from_env()?;
+    let bee_client: Arc<dyn BeeStorage> = match &orphan_journal {
+        Some(journal) => {
+            info!(
+                path = %journal.path().display(),
+                "enabled Bee write journal for orphan reconciliation"
+            );
+            Arc::new(JournaledBeeStorage::new(
+                raw_bee_client.clone(),
+                journal.clone(),
+            ))
+        }
+        None => raw_bee_client,
+    };
 
     let chain_registry_client = build_chain_registry_client().await?;
     let identity_contract_address = chain_registry_client
@@ -128,6 +151,7 @@ pub async fn build_production_state() -> Result<AppState> {
         secret_unwrapper,
         bee_client,
         anchor_client,
+        orphan_journal,
         master_service_key,
         max_request_body_bytes,
         identity_contract_address,

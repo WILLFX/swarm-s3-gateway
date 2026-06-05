@@ -56,6 +56,11 @@ struct BeeReferenceResponse {
     reference: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct BeePinsResponse {
+    references: Vec<String>,
+}
+
 impl BeeClient {
     /// Builds a Bee client from:
     /// - `base_url` passed by caller
@@ -194,6 +199,7 @@ impl BeeClient {
             .http
             .post(url)
             .header("Swarm-Postage-Batch-Id", &self.postage_batch_id)
+            .header("Swarm-Pin", "true")
             .header("Content-Type", "application/octet-stream")
             .body(data)
             .send()
@@ -230,6 +236,7 @@ impl BeeClient {
             .http
             .post(url)
             .header("Swarm-Postage-Batch-Id", &self.postage_batch_id)
+            .header("Swarm-Pin", "true")
             .send()
             .await
             .context("Bee feed manifest creation request failed")?;
@@ -353,6 +360,7 @@ impl BeeClient {
             .http
             .post(url)
             .header("Swarm-Postage-Batch-Id", &self.postage_batch_id)
+            .header("Swarm-Pin", "true")
             .header("Content-Type", "application/octet-stream")
             .body(soc_body)
             .send()
@@ -406,6 +414,121 @@ impl BeeClient {
         }
 
         Ok(Some(body))
+    }
+
+    pub async fn list_pins(&self) -> Result<Vec<String>> {
+        let url = format!("{}/pins", self.base_url);
+
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .context("Bee /pins list request failed")?;
+
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .context("failed to read Bee /pins response body")?;
+
+        if !status.is_success() {
+            bail!("Bee /pins list failed with status {}: {}", status, text);
+        }
+
+        let parsed: BeePinsResponse =
+            serde_json::from_str(&text).context("failed to parse Bee /pins response JSON")?;
+
+        Ok(parsed.references)
+    }
+
+    pub async fn is_pinned(&self, reference: &str) -> Result<bool> {
+        let url = format!("{}/pins/{}", self.base_url, reference);
+
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .context("Bee /pins reference request failed")?;
+
+        let status = response.status();
+        if status == StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+
+        let text = response
+            .text()
+            .await
+            .context("failed to read Bee /pins reference response body")?;
+
+        if !status.is_success() {
+            bail!(
+                "Bee /pins reference check failed with status {}: {}",
+                status,
+                text
+            );
+        }
+
+        Ok(true)
+    }
+
+    pub async fn pin_reference(&self, reference: &str) -> Result<()> {
+        let url = format!("{}/pins/{}", self.base_url, reference);
+
+        let response = self
+            .http
+            .post(url)
+            .send()
+            .await
+            .context("Bee /pins reference pin request failed")?;
+
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .context("failed to read Bee /pins reference pin response body")?;
+
+        if !status.is_success() {
+            bail!(
+                "Bee /pins reference pin failed with status {}: {}",
+                status,
+                text
+            );
+        }
+
+        Ok(())
+    }
+
+    pub async fn unpin_reference(&self, reference: &str) -> Result<()> {
+        let url = format!("{}/pins/{}", self.base_url, reference);
+
+        let response = self
+            .http
+            .delete(url)
+            .send()
+            .await
+            .context("Bee /pins reference unpin request failed")?;
+
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .context("failed to read Bee /pins reference unpin response body")?;
+
+        if status == StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+
+        if !status.is_success() {
+            bail!(
+                "Bee /pins reference unpin failed with status {}: {}",
+                status,
+                text
+            );
+        }
+
+        Ok(())
     }
 }
 
