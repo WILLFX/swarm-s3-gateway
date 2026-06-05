@@ -1306,7 +1306,7 @@ mod tests {
                 action: RemoteGatewayAction::GetCiphertextObject,
                 ciphertext_payload: None,
                 encrypted_manifest_payload: None,
-                ciphertext_reference_hex: None,
+                ciphertext_reference_hex: Some("ab".repeat(32)),
                 expected_manifest_reference_hex: None,
                 plaintext_payload_present: false,
             },
@@ -1323,6 +1323,7 @@ mod tests {
             seen_request.action,
             RemoteGatewayAction::GetCiphertextObject
         );
+        assert_eq!(seen_request.ciphertext_reference_hex, Some("ab".repeat(32)));
         assert!(!seen_request.plaintext_payload_present);
         assert!(seen_request.ciphertext_payload.is_none());
         assert!(seen_request.encrypted_manifest_payload.is_none());
@@ -1374,7 +1375,7 @@ mod tests {
                 action: RemoteGatewayAction::GetCiphertextObject,
                 ciphertext_payload: None,
                 encrypted_manifest_payload: None,
-                ciphertext_reference_hex: None,
+                ciphertext_reference_hex: Some("ab".repeat(32)),
                 expected_manifest_reference_hex: None,
                 plaintext_payload_present: false,
             },
@@ -1985,7 +1986,7 @@ mod tests {
                 action: RemoteGatewayAction::GetCiphertextObject,
                 ciphertext_payload: None,
                 encrypted_manifest_payload: None,
-                ciphertext_reference_hex: None,
+                ciphertext_reference_hex: Some("ab".repeat(32)),
                 expected_manifest_reference_hex: None,
                 plaintext_payload_present: false,
             },
@@ -2219,7 +2220,7 @@ mod tests {
 
         let response = LocalTrustlessRuntime::execute_assembled_prepared_remote_request(
             &prepared,
-            LocalTrustlessRuntimeRemotePayload::None,
+            LocalTrustlessRuntimeRemotePayload::CiphertextReference("ab".repeat(32)),
             &executor,
         )
         .unwrap();
@@ -2233,6 +2234,7 @@ mod tests {
             seen_request.action,
             RemoteGatewayAction::GetCiphertextObject
         );
+        assert_eq!(seen_request.ciphertext_reference_hex, Some("ab".repeat(32)));
         assert_eq!(seen_request.bucket, "bucket");
         assert_eq!(seen_request.key, Some("secret.txt".to_owned()));
         assert!(!seen_request.plaintext_payload_present);
@@ -2281,6 +2283,20 @@ mod tests {
             )
             .unwrap_err(),
             LocalTrustlessRuntimeError::MissingDeleteEncryptedManifestPayload
+        );
+
+        assert_eq!(
+            LocalTrustlessRuntime::build_prepared_remote_request(
+                &delete_prepared,
+                LocalTrustlessRuntimeRemotePayload::DeleteEncryptedManifest {
+                    encrypted_manifest: b"encrypted-manifest".to_vec(),
+                    expected_manifest_reference_hex: None,
+                },
+            )
+            .unwrap_err(),
+            LocalTrustlessRuntimeError::GatewayBoundary(
+                CiphertextGatewayBoundaryError::MissingExpectedManifestReference
+            )
         );
     }
     #[test]
@@ -2379,6 +2395,33 @@ mod tests {
             Some("fa".repeat(32))
         );
         assert!(!delete_request.plaintext_payload_present);
+
+        let err = LocalTrustlessRuntime::build_prepared_delete_operation_remote_request(
+            &delete_prepared,
+            TrustlessDeleteOperationPlan {
+                delete_request: CiphertextGatewayRequest {
+                    bucket: "bucket".to_owned(),
+                    key: Some("secret.txt".to_owned()),
+                    action: RemoteGatewayAction::DeleteCiphertextObject,
+                    ciphertext_payload: None,
+                    encrypted_manifest_payload: Some(b"real-encrypted-manifest".to_vec()),
+                    ciphertext_reference_hex: None,
+                    expected_manifest_reference_hex: None,
+                    plaintext_payload_present: false,
+                },
+                encrypted_manifest: encrypted_manifest(b"real-encrypted-manifest"),
+                remote_payloads_are_ciphertext_only: true,
+                gateway_plaintext_access: false,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            LocalTrustlessRuntimeError::GatewayBoundary(
+                CiphertextGatewayBoundaryError::MissingExpectedManifestReference
+            )
+        );
     }
 
     #[test]

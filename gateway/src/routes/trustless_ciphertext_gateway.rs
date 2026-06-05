@@ -378,6 +378,11 @@ async fn execute_ciphertext_gateway_request(
                 "encrypted_manifest_hex",
             )
             .map_err(RouteError::into_response)?;
+            decode_required_reference(
+                request.expected_manifest_reference_hex.as_deref(),
+                "expected_manifest_reference_hex",
+            )
+            .map_err(RouteError::into_response)?;
 
             let manifest_reference = write_encrypted_manifest_with_anchor(
                 bee_client,
@@ -947,6 +952,10 @@ mod tests {
             self.inner.lock().unwrap().put_updates.clone()
         }
 
+        fn delete_updates(&self) -> Vec<(String, String)> {
+            self.inner.lock().unwrap().delete_updates.clone()
+        }
+
         fn fail_put_with_stale_root(&self) {
             self.inner.lock().unwrap().fail_put_with_stale_root = true;
         }
@@ -1208,6 +1217,25 @@ mod tests {
             "failed CAS may leave encrypted manifest bytes in Bee, but the chain root is unchanged"
         );
         assert_eq!(anchor.put_updates().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn gateway_bee_smoke_delete_requires_expected_manifest_reference_before_storage() {
+        let bee = SmokeBeeStorage::default();
+        let anchor = SmokeAnchorClient::default();
+        let authorized = authorized_bucket(Vec::new());
+
+        let mut delete = request("delete_ciphertext_object");
+        delete.encrypted_manifest_hex = Some(hex::encode(b"encrypted-manifest-after-delete"));
+
+        let err = execute_for_test(&bee, &anchor, authorized, delete)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert_eq!(err.1, "expected_manifest_reference_hex is required");
+        assert_eq!(bee.put_count(), 0);
+        assert!(anchor.delete_updates().is_empty());
     }
 
     #[tokio::test]

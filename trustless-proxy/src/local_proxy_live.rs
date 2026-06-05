@@ -1037,6 +1037,40 @@ x-s3w-recipient-keys: alice|aws-esdk-rust-recipient-key|1|true|{public_key_hex}\
     }
 
     #[test]
+    fn live_bind_executes_delete_request_through_engine() {
+        let seen_input = Arc::new(Mutex::new(None));
+        let executor = RecordingLiveExecutor {
+            seen_input: seen_input.clone(),
+            response: response(204, None),
+        };
+
+        let (addr, handle) = serve_one_in_thread(executor);
+        let request = format!(
+            "DELETE /bucket/secret.txt HTTP/1.1\r\nHost: 127.0.0.1\r\n{}\r\n",
+            live_headers()
+        );
+
+        let raw_response = send_raw_http(addr, request.as_bytes());
+        let result = handle.join().unwrap().unwrap();
+
+        assert_eq!(result.response.status_code, 204);
+        assert!(!result.gateway_plaintext_access);
+
+        let raw_response = String::from_utf8_lossy(&raw_response);
+        assert!(raw_response.starts_with("HTTP/1.1 204 No Content"));
+
+        let input = seen_input.lock().unwrap().clone().unwrap();
+        assert_eq!(input.http_request.method, LocalTrustlessHttpMethod::Delete);
+        assert_eq!(input.http_request.path, "/bucket/secret.txt");
+        assert_eq!(
+            input.http_context.object_key_id,
+            Some(hex::encode([2u8; 32]))
+        );
+        assert!(input.manifest_entry.is_none());
+        assert_eq!(input.envelope_context.object_key_id, hex::encode([2u8; 32]));
+    }
+
+    #[test]
     fn live_bind_rejects_plaintext_body_on_get() {
         let seen_input = Arc::new(Mutex::new(None));
         let executor = RecordingLiveExecutor {

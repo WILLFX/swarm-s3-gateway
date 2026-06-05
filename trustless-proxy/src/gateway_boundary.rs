@@ -40,6 +40,9 @@ pub enum CiphertextGatewayBoundaryError {
     #[error("ciphertext reference is required for object read gateway action")]
     MissingCiphertextReference,
 
+    #[error("expected manifest reference is required for DELETE ciphertext object")]
+    MissingExpectedManifestReference,
+
     #[error("encrypted manifest payload is required for manifest gateway action")]
     MissingEncryptedManifestPayload,
 
@@ -178,6 +181,9 @@ impl CiphertextGatewayBoundary {
             return Err(CiphertextGatewayBoundaryError::MissingEncryptedManifestPayload);
         }
 
+        let expected_manifest_reference_hex =
+            require_expected_manifest_reference(expected_manifest_reference_hex)?;
+
         Ok(CiphertextGatewayRequest {
             bucket: require_bucket(&route_plan.bucket)?,
             key: route_plan.key.clone(),
@@ -185,7 +191,7 @@ impl CiphertextGatewayBoundary {
             ciphertext_payload: None,
             encrypted_manifest_payload: Some(encrypted_manifest_payload),
             ciphertext_reference_hex: None,
-            expected_manifest_reference_hex,
+            expected_manifest_reference_hex: Some(expected_manifest_reference_hex),
             plaintext_payload_present: false,
         })
     }
@@ -229,6 +235,15 @@ fn require_ciphertext_reference(
     match ciphertext_reference_hex {
         Some(reference) if !reference.trim().is_empty() => Ok(reference),
         _ => Err(CiphertextGatewayBoundaryError::MissingCiphertextReference),
+    }
+}
+
+fn require_expected_manifest_reference(
+    expected_manifest_reference_hex: Option<String>,
+) -> Result<String, CiphertextGatewayBoundaryError> {
+    match expected_manifest_reference_hex {
+        Some(reference) if !reference.trim().is_empty() => Ok(reference),
+        _ => Err(CiphertextGatewayBoundaryError::MissingExpectedManifestReference),
     }
 }
 
@@ -468,6 +483,26 @@ mod tests {
             Some("02".repeat(32))
         );
         assert!(!request.plaintext_payload_present);
+    }
+
+    #[test]
+    fn delete_request_requires_expected_manifest_reference() {
+        let route_plan = make_route_plan(
+            TrustlessProxyOperation::DeleteObject,
+            RemoteGatewayAction::DeleteCiphertextObject,
+        );
+
+        let err = CiphertextGatewayBoundary::delete_ciphertext_request(
+            &route_plan,
+            b"manifest".to_vec(),
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            CiphertextGatewayBoundaryError::MissingExpectedManifestReference
+        );
     }
 
     #[test]
