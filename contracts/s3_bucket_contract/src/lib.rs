@@ -16,6 +16,7 @@ mod s3_bucket_contract {
     };
 
     const IDENTITY_GET_DELEGATION_SELECTOR: [u8; 4] = [0x0d, 0xb9, 0xc9, 0x10];
+    const MAX_BUCKET_LIST_LIMIT: u32 = 1_000;
 
     #[derive(scale::Encode, scale::Decode, scale_info::TypeInfo, Debug, PartialEq, Eq)]
     pub enum Error {
@@ -79,6 +80,10 @@ mod s3_bucket_contract {
     pub struct S3BucketContract {
         bucket_map: Mapping<[u8; 32], BucketRecord>,
         bucket_type_map: Mapping<[u8; 32], BucketType>,
+        bucket_ids: Vec<[u8; 32]>,
+        bucket_index_plus_one: Mapping<[u8; 32], u64>,
+        owner_bucket_ids: Mapping<AccountId32, Vec<[u8; 32]>>,
+        owner_bucket_index_plus_one: Mapping<(AccountId32, [u8; 32]), u64>,
         owner_nonces: Mapping<AccountId32, u64>,
         owner_catalog_roots: Mapping<AccountId32, Vec<u8>>,
         identity_contract: AccountId,
@@ -91,6 +96,10 @@ mod s3_bucket_contract {
             Self {
                 bucket_map: Mapping::default(),
                 bucket_type_map: Mapping::default(),
+                bucket_ids: Vec::new(),
+                bucket_index_plus_one: Mapping::default(),
+                owner_bucket_ids: Mapping::default(),
+                owner_bucket_index_plus_one: Mapping::default(),
                 owner_nonces: Mapping::default(),
                 owner_catalog_roots: Mapping::default(),
                 identity_contract,
@@ -135,6 +144,7 @@ mod s3_bucket_contract {
             self.bucket_map.insert(bucket_name_hash, &record);
             let bucket_type = Self::bucket_type_from_legacy_privacy(is_private);
             self.bucket_type_map.insert(bucket_name_hash, &bucket_type);
+            self.index_bucket(owner_bytes, bucket_name_hash);
             self.owner_catalog_roots
                 .insert(owner_bytes, &owner_catalog_root);
             self.bump_owner_nonce(owner_bytes)?;
@@ -192,6 +202,7 @@ mod s3_bucket_contract {
             self.bucket_map.insert(bucket_name_hash, &record);
             let bucket_type = Self::bucket_type_from_legacy_privacy(is_private);
             self.bucket_type_map.insert(bucket_name_hash, &bucket_type);
+            self.index_bucket(owner_bytes, bucket_name_hash);
             self.owner_catalog_roots
                 .insert(owner_bytes, &owner_catalog_root);
             self.bump_owner_nonce(owner_bytes)?;
@@ -252,6 +263,7 @@ mod s3_bucket_contract {
 
             self.bucket_map.insert(bucket_name_hash, &record);
             self.bucket_type_map.insert(bucket_name_hash, &bucket_type);
+            self.index_bucket(owner_bytes, bucket_name_hash);
             self.owner_catalog_roots
                 .insert(owner_bytes, &owner_catalog_root);
             self.bump_owner_nonce(owner_bytes)?;
@@ -290,6 +302,7 @@ mod s3_bucket_contract {
 
             self.bucket_map.remove(bucket_name_hash);
             self.bucket_type_map.remove(bucket_name_hash);
+            self.unindex_bucket(owner, bucket_name_hash);
             self.owner_catalog_roots.insert(owner, &owner_catalog_root);
             self.bump_owner_nonce(owner)?;
 
@@ -328,6 +341,7 @@ mod s3_bucket_contract {
 
             self.bucket_map.remove(bucket_name_hash);
             self.bucket_type_map.remove(bucket_name_hash);
+            self.unindex_bucket(owner, bucket_name_hash);
             self.owner_catalog_roots.insert(owner, &owner_catalog_root);
             self.bump_owner_nonce(owner)?;
 
@@ -449,6 +463,35 @@ mod s3_bucket_contract {
         #[ink(message)]
         pub fn get_bucket_type(&self, bucket_name_hash: [u8; 32]) -> Option<BucketType> {
             self.bucket_type_map.get(bucket_name_hash)
+        }
+
+        #[ink(message)]
+        pub fn get_bucket_count(&self) -> u32 {
+            core::cmp::min(self.bucket_ids.len(), u32::MAX as usize) as u32
+        }
+
+        #[ink(message)]
+        pub fn list_bucket_ids(&self, cursor: u32, limit: u32) -> Vec<[u8; 32]> {
+            page_bucket_ids(&self.bucket_ids, cursor, limit)
+        }
+
+        #[ink(message)]
+        pub fn get_owner_bucket_count(&self, owner: AccountId32) -> u32 {
+            self.owner_bucket_ids
+                .get(owner)
+                .map(|bucket_ids| core::cmp::min(bucket_ids.len(), u32::MAX as usize) as u32)
+                .unwrap_or(0)
+        }
+
+        #[ink(message)]
+        pub fn list_owner_bucket_ids(
+            &self,
+            owner: AccountId32,
+            cursor: u32,
+            limit: u32,
+        ) -> Vec<[u8; 32]> {
+            let bucket_ids = self.owner_bucket_ids.get(owner).unwrap_or_default();
+            page_bucket_ids(&bucket_ids, cursor, limit)
         }
 
         #[ink(message)]
@@ -587,6 +630,69 @@ mod s3_bucket_contract {
             Ok(())
         }
 
+        fn index_bucket(&mut self, owner: AccountId32, bucket_name_hash: [u8; 32]) {
+            if self
+                .bucket_index_plus_one
+                .get(bucket_name_hash)
+                .unwrap_or_default()
+                != 0
+            {
+                return;
+            }
+
+            self.bucket_ids.push(bucket_name_hash);
+            self.bucket_index_plus_one
+                .insert(bucket_name_hash, &(self.bucket_ids.len() as u64));
+
+            let mut owner_bucket_ids = self.owner_bucket_ids.get(owner).unwrap_or_default();
+            owner_bucket_ids.push(bucket_name_hash);
+            self.owner_bucket_index_plus_one
+                .insert((owner, bucket_name_hash), &(owner_bucket_ids.len() as u64));
+            self.owner_bucket_ids.insert(owner, &owner_bucket_ids);
+        }
+
+        fn unindex_bucket(&mut self, owner: AccountId32, bucket_name_hash: [u8; 32]) {
+            if let Some(index_plus_one) = self.bucket_index_plus_one.get(bucket_name_hash) {
+                if index_plus_one > 0 && !self.bucket_ids.is_empty() {
+                    let index = (index_plus_one - 1) as usize;
+                    if index < self.bucket_ids.len() {
+                        let last_index = self.bucket_ids.len().saturating_sub(1);
+                        let last_bucket = self.bucket_ids[last_index];
+                        self.bucket_ids.swap_remove(index);
+                        if last_bucket != bucket_name_hash {
+                            self.bucket_index_plus_one
+                                .insert(last_bucket, &index_plus_one);
+                        }
+                    }
+                }
+                self.bucket_index_plus_one.remove(bucket_name_hash);
+            }
+
+            let owner_index_key = (owner, bucket_name_hash);
+            if let Some(index_plus_one) = self.owner_bucket_index_plus_one.get(owner_index_key) {
+                let mut owner_bucket_ids = self.owner_bucket_ids.get(owner).unwrap_or_default();
+                if index_plus_one > 0 && !owner_bucket_ids.is_empty() {
+                    let index = (index_plus_one - 1) as usize;
+                    if index < owner_bucket_ids.len() {
+                        let last_index = owner_bucket_ids.len().saturating_sub(1);
+                        let last_bucket = owner_bucket_ids[last_index];
+                        owner_bucket_ids.swap_remove(index);
+                        if last_bucket != bucket_name_hash {
+                            self.owner_bucket_index_plus_one
+                                .insert((owner, last_bucket), &index_plus_one);
+                        }
+                    }
+                }
+                self.owner_bucket_index_plus_one.remove(owner_index_key);
+
+                if owner_bucket_ids.is_empty() {
+                    self.owner_bucket_ids.remove(owner);
+                } else {
+                    self.owner_bucket_ids.insert(owner, &owner_bucket_ids);
+                }
+            }
+        }
+
         fn fetch_delegation(
             &self,
             owner: AccountId32,
@@ -714,6 +820,17 @@ mod s3_bucket_contract {
         }
     }
 
+    fn page_bucket_ids(bucket_ids: &[[u8; 32]], cursor: u32, limit: u32) -> Vec<[u8; 32]> {
+        let start = cursor as usize;
+        if start >= bucket_ids.len() {
+            return Vec::new();
+        }
+
+        let limit = core::cmp::min(limit, MAX_BUCKET_LIST_LIMIT) as usize;
+        let end = core::cmp::min(start.saturating_add(limit), bucket_ids.len());
+        bucket_ids[start..end].to_vec()
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -791,6 +908,46 @@ mod s3_bucket_contract {
                 contract.domain_payload(b"s3gw/v1/increment_encryption_version", bucket_name_hash);
             payload.extend_from_slice(&nonce.to_le_bytes());
             payload
+        }
+
+        fn create_bucket_with_pair(
+            contract: &mut S3BucketContract,
+            pair: &sr25519::Pair,
+            bucket_name_hash: [u8; 32],
+            is_private: bool,
+        ) {
+            let owner = account_from_pair(pair);
+            let owner_bytes = account_bytes_from_pair(pair);
+            set_caller(owner);
+            let nonce = contract.get_owner_nonce(owner_bytes);
+            let sig = pair.sign(&create_payload(
+                contract,
+                bucket_name_hash,
+                is_private,
+                nonce,
+            ));
+
+            assert_eq!(
+                contract.create_bucket(owner, bucket_name_hash, is_private, sig.0, Vec::new()),
+                Ok(())
+            );
+        }
+
+        fn delete_bucket_with_pair(
+            contract: &mut S3BucketContract,
+            pair: &sr25519::Pair,
+            bucket_name_hash: [u8; 32],
+        ) {
+            let owner = account_from_pair(pair);
+            let owner_bytes = account_bytes_from_pair(pair);
+            set_caller(owner);
+            let nonce = contract.get_owner_nonce(owner_bytes);
+            let sig = pair.sign(&delete_payload(contract, bucket_name_hash, nonce));
+
+            assert_eq!(
+                contract.delete_bucket(bucket_name_hash, sig.0, Vec::new()),
+                Ok(())
+            );
         }
 
         #[ink::test]
@@ -885,6 +1042,10 @@ mod s3_bucket_contract {
                 c.get_owner_catalog_root(owner_bytes),
                 b"catalog-v1".to_vec()
             );
+            assert_eq!(c.get_bucket_count(), 1);
+            assert_eq!(c.list_bucket_ids(0, 10), vec![hash(1)]);
+            assert_eq!(c.get_owner_bucket_count(owner_bytes), 1);
+            assert_eq!(c.list_owner_bucket_ids(owner_bytes, 0, 10), vec![hash(1)]);
         }
 
         #[ink::test]
@@ -943,6 +1104,85 @@ mod s3_bucket_contract {
 
             assert_eq!(c.delete_bucket(hash(1), delete_sig.0, Vec::new()), Ok(()));
             assert_eq!(c.get_bucket_type(hash(1)), None);
+        }
+
+        #[ink::test]
+        fn bucket_index_lists_created_buckets_with_pagination() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+
+            create_bucket_with_pair(&mut c, &pair, hash(1), false);
+            create_bucket_with_pair(&mut c, &pair, hash(2), true);
+            create_bucket_with_pair(&mut c, &pair, hash(3), false);
+
+            assert_eq!(c.get_bucket_count(), 3);
+            assert_eq!(c.list_bucket_ids(0, 2), vec![hash(1), hash(2)]);
+            assert_eq!(c.list_bucket_ids(2, 2), vec![hash(3)]);
+            assert_eq!(c.list_bucket_ids(3, 2), Vec::<[u8; 32]>::new());
+            assert_eq!(c.list_bucket_ids(0, 0), Vec::<[u8; 32]>::new());
+        }
+
+        #[ink::test]
+        fn owner_bucket_index_is_scoped_by_owner() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let owner_one = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner_two = sr25519::Pair::from_seed(&[2u8; 32]);
+            let owner_one_bytes = account_bytes_from_pair(&owner_one);
+            let owner_two_bytes = account_bytes_from_pair(&owner_two);
+
+            create_bucket_with_pair(&mut c, &owner_one, hash(1), false);
+            create_bucket_with_pair(&mut c, &owner_two, hash(2), false);
+            create_bucket_with_pair(&mut c, &owner_one, hash(3), true);
+
+            assert_eq!(c.get_bucket_count(), 3);
+            assert_eq!(c.get_owner_bucket_count(owner_one_bytes), 2);
+            assert_eq!(c.get_owner_bucket_count(owner_two_bytes), 1);
+            assert_eq!(
+                c.list_owner_bucket_ids(owner_one_bytes, 0, 10),
+                vec![hash(1), hash(3)]
+            );
+            assert_eq!(
+                c.list_owner_bucket_ids(owner_two_bytes, 0, 10),
+                vec![hash(2)]
+            );
+        }
+
+        #[ink::test]
+        fn delete_bucket_removes_ids_from_global_and_owner_indexes() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let owner_one = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner_two = sr25519::Pair::from_seed(&[2u8; 32]);
+            let owner_one_bytes = account_bytes_from_pair(&owner_one);
+            let owner_two_bytes = account_bytes_from_pair(&owner_two);
+
+            create_bucket_with_pair(&mut c, &owner_one, hash(1), false);
+            create_bucket_with_pair(&mut c, &owner_one, hash(2), false);
+            create_bucket_with_pair(&mut c, &owner_two, hash(3), true);
+
+            delete_bucket_with_pair(&mut c, &owner_one, hash(1));
+
+            assert_eq!(c.get_bucket(hash(1)), None);
+            assert_eq!(c.get_bucket_count(), 2);
+            assert_eq!(c.list_bucket_ids(0, 10), vec![hash(3), hash(2)]);
+            assert_eq!(c.get_owner_bucket_count(owner_one_bytes), 1);
+            assert_eq!(
+                c.list_owner_bucket_ids(owner_one_bytes, 0, 10),
+                vec![hash(2)]
+            );
+            assert_eq!(c.get_owner_bucket_count(owner_two_bytes), 1);
+            assert_eq!(
+                c.list_owner_bucket_ids(owner_two_bytes, 0, 10),
+                vec![hash(3)]
+            );
         }
 
         #[ink::test]
