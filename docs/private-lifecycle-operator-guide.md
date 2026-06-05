@@ -235,6 +235,37 @@ Public bucket responses may still expose the Swarm reference header.
 
 Bee/Swarm writes are staged before chain compare-and-swap root updates. If a chain CAS fails after Bee accepts encrypted payload or manifest bytes, those bytes may remain in Bee as unanchored orphans. They are not authoritative bucket state: gateway reads, heads, lists, and deletes must resolve from the current chain-anchored roots, not from staged Bee pointer state. Operators may treat unanchored Bee references as storage-accounting or garbage-collection candidates once a reconciliation process exists.
 
+## Bee orphan reconciliation
+
+The gateway can keep a local JSONL write journal for Bee references it creates:
+
+```bash
+export S3GW_BEE_WRITE_JOURNAL_PATH="./var/s3gw-bee-write-journal.jsonl"
+```
+
+When this variable is set, the gateway records successful Bee writes plus typed chain anchor attempts and anchor results. Bee uploads are pinned at write time so an operator can later account for and explicitly unpin failed-CAS candidates.
+
+Run reconciliation in dry-run mode first:
+
+```bash
+cargo run -p gateway --bin reconcile_orphans -- \
+  --journal "$S3GW_BEE_WRITE_JOURNAL_PATH"
+```
+
+To apply unpins, pass `--apply`:
+
+```bash
+cargo run -p gateway --bin reconcile_orphans -- \
+  --journal "$S3GW_BEE_WRITE_JOURNAL_PATH" \
+  --apply
+```
+
+The worker does not globally enumerate chain buckets. It only checks buckets named in the gateway's own journal and verifies each candidate against `get_bucket(bucket_id)` plus the current chain-root manifest state the gateway can read.
+
+Journal entries with no anchor result are reported but not automatically unpinned. A missing result may mean the gateway request is still in flight, so automatic cleanup is only allowed after an explicit failed anchor result and a current-chain reachability check.
+
+Trustless private ciphertext payload references are report-only for this worker. The remote gateway cannot decrypt trustless manifests, so it cannot prove whether a ciphertext payload reference is still reachable from the current encrypted manifest. Trustless ciphertext payload cleanup must be driven by the local trustless proxy or another component that has the manifest plaintext/recipient context. The worker may unpin failed trustless encrypted manifest roots only when they are not the current chain bucket manifest root.
+
 ## Operator signer environment variables
 
 The gateway and helper binaries must not silently use development signers in production.

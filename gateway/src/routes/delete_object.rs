@@ -4,11 +4,16 @@ use axum::{
     response::Response,
 };
 use common::types::{AwsPrincipal, ChainBucketRecord, ChainBucketType};
+use tracing::warn;
 
 use crate::{
     app_state::AppState,
     crypto::bucket_name_hash,
     manifest::{read_private_bucket_manifest_v2, write_private_bucket_manifest_v2, BucketManifest},
+    orphan_reconciliation::{
+        record_anchor_attempt, record_anchor_failure, record_anchor_success, AnchorAttemptEvent,
+        AnchorJournalAction, GatewayBeeReference, GatewayBeeReferenceKind, JournalBucketType,
+    },
     s3_response::{chain_error_response, no_content_response, S3ErrorKind, S3ErrorResponse},
     traits::AnchorClient,
 };
@@ -109,7 +114,36 @@ pub async fn handle(
         }
     };
 
-    if let Err(err) = anchor_delete_object_manifest_root(
+    let attempt_event_id = match record_anchor_attempt(
+        state.orphan_journal.as_ref(),
+        AnchorAttemptEvent {
+            action: AnchorJournalAction::PublicDelete,
+            bucket: bucket.clone(),
+            owner_hex: hex::encode(principal.owner),
+            bucket_id_hex: hex::encode(bucket_id),
+            bucket_type: JournalBucketType::Public,
+            expected_bucket_manifest_root_hex: hex::encode(&chain_bucket.bucket_manifest_root),
+            new_bucket_manifest_root_hex: new_bucket_record.manifest_reference.clone(),
+            references: vec![GatewayBeeReference::new(
+                new_bucket_record.manifest_reference.clone(),
+                GatewayBeeReferenceKind::PublicBucketManifest,
+            )],
+        },
+    )
+    .await
+    {
+        Ok(attempt_event_id) => attempt_event_id,
+        Err(err) => {
+            return S3ErrorResponse::new(S3ErrorKind::InternalError)
+                .with_message(format!(
+                    "failed to record public DELETE anchor attempt: {err}"
+                ))
+                .with_resource(format!("/{bucket}/{key}"))
+                .into_response();
+        }
+    };
+
+    match anchor_delete_object_manifest_root(
         state.anchor_client.as_ref(),
         bucket_id,
         hex::encode(&chain_bucket.bucket_manifest_root),
@@ -117,7 +151,22 @@ pub async fn handle(
     )
     .await
     {
-        return chain_error_response(err);
+        Ok(tx_hash) => {
+            if let Err(err) =
+                record_anchor_success(state.orphan_journal.as_ref(), attempt_event_id, tx_hash)
+                    .await
+            {
+                warn!("failed to record public DELETE anchor success: {err}");
+            }
+        }
+        Err(err) => {
+            if let Err(journal_err) =
+                record_anchor_failure(state.orphan_journal.as_ref(), attempt_event_id, &err).await
+            {
+                warn!("failed to record public DELETE anchor failure: {journal_err}");
+            }
+            return chain_error_response(err);
+        }
     }
 
     no_content_response()
@@ -195,7 +244,36 @@ async fn handle_private_delete_object(
         }
     };
 
-    if let Err(err) = anchor_delete_object_manifest_root(
+    let attempt_event_id = match record_anchor_attempt(
+        state.orphan_journal.as_ref(),
+        AnchorAttemptEvent {
+            action: AnchorJournalAction::TrustedPrivateDelete,
+            bucket: bucket.to_string(),
+            owner_hex: hex::encode(principal.owner),
+            bucket_id_hex: hex::encode(bucket_id),
+            bucket_type: JournalBucketType::TrustedGatewayPrivate,
+            expected_bucket_manifest_root_hex: hex::encode(&chain_bucket.bucket_manifest_root),
+            new_bucket_manifest_root_hex: new_bucket_record.manifest_reference.clone(),
+            references: vec![GatewayBeeReference::new(
+                new_bucket_record.manifest_reference.clone(),
+                GatewayBeeReferenceKind::PrivateBucketManifest,
+            )],
+        },
+    )
+    .await
+    {
+        Ok(attempt_event_id) => attempt_event_id,
+        Err(err) => {
+            return S3ErrorResponse::new(S3ErrorKind::InternalError)
+                .with_message(format!(
+                    "failed to record private DELETE anchor attempt: {err}"
+                ))
+                .with_resource(format!("/{bucket}/{key}"))
+                .into_response();
+        }
+    };
+
+    match anchor_delete_object_manifest_root(
         state.anchor_client.as_ref(),
         bucket_id,
         hex::encode(&chain_bucket.bucket_manifest_root),
@@ -203,7 +281,22 @@ async fn handle_private_delete_object(
     )
     .await
     {
-        return chain_error_response(err);
+        Ok(tx_hash) => {
+            if let Err(err) =
+                record_anchor_success(state.orphan_journal.as_ref(), attempt_event_id, tx_hash)
+                    .await
+            {
+                warn!("failed to record private DELETE anchor success: {err}");
+            }
+        }
+        Err(err) => {
+            if let Err(journal_err) =
+                record_anchor_failure(state.orphan_journal.as_ref(), attempt_event_id, &err).await
+            {
+                warn!("failed to record private DELETE anchor failure: {journal_err}");
+            }
+            return chain_error_response(err);
+        }
     }
 
     no_content_response()

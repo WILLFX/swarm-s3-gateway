@@ -1,7 +1,12 @@
 use crate::{
     app_state::AppState,
-    bee::client::{BeeClient, BeeStorage},
+    bee::client::BeeStorage,
     crypto::bucket_name_hash,
+    orphan_reconciliation::{
+        record_anchor_attempt, record_anchor_failure, record_anchor_success, AnchorAttemptEvent,
+        AnchorJournalAction, GatewayBeeReference, GatewayBeeReferenceKind, GatewayWriteJournal,
+        JournalBucketType,
+    },
     traits::AnchorClient,
 };
 use axum::{
@@ -12,6 +17,8 @@ use axum::{
 use bytes::Bytes;
 use common::types::{AwsPrincipal, ChainBucketRecord, ChainBucketType};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tracing::warn;
 
 const WIRE_VERSION: u32 = 1;
 const TRUSTLESS_MANIFEST_KEY: &str = "__s3w_trustless_manifest";
@@ -163,6 +170,7 @@ fn error_chain_contains_stale_bucket_manifest_root(err: &anyhow::Error) -> bool 
 #[derive(Debug, Clone)]
 struct AuthorizedTrustlessBucket {
     bucket_id: [u8; 32],
+    bucket: String,
     storage_bucket: String,
     chain_bucket: ChainBucketRecord,
 }
@@ -182,6 +190,7 @@ pub async fn handle(
     execute_ciphertext_gateway_request(
         state.bee_client.as_ref(),
         state.anchor_client.as_ref(),
+        state.orphan_journal.as_ref(),
         authorized,
         action,
         request,
@@ -223,6 +232,7 @@ async fn authorize_trustless_bucket(
 
     Ok(AuthorizedTrustlessBucket {
         bucket_id,
+        bucket: bucket.to_string(),
         storage_bucket: hex::encode(bucket_id),
         chain_bucket,
     })
@@ -231,6 +241,7 @@ async fn authorize_trustless_bucket(
 async fn execute_ciphertext_gateway_request(
     bee_client: &dyn BeeStorage,
     anchor_client: &dyn AnchorClient,
+    orphan_journal: Option<&Arc<GatewayWriteJournal>>,
     authorized: AuthorizedTrustlessBucket,
     action: CiphertextGatewayAction,
     request: CiphertextGatewayRequest,
@@ -359,6 +370,7 @@ async fn execute_ciphertext_gateway_request(
             let manifest_reference = write_encrypted_manifest_with_anchor(
                 bee_client,
                 anchor_client,
+                orphan_journal,
                 &authorized,
                 action,
                 encrypted_manifest,
@@ -387,6 +399,7 @@ async fn execute_ciphertext_gateway_request(
             let manifest_reference = write_encrypted_manifest_with_anchor(
                 bee_client,
                 anchor_client,
+                orphan_journal,
                 &authorized,
                 action,
                 encrypted_manifest,
@@ -458,6 +471,7 @@ impl CiphertextGatewayResponse {
 async fn write_encrypted_manifest_with_anchor(
     bee_client: &dyn BeeStorage,
     anchor_client: &dyn AnchorClient,
+    orphan_journal: Option<&Arc<GatewayWriteJournal>>,
     authorized: &AuthorizedTrustlessBucket,
     action: CiphertextGatewayAction,
     encrypted_manifest: Vec<u8>,
@@ -478,6 +492,35 @@ async fn write_encrypted_manifest_with_anchor(
         .map_err(|_| RouteError::storage_failure())?;
 
     let expected_root = hex::encode(&authorized.chain_bucket.bucket_manifest_root);
+    let journal_action = match action {
+        CiphertextGatewayAction::PutEncryptedManifest => {
+            AnchorJournalAction::TrustlessPutEncryptedManifest
+        }
+        CiphertextGatewayAction::DeleteCiphertextObject => {
+            AnchorJournalAction::TrustlessDeleteEncryptedManifest
+        }
+        _ => unreachable!("manifest anchor writes are only valid for manifest actions"),
+    };
+
+    let attempt_event_id = record_anchor_attempt(
+        orphan_journal,
+        AnchorAttemptEvent {
+            action: journal_action,
+            bucket: authorized.bucket.clone(),
+            owner_hex: hex::encode(authorized.chain_bucket.owner),
+            bucket_id_hex: hex::encode(authorized.bucket_id),
+            bucket_type: JournalBucketType::TrustlessPrivate,
+            expected_bucket_manifest_root_hex: expected_root.clone(),
+            new_bucket_manifest_root_hex: put.swarm_reference.clone(),
+            references: vec![GatewayBeeReference::new(
+                put.swarm_reference.clone(),
+                GatewayBeeReferenceKind::TrustlessEncryptedManifest,
+            )],
+        },
+    )
+    .await
+    .map_err(|_| RouteError::storage_failure())?;
+
     let result = match action {
         CiphertextGatewayAction::PutEncryptedManifest => {
             anchor_client
@@ -500,7 +543,24 @@ async fn write_encrypted_manifest_with_anchor(
         _ => unreachable!("manifest anchor writes are only valid for manifest actions"),
     };
 
-    result.map_err(RouteError::anchor_failure)?;
+    match result {
+        Ok(tx_hash) => {
+            if let Err(err) = record_anchor_success(orphan_journal, attempt_event_id, tx_hash).await
+            {
+                warn!("failed to record trustless encrypted manifest anchor success: {err}");
+            }
+        }
+        Err(err) => {
+            if let Err(journal_err) =
+                record_anchor_failure(orphan_journal, attempt_event_id, &err).await
+            {
+                warn!(
+                    "failed to record trustless encrypted manifest anchor failure: {journal_err}"
+                );
+            }
+            return Err(RouteError::anchor_failure(err));
+        }
+    }
 
     Ok(put.swarm_reference)
 }
@@ -720,6 +780,7 @@ fn invalid_reference_message(field_name: &'static str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bee::client::BeeClient;
 
     fn request(action: &str) -> CiphertextGatewayRequest {
         CiphertextGatewayRequest {
@@ -740,6 +801,7 @@ mod tests {
         let bucket_id = [7u8; 32];
         AuthorizedTrustlessBucket {
             bucket_id,
+            bucket: "bucket-a".to_string(),
             storage_bucket: hex::encode(bucket_id),
             chain_bucket: ChainBucketRecord {
                 owner: [9u8; 32],
@@ -761,7 +823,7 @@ mod tests {
         let action = CiphertextGatewayAction::parse(request.action.as_str())
             .map_err(RouteError::into_response)?;
 
-        execute_ciphertext_gateway_request(bee, anchor, authorized, action, request).await
+        execute_ciphertext_gateway_request(bee, anchor, None, authorized, action, request).await
     }
 
     #[test]
