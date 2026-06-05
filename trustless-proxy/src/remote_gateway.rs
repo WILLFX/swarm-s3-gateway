@@ -27,6 +27,9 @@ pub enum RemoteGatewayClientError {
     #[error("encrypted manifest payload is required for DELETE ciphertext object")]
     MissingDeleteEncryptedManifestPayload,
 
+    #[error("ciphertext reference is required for object read gateway action")]
+    MissingCiphertextReference,
+
     #[error("request action does not allow ciphertext payload: {0:?}")]
     UnexpectedCiphertextPayload(RemoteGatewayAction),
 
@@ -177,6 +180,11 @@ fn validate_request(request: &CiphertextGatewayRequest) -> Result<(), RemoteGate
                     RemoteGatewayClientError::UnexpectedExpectedManifestReference(request.action),
                 );
             }
+
+            match request.ciphertext_reference_hex.as_deref() {
+                Some(reference) if !reference.trim().is_empty() => {}
+                _ => return Err(RemoteGatewayClientError::MissingCiphertextReference),
+            }
         }
         RemoteGatewayAction::ListCiphertextManifest => {
             if request.ciphertext_payload.is_some() {
@@ -321,7 +329,8 @@ mod tests {
 
     #[test]
     fn executor_forwards_get_request_without_payloads() {
-        let request = request(RemoteGatewayAction::GetCiphertextObject);
+        let mut request = request(RemoteGatewayAction::GetCiphertextObject);
+        request.ciphertext_reference_hex = Some("ab".repeat(32));
 
         let client = MockRemoteGatewayClient::new(CiphertextGatewayResponse {
             ciphertext_payload: Some(b"ciphertext".to_vec()),
@@ -334,6 +343,14 @@ mod tests {
         assert_eq!(response.action, RemoteGatewayAction::GetCiphertextObject);
         assert_eq!(response.ciphertext_payload, Some(b"ciphertext".to_vec()));
         assert!(!response.gateway_plaintext_access);
+        assert_eq!(
+            executor
+                .client
+                .seen_request()
+                .unwrap()
+                .ciphertext_reference_hex,
+            Some("ab".repeat(32))
+        );
     }
 
     #[test]
@@ -405,6 +422,32 @@ mod tests {
                 .ciphertext_reference_hex,
             Some("ab".repeat(32))
         );
+    }
+
+    #[test]
+    fn remote_gateway_requires_ciphertext_reference_for_reads() {
+        let request = request(RemoteGatewayAction::GetCiphertextObject);
+
+        let client =
+            MockRemoteGatewayClient::new(response(RemoteGatewayAction::GetCiphertextObject));
+        let executor = TrustlessRemoteGatewayExecutor::new(client);
+
+        let err = executor.execute(request).unwrap_err();
+
+        assert_eq!(err, RemoteGatewayClientError::MissingCiphertextReference);
+        assert!(executor.client.seen_request().is_none());
+
+        let mut request = request(RemoteGatewayAction::HeadCiphertextObject);
+        request.ciphertext_reference_hex = Some(" ".to_owned());
+
+        let client =
+            MockRemoteGatewayClient::new(response(RemoteGatewayAction::HeadCiphertextObject));
+        let executor = TrustlessRemoteGatewayExecutor::new(client);
+
+        let err = executor.execute(request).unwrap_err();
+
+        assert_eq!(err, RemoteGatewayClientError::MissingCiphertextReference);
+        assert!(executor.client.seen_request().is_none());
     }
 
     #[test]
@@ -575,7 +618,8 @@ mod tests {
 
     #[test]
     fn executor_rejects_gateway_plaintext_response() {
-        let request = request(RemoteGatewayAction::GetCiphertextObject);
+        let mut request = request(RemoteGatewayAction::GetCiphertextObject);
+        request.ciphertext_reference_hex = Some("ab".repeat(32));
 
         let client = MockRemoteGatewayClient::new(CiphertextGatewayResponse {
             gateway_plaintext_access: true,

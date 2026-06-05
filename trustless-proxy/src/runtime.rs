@@ -1010,13 +1010,15 @@ fn require_no_remote_payload(
 fn object_ciphertext_reference_payload(
     operation: LocalS3Operation,
     payload: LocalTrustlessRuntimeRemotePayload,
-) -> Result<Option<String>, LocalTrustlessRuntimeError> {
+) -> Result<String, LocalTrustlessRuntimeError> {
     match payload {
-        LocalTrustlessRuntimeRemotePayload::None => Ok(None),
+        LocalTrustlessRuntimeRemotePayload::None => {
+            Err(LocalTrustlessRuntimeError::MissingCiphertextReference)
+        }
         LocalTrustlessRuntimeRemotePayload::CiphertextReference(reference)
             if !reference.trim().is_empty() =>
         {
-            Ok(Some(reference))
+            Ok(reference)
         }
         LocalTrustlessRuntimeRemotePayload::CiphertextReference(_) => {
             Err(LocalTrustlessRuntimeError::MissingCiphertextReference)
@@ -2013,37 +2015,59 @@ mod tests {
             LocalTrustlessRuntime::prepare_request(request_input(LocalS3Operation::GetObject))
                 .unwrap();
 
-        let get_request = LocalTrustlessRuntime::build_prepared_remote_request(
+        let get_err = LocalTrustlessRuntime::build_prepared_remote_request(
             &get_prepared,
             LocalTrustlessRuntimeRemotePayload::None,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            get_err,
+            LocalTrustlessRuntimeError::MissingCiphertextReference
+        );
+
+        let get_request = LocalTrustlessRuntime::build_prepared_remote_request(
+            &get_prepared,
+            LocalTrustlessRuntimeRemotePayload::CiphertextReference("ab".repeat(32)),
         )
         .unwrap();
 
         assert_eq!(get_request.bucket, "bucket");
         assert_eq!(get_request.key, Some("secret.txt".to_owned()));
         assert_eq!(get_request.action, RemoteGatewayAction::GetCiphertextObject);
-        assert!(get_request.ciphertext_reference_hex.is_none());
+        assert_eq!(get_request.ciphertext_reference_hex, Some("ab".repeat(32)));
         assert!(get_request.ciphertext_payload.is_none());
         assert!(get_request.encrypted_manifest_payload.is_none());
         assert!(!get_request.plaintext_payload_present);
 
         let direct_get_request = LocalTrustlessRuntime::build_prepared_remote_request(
             &get_prepared,
-            LocalTrustlessRuntimeRemotePayload::CiphertextReference("ab".repeat(32)),
+            LocalTrustlessRuntimeRemotePayload::CiphertextReference("ac".repeat(32)),
         )
         .unwrap();
         assert_eq!(
             direct_get_request.ciphertext_reference_hex,
-            Some("ab".repeat(32))
+            Some("ac".repeat(32))
         );
 
         let head_prepared =
             LocalTrustlessRuntime::prepare_request(request_input(LocalS3Operation::HeadObject))
                 .unwrap();
 
-        let head_request = LocalTrustlessRuntime::build_prepared_remote_request(
+        let head_err = LocalTrustlessRuntime::build_prepared_remote_request(
             &head_prepared,
             LocalTrustlessRuntimeRemotePayload::None,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            head_err,
+            LocalTrustlessRuntimeError::MissingCiphertextReference
+        );
+
+        let head_request = LocalTrustlessRuntime::build_prepared_remote_request(
+            &head_prepared,
+            LocalTrustlessRuntimeRemotePayload::CiphertextReference("bc".repeat(32)),
         )
         .unwrap();
 
@@ -2053,19 +2077,19 @@ mod tests {
             head_request.action,
             RemoteGatewayAction::HeadCiphertextObject
         );
-        assert!(head_request.ciphertext_reference_hex.is_none());
+        assert_eq!(head_request.ciphertext_reference_hex, Some("bc".repeat(32)));
         assert!(head_request.ciphertext_payload.is_none());
         assert!(head_request.encrypted_manifest_payload.is_none());
         assert!(!head_request.plaintext_payload_present);
 
         let direct_head_request = LocalTrustlessRuntime::build_prepared_remote_request(
             &head_prepared,
-            LocalTrustlessRuntimeRemotePayload::CiphertextReference("bc".repeat(32)),
+            LocalTrustlessRuntimeRemotePayload::CiphertextReference("bd".repeat(32)),
         )
         .unwrap();
         assert_eq!(
             direct_head_request.ciphertext_reference_hex,
-            Some("bc".repeat(32))
+            Some("bd".repeat(32))
         );
 
         let list_prepared = LocalTrustlessRuntime::prepare_request(LocalTrustlessRequestInput {

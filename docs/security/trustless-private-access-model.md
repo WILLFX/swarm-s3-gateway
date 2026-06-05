@@ -145,13 +145,15 @@ The upload path for a trustless private bucket is:
 The download path for a trustless private bucket is:
 
 1. A normal S3 client sends a GET request to the local proxy.
-2. The local proxy forwards the authorized ciphertext request to the remote gateway.
-3. The remote gateway verifies authorization and returns ciphertext plus required encrypted manifest or envelope data.
-4. The local proxy selects an encrypted data-key envelope addressed to the local account.
-5. The local proxy unwraps the data key locally.
-6. The local proxy uses `aws-esdk` to decrypt the object locally.
-7. The local proxy returns plaintext to the local S3 client.
-8. The remote gateway never sees the plaintext response.
+2. The local proxy reads the chain-anchored encrypted manifest and decrypts it locally.
+3. The local proxy resolves the object's ciphertext reference from that manifest.
+4. The local proxy forwards an authorized read request containing that exact ciphertext reference to the remote gateway.
+5. The remote gateway verifies authorization and returns only the referenced ciphertext object.
+6. The local proxy selects an encrypted data-key envelope addressed to the local account.
+7. The local proxy unwraps the data key locally.
+8. The local proxy uses `aws-esdk` to decrypt the object locally.
+9. The local proxy returns plaintext to the local S3 client.
+10. The remote gateway never sees the plaintext response.
 
 ## List and manifest flow
 
@@ -214,6 +216,7 @@ For trustless private buckets, the remote gateway is responsible for:
 - Chain anchoring
 - CAS root updates
 - Returning encrypted blobs, encrypted manifests, and encrypted envelope data
+- Serving object GET and HEAD reads only for explicit ciphertext references resolved by the local proxy from the encrypted manifest
 
 The remote gateway must not be responsible for:
 
@@ -223,6 +226,7 @@ The remote gateway must not be responsible for:
 - Data-key unwrapping
 - Private manifest decryption
 - Private owner catalog decryption
+- Choosing object ciphertext by mutable bucket/key pointer fallback for trustless object reads
 
 ## Compatibility model
 
@@ -250,3 +254,5 @@ Migration requires an explicit client-side re-encryption process:
 For trustless private buckets, the gateway must be able to prove authorization and store or return ciphertext, but it must not be able to derive or recover plaintext private data, plaintext private manifests, plaintext owner catalogs, or plaintext data keys.
 
 The chain-anchored encrypted manifest root is the authoritative trustless bucket state. A failed manifest-root CAS can leave ciphertext objects or encrypted manifest bytes staged in Bee/Swarm, but those unanchored references must not become visible through trustless GET, HEAD, LIST, or DELETE semantics unless a later chain root anchors them.
+
+Trustless object GET and HEAD requests must carry an explicit `ciphertext_reference_hex` resolved from the locally decrypted, chain-anchored encrypted manifest. Missing references are rejected; the remote gateway must not fall back to bucket/key pointer lookup for object reads.
