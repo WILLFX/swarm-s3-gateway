@@ -256,3 +256,5 @@ For trustless private buckets, the gateway must be able to prove authorization a
 The chain-anchored encrypted manifest root is the authoritative trustless bucket state. A failed manifest-root CAS can leave ciphertext objects or encrypted manifest bytes staged in Bee/Swarm, but those unanchored references must not become visible through trustless GET, HEAD, LIST, or DELETE semantics unless a later chain root anchors them.
 
 Trustless object GET and HEAD requests must carry an explicit `ciphertext_reference_hex` resolved from the locally decrypted, chain-anchored encrypted manifest. Missing references are rejected; the remote gateway must not fall back to bucket/key pointer lookup for object reads.
+
+Trustless object DELETE requests must carry the encrypted manifest reference that the local proxy fetched and decrypted before removing the entry. Missing expected manifest references are rejected so DELETE cannot silently overwrite a concurrent manifest root.

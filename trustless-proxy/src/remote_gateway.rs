@@ -30,6 +30,9 @@ pub enum RemoteGatewayClientError {
     #[error("ciphertext reference is required for object read gateway action")]
     MissingCiphertextReference,
 
+    #[error("expected manifest reference is required for DELETE ciphertext object")]
+    MissingExpectedManifestReference,
+
     #[error("request action does not allow ciphertext payload: {0:?}")]
     UnexpectedCiphertextPayload(RemoteGatewayAction),
 
@@ -160,6 +163,11 @@ fn validate_request(request: &CiphertextGatewayRequest) -> Result<(), RemoteGate
                 return Err(RemoteGatewayClientError::UnexpectedCiphertextReference(
                     request.action,
                 ));
+            }
+
+            match request.expected_manifest_reference_hex.as_deref() {
+                Some(reference) if !reference.trim().is_empty() => {}
+                _ => return Err(RemoteGatewayClientError::MissingExpectedManifestReference),
             }
         }
         RemoteGatewayAction::GetCiphertextObject | RemoteGatewayAction::HeadCiphertextObject => {
@@ -510,6 +518,24 @@ mod tests {
                 .expected_manifest_reference_hex,
             Some("02".repeat(32))
         );
+    }
+
+    #[test]
+    fn executor_requires_delete_expected_manifest_reference() {
+        let mut request = request(RemoteGatewayAction::DeleteCiphertextObject);
+        request.encrypted_manifest_payload = Some(b"encrypted-manifest".to_vec());
+
+        let client =
+            MockRemoteGatewayClient::new(response(RemoteGatewayAction::DeleteCiphertextObject));
+        let executor = TrustlessRemoteGatewayExecutor::new(client);
+
+        let err = executor.execute(request).unwrap_err();
+
+        assert_eq!(
+            err,
+            RemoteGatewayClientError::MissingExpectedManifestReference
+        );
+        assert!(executor.client.seen_request().is_none());
     }
 
     #[test]
