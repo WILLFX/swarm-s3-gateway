@@ -257,35 +257,23 @@ async fn execute_ciphertext_gateway_request(
             Ok(metadata_response(action).with_ciphertext_reference(put.swarm_reference))
         }
         CiphertextGatewayAction::GetCiphertextObject => {
-            let key = required_key(&request).map_err(RouteError::into_response)?;
+            required_key(&request).map_err(RouteError::into_response)?;
             reject_all_payloads(&request).map_err(RouteError::into_response)?;
             reject_expected_manifest_reference(&request).map_err(RouteError::into_response)?;
 
-            let target = match decode_optional_reference(
+            let reference = decode_required_reference(
                 request.ciphertext_reference_hex.as_deref(),
                 "ciphertext_reference_hex",
             )
-            .map_err(RouteError::into_response)?
-            {
-                Some(reference) => read_reference_target_bytes(
-                    bee_client,
-                    &hex::encode(reference),
-                    "ciphertext object payload was not found",
-                )
-                .await
-                .map_err(RouteError::into_response)?,
-                None => {
-                    let topic = BeeClient::derive_topic(&authorized.storage_bucket, key);
-                    read_pointer_target_bytes(
-                        bee_client,
-                        topic,
-                        "ciphertext object was not found",
-                        "ciphertext object payload was not found",
-                    )
-                    .await
-                    .map_err(RouteError::into_response)?
-                }
-            };
+            .map_err(RouteError::into_response)?;
+            let reference_hex = hex::encode(reference);
+            let target = read_reference_target_bytes(
+                bee_client,
+                &reference_hex,
+                "ciphertext object payload was not found",
+            )
+            .await
+            .map_err(RouteError::into_response)?;
 
             Ok(CiphertextGatewayResponse {
                 version: WIRE_VERSION,
@@ -299,35 +287,23 @@ async fn execute_ciphertext_gateway_request(
             })
         }
         CiphertextGatewayAction::HeadCiphertextObject => {
-            let key = required_key(&request).map_err(RouteError::into_response)?;
+            required_key(&request).map_err(RouteError::into_response)?;
             reject_all_payloads(&request).map_err(RouteError::into_response)?;
             reject_expected_manifest_reference(&request).map_err(RouteError::into_response)?;
 
-            if let Some(reference) = decode_optional_reference(
+            let reference = decode_required_reference(
                 request.ciphertext_reference_hex.as_deref(),
                 "ciphertext_reference_hex",
             )
-            .map_err(RouteError::into_response)?
-            {
-                let reference_hex = hex::encode(reference);
-                bee_client
-                    .get_bytes(&reference_hex)
-                    .await
-                    .map_err(|_| RouteError::storage_failure().into_response())?
-                    .ok_or_else(|| {
-                        RouteError::not_found("ciphertext object payload was not found")
-                            .into_response()
-                    })?;
-            } else {
-                let topic = BeeClient::derive_topic(&authorized.storage_bucket, key);
-                bee_client
-                    .get_pointer_bytes(topic)
-                    .await
-                    .map_err(|_| RouteError::storage_failure().into_response())?
-                    .ok_or_else(|| {
-                        RouteError::not_found("ciphertext object was not found").into_response()
-                    })?;
-            }
+            .map_err(RouteError::into_response)?;
+            let reference_hex = hex::encode(reference);
+            bee_client
+                .get_bytes(&reference_hex)
+                .await
+                .map_err(|_| RouteError::storage_failure().into_response())?
+                .ok_or_else(|| {
+                    RouteError::not_found("ciphertext object payload was not found").into_response()
+                })?;
 
             Ok(metadata_response(action))
         }
@@ -430,22 +406,6 @@ async fn execute_ciphertext_gateway_request(
 struct PointerTargetBytes {
     reference_hex: String,
     payload: Vec<u8>,
-}
-
-async fn read_pointer_target_bytes(
-    bee_client: &dyn BeeStorage,
-    topic: [u8; 32],
-    pointer_missing_message: &'static str,
-    payload_missing_message: &'static str,
-) -> Result<PointerTargetBytes, RouteError> {
-    let reference_bytes = bee_client
-        .get_pointer_bytes(topic)
-        .await
-        .map_err(|_| RouteError::storage_failure())?
-        .ok_or_else(|| RouteError::not_found(pointer_missing_message))?;
-
-    let reference_hex = hex::encode(reference_bytes);
-    read_reference_target_bytes(bee_client, &reference_hex, payload_missing_message).await
 }
 
 async fn read_reference_target_bytes(
@@ -710,11 +670,27 @@ fn decode_optional_reference(
     Ok(Some(bytes))
 }
 
+fn decode_required_reference(
+    value: Option<&str>,
+    field_name: &'static str,
+) -> Result<Vec<u8>, RouteError> {
+    decode_optional_reference(value, field_name)?
+        .ok_or_else(|| RouteError::bad_request(required_reference_message(field_name)))
+}
+
 fn required_hex_message(field_name: &'static str) -> &'static str {
     match field_name {
         "ciphertext_hex" => "ciphertext_hex is required",
         "encrypted_manifest_hex" => "encrypted_manifest_hex is required",
         _ => "required hex payload is missing",
+    }
+}
+
+fn required_reference_message(field_name: &'static str) -> &'static str {
+    match field_name {
+        "ciphertext_reference_hex" => "ciphertext_reference_hex is required",
+        "expected_manifest_reference_hex" => "expected_manifest_reference_hex is required",
+        _ => "reference is required",
     }
 }
 
@@ -1254,7 +1230,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_bee_smoke_get_fails_when_pointer_target_payload_is_missing() {
+    async fn gateway_bee_smoke_get_requires_direct_ciphertext_reference_before_pointer_lookup() {
         let bee = SmokeBeeStorage::default();
         let anchor = SmokeAnchorClient::default();
         let authorized = authorized_bucket(Vec::new());
@@ -1276,8 +1252,8 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err.0, StatusCode::NOT_FOUND);
-        assert_eq!(err.1, "ciphertext object payload was not found");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert_eq!(err.1, "ciphertext_reference_hex is required");
     }
 
     #[tokio::test]

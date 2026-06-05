@@ -37,6 +37,9 @@ pub enum CiphertextGatewayBoundaryError {
     #[error("ciphertext payload is required for PUT ciphertext object")]
     MissingCiphertextPayload,
 
+    #[error("ciphertext reference is required for object read gateway action")]
+    MissingCiphertextReference,
+
     #[error("encrypted manifest payload is required for manifest gateway action")]
     MissingEncryptedManifestPayload,
 
@@ -89,6 +92,7 @@ impl CiphertextGatewayBoundary {
     ) -> Result<CiphertextGatewayRequest, CiphertextGatewayBoundaryError> {
         validate_route(route_plan)?;
         require_object_key(route_plan)?;
+        let ciphertext_reference_hex = require_ciphertext_reference(ciphertext_reference_hex)?;
 
         Ok(CiphertextGatewayRequest {
             bucket: require_bucket(&route_plan.bucket)?,
@@ -96,7 +100,7 @@ impl CiphertextGatewayBoundary {
             action: RemoteGatewayAction::GetCiphertextObject,
             ciphertext_payload: None,
             encrypted_manifest_payload: None,
-            ciphertext_reference_hex,
+            ciphertext_reference_hex: Some(ciphertext_reference_hex),
             expected_manifest_reference_hex: None,
             plaintext_payload_present: false,
         })
@@ -108,6 +112,7 @@ impl CiphertextGatewayBoundary {
     ) -> Result<CiphertextGatewayRequest, CiphertextGatewayBoundaryError> {
         validate_route(route_plan)?;
         require_object_key(route_plan)?;
+        let ciphertext_reference_hex = require_ciphertext_reference(ciphertext_reference_hex)?;
 
         Ok(CiphertextGatewayRequest {
             bucket: require_bucket(&route_plan.bucket)?,
@@ -115,7 +120,7 @@ impl CiphertextGatewayBoundary {
             action: RemoteGatewayAction::HeadCiphertextObject,
             ciphertext_payload: None,
             encrypted_manifest_payload: None,
-            ciphertext_reference_hex,
+            ciphertext_reference_hex: Some(ciphertext_reference_hex),
             expected_manifest_reference_hex: None,
             plaintext_payload_present: false,
         })
@@ -218,6 +223,15 @@ fn require_bucket(bucket: &str) -> Result<String, CiphertextGatewayBoundaryError
     Ok(bucket)
 }
 
+fn require_ciphertext_reference(
+    ciphertext_reference_hex: Option<String>,
+) -> Result<String, CiphertextGatewayBoundaryError> {
+    match ciphertext_reference_hex {
+        Some(reference) if !reference.trim().is_empty() => Ok(reference),
+        _ => Err(CiphertextGatewayBoundaryError::MissingCiphertextReference),
+    }
+}
+
 fn require_object_key(
     route_plan: &TrustlessRoutePlan,
 ) -> Result<(), CiphertextGatewayBoundaryError> {
@@ -300,11 +314,12 @@ mod tests {
         );
 
         let get_request =
-            CiphertextGatewayBoundary::get_ciphertext_request(&get_plan, None).unwrap();
+            CiphertextGatewayBoundary::get_ciphertext_request(&get_plan, Some("ab".repeat(32)))
+                .unwrap();
 
         assert_eq!(get_request.action, RemoteGatewayAction::GetCiphertextObject);
         assert!(get_request.ciphertext_payload.is_none());
-        assert!(get_request.ciphertext_reference_hex.is_none());
+        assert_eq!(get_request.ciphertext_reference_hex, Some("ab".repeat(32)));
         assert!(get_request.expected_manifest_reference_hex.is_none());
         assert!(!get_request.plaintext_payload_present);
 
@@ -314,16 +329,46 @@ mod tests {
         );
 
         let head_request =
-            CiphertextGatewayBoundary::head_ciphertext_request(&head_plan, None).unwrap();
+            CiphertextGatewayBoundary::head_ciphertext_request(&head_plan, Some("cd".repeat(32)))
+                .unwrap();
 
         assert_eq!(
             head_request.action,
             RemoteGatewayAction::HeadCiphertextObject
         );
         assert!(head_request.ciphertext_payload.is_none());
-        assert!(head_request.ciphertext_reference_hex.is_none());
+        assert_eq!(head_request.ciphertext_reference_hex, Some("cd".repeat(32)));
         assert!(head_request.expected_manifest_reference_hex.is_none());
         assert!(!head_request.plaintext_payload_present);
+    }
+
+    #[test]
+    fn get_and_head_requests_require_manifest_ciphertext_reference() {
+        let get_plan = make_route_plan(
+            TrustlessProxyOperation::GetObject,
+            RemoteGatewayAction::GetCiphertextObject,
+        );
+
+        let err = CiphertextGatewayBoundary::get_ciphertext_request(&get_plan, None).unwrap_err();
+
+        assert_eq!(
+            err,
+            CiphertextGatewayBoundaryError::MissingCiphertextReference
+        );
+
+        let head_plan = make_route_plan(
+            TrustlessProxyOperation::HeadObject,
+            RemoteGatewayAction::HeadCiphertextObject,
+        );
+
+        let err =
+            CiphertextGatewayBoundary::head_ciphertext_request(&head_plan, Some(" ".to_owned()))
+                .unwrap_err();
+
+        assert_eq!(
+            err,
+            CiphertextGatewayBoundaryError::MissingCiphertextReference
+        );
     }
 
     #[test]
