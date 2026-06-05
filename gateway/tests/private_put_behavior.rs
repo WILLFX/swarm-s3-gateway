@@ -17,13 +17,16 @@ use gateway::{
         bucket_name_hash, decrypt_blob, derive_private_object_index_key,
         derive_private_object_payload_key, private_object_key_id,
     },
-    manifest::{read_private_bucket_manifest_v2, read_private_object_manifest_v2},
+    manifest::{
+        read_private_bucket_manifest_v2, read_private_object_manifest_v2,
+        write_private_bucket_manifest_v2, PrivateBucketManifestV2, PrivateBucketObjectEntry,
+    },
     routes::{private_object_read::private_object_payload_aad, put_object},
     traits::{AnchorClient, RegistryClient, SecretUnwrapper},
 };
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
 };
 
@@ -46,6 +49,10 @@ impl MockBeeStorage {
 
     fn get_stored_bytes(&self, reference: &str) -> Option<Bytes> {
         self.inner.lock().unwrap().bytes.get(reference).cloned()
+    }
+
+    fn clear_put_calls(&self) {
+        self.inner.lock().unwrap().put_calls.clear();
     }
 
     fn put_calls(&self) -> Vec<String> {
@@ -145,11 +152,16 @@ struct AnchorSubmitRecord {
 #[derive(Default)]
 struct RecordingAnchorClient {
     submit: Mutex<Option<AnchorSubmitRecord>>,
+    fail_submit_with_stale_root: Mutex<bool>,
 }
 
 impl RecordingAnchorClient {
     fn submitted(&self) -> Option<AnchorSubmitRecord> {
         self.submit.lock().unwrap().clone()
+    }
+
+    fn fail_submit_with_stale_root(&self) {
+        *self.fail_submit_with_stale_root.lock().unwrap() = true;
     }
 }
 
@@ -227,6 +239,12 @@ impl AnchorClient for RecordingAnchorClient {
             size,
             etag,
         });
+
+        if *self.fail_submit_with_stale_root.lock().unwrap() {
+            bail!(
+                "bucket contract error for bucket::update_bucket_manifest_root_for_put_cas: StaleBucketManifestRoot"
+            );
+        }
 
         Ok("mock-private-put-anchor-tx".to_string())
     }
@@ -422,6 +440,151 @@ async fn private_put_encrypts_payload_writes_manifests_anchors_and_hides_swarm_r
     assert_eq!(
         object_manifest_record.manifest.encryption_version,
         encryption_version
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_put_failed_anchor_leaves_new_manifest_unanchored_and_hidden() -> Result<()> {
+    let master_service_key = [42u8; 32];
+    let owner = [7u8; 32];
+    let bucket = "private-bucket".to_string();
+    let existing_key = "existing.txt".to_string();
+    let new_key = "new-secret.txt".to_string();
+    let body = Bytes::from_static(b"private put payload that loses cas");
+    let encryption_version = 1u32;
+
+    let private_index_key =
+        derive_private_object_index_key(&master_service_key, &owner, &bucket, encryption_version);
+    let existing_object_key_id = private_object_key_id(&private_index_key, &existing_key);
+    let new_object_key_id = private_object_key_id(&private_index_key, &new_key);
+
+    let bee = Arc::new(MockBeeStorage::default());
+
+    let mut objects = BTreeMap::new();
+    objects.insert(
+        hex::encode(existing_object_key_id),
+        PrivateBucketObjectEntry {
+            object_key: existing_key.clone(),
+            object_key_id: existing_object_key_id,
+            object_manifest_reference: hex::encode([90u8; 32]),
+            encryption_version,
+            size: 12,
+            etag: "etag-existing".to_string(),
+            content_type: "text/plain".to_string(),
+            last_modified: "2026-06-04T00:00:00Z".to_string(),
+        },
+    );
+
+    let initial_record = write_private_bucket_manifest_v2(
+        bee.as_ref(),
+        &master_service_key,
+        &owner,
+        &bucket,
+        encryption_version,
+        &PrivateBucketManifestV2 { objects },
+    )
+    .await?;
+    bee.clear_put_calls();
+
+    let chain_bucket = ChainBucketRecord {
+        owner,
+        is_private: true,
+        encryption_version,
+        creation_date: 0,
+        bucket_manifest_root: hex::decode(&initial_record.manifest_reference)?,
+    };
+
+    let anchor = Arc::new(RecordingAnchorClient::default());
+    anchor.fail_submit_with_stale_root();
+
+    let state = build_state(
+        bee.clone(),
+        anchor.clone(),
+        chain_bucket,
+        master_service_key,
+    );
+
+    let principal = AwsPrincipal {
+        access_key_id: "test-access-key".to_string(),
+        owner,
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+
+    let response = put_object::handle(
+        Path((bucket.clone(), new_key.clone())),
+        Extension(principal),
+        State(state),
+        headers,
+        body,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+    assert!(
+        response.headers().get("x-amz-meta-swarm-ref").is_none(),
+        "failed private PUT must not expose an orphan encrypted payload reference"
+    );
+
+    let submitted = anchor
+        .submitted()
+        .expect("private PUT should attempt an anchor after staging Bee writes");
+    assert_eq!(
+        submitted.expected_bucket_manifest_root, initial_record.manifest_reference,
+        "private PUT must CAS against the chain-visible root it read"
+    );
+
+    let put_calls = bee.put_calls();
+    assert_eq!(
+        put_calls.len(),
+        3,
+        "failed private PUT may still stage encrypted payload, object manifest, and replacement bucket manifest"
+    );
+    assert_eq!(submitted.bucket_manifest_root, put_calls[2]);
+
+    let old_root_bytes = hex::decode(&initial_record.manifest_reference)?;
+    let old_manifest = read_private_bucket_manifest_v2(
+        bee.as_ref(),
+        &master_service_key,
+        &owner,
+        &bucket,
+        encryption_version,
+        &old_root_bytes,
+    )
+    .await?
+    .expect("old chain-visible private bucket manifest must remain readable");
+    assert!(old_manifest
+        .manifest
+        .objects
+        .contains_key(&hex::encode(existing_object_key_id)));
+    assert!(
+        !old_manifest
+            .manifest
+            .objects
+            .contains_key(&hex::encode(new_object_key_id)),
+        "failed CAS must not make the new object visible through the old chain root"
+    );
+
+    let replacement_root_bytes = hex::decode(&submitted.bucket_manifest_root)?;
+    let replacement_manifest = read_private_bucket_manifest_v2(
+        bee.as_ref(),
+        &master_service_key,
+        &owner,
+        &bucket,
+        encryption_version,
+        &replacement_root_bytes,
+    )
+    .await?
+    .expect("replacement manifest was staged in Bee");
+    assert!(
+        replacement_manifest
+            .manifest
+            .objects
+            .contains_key(&hex::encode(new_object_key_id)),
+        "the staged replacement manifest is an orphan unless the chain CAS succeeds"
     );
 
     Ok(())

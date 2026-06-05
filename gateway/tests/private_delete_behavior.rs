@@ -149,6 +149,7 @@ struct DeleteAnchorRecord {
 struct RecordingAnchorClient {
     delete_call: Mutex<Option<DeleteAnchorRecord>>,
     put_anchor_calls: Mutex<usize>,
+    fail_delete_with_stale_root: Mutex<bool>,
 }
 
 impl RecordingAnchorClient {
@@ -158,6 +159,10 @@ impl RecordingAnchorClient {
 
     fn put_anchor_calls(&self) -> usize {
         *self.put_anchor_calls.lock().unwrap()
+    }
+
+    fn fail_delete_with_stale_root(&self) {
+        *self.fail_delete_with_stale_root.lock().unwrap() = true;
     }
 }
 
@@ -217,6 +222,12 @@ impl AnchorClient for RecordingAnchorClient {
             expected_bucket_manifest_root,
             bucket_manifest_root,
         });
+
+        if *self.fail_delete_with_stale_root.lock().unwrap() {
+            bail!(
+                "bucket contract error for bucket::update_bucket_manifest_root_for_delete_cas: StaleBucketManifestRoot"
+            );
+        }
 
         Ok("mock-private-delete-anchor-tx".to_string())
     }
@@ -450,6 +461,82 @@ async fn private_delete_removes_entry_writes_manifest_and_uses_delete_anchor() -
         .expect("non-deleted object entry must remain");
 
     assert_eq!(kept_entry.object_key, fixture.keep_key);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_delete_failed_anchor_leaves_replacement_manifest_unanchored() -> Result<()> {
+    let fixture = private_delete_fixture().await?;
+    fixture.anchor.fail_delete_with_stale_root();
+
+    let response = delete_object::handle(
+        Path((fixture.bucket.clone(), fixture.delete_key.clone())),
+        Extension(fixture.principal.clone()),
+        State(fixture.state.clone()),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+
+    let put_calls = fixture.bee.put_calls();
+    assert_eq!(
+        put_calls.len(),
+        1,
+        "failed private DELETE may still stage one replacement private bucket manifest"
+    );
+
+    let delete_anchor = fixture
+        .anchor
+        .delete_call()
+        .expect("private DELETE should attempt an anchor after staging the replacement manifest");
+    assert_eq!(
+        delete_anchor.expected_bucket_manifest_root, fixture.bucket_manifest_reference,
+        "private DELETE must CAS against the chain-visible root it read"
+    );
+    assert_eq!(delete_anchor.bucket_manifest_root, put_calls[0]);
+
+    let old_root_bytes = hex::decode(&fixture.bucket_manifest_reference)?;
+    let old_manifest = read_private_bucket_manifest_v2(
+        fixture.bee.as_ref(),
+        &fixture.master_service_key,
+        &fixture.owner,
+        &fixture.bucket,
+        fixture.encryption_version,
+        &old_root_bytes,
+    )
+    .await?
+    .expect("old chain-visible private bucket manifest must remain readable");
+    assert!(
+        old_manifest
+            .manifest
+            .objects
+            .contains_key(&hex::encode(fixture.delete_object_key_id)),
+        "failed CAS must not remove the object from the old chain root"
+    );
+
+    let replacement_root_bytes = hex::decode(&delete_anchor.bucket_manifest_root)?;
+    let replacement_manifest = read_private_bucket_manifest_v2(
+        fixture.bee.as_ref(),
+        &fixture.master_service_key,
+        &fixture.owner,
+        &fixture.bucket,
+        fixture.encryption_version,
+        &replacement_root_bytes,
+    )
+    .await?
+    .expect("replacement delete manifest was staged in Bee");
+    assert!(
+        !replacement_manifest
+            .manifest
+            .objects
+            .contains_key(&hex::encode(fixture.delete_object_key_id)),
+        "the delete result is an orphan unless the chain CAS succeeds"
+    );
+    assert!(replacement_manifest
+        .manifest
+        .objects
+        .contains_key(&hex::encode(fixture.keep_object_key_id)));
 
     Ok(())
 }
