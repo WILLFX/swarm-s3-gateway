@@ -21,27 +21,6 @@ pub trait RegistryClient: Send + Sync {
     ) -> anyhow::Result<Option<ChainBucketType>>;
 
     async fn fetch_owner_catalog_root(&self, owner: SubstrateAddress32) -> anyhow::Result<Vec<u8>>;
-
-    async fn fetch_bucket_count(&self) -> anyhow::Result<u32> {
-        anyhow::bail!("registry client does not support bucket count enumeration")
-    }
-
-    async fn fetch_bucket_ids(&self, _cursor: u32, _limit: u32) -> anyhow::Result<Vec<[u8; 32]>> {
-        anyhow::bail!("registry client does not support bucket enumeration")
-    }
-
-    async fn fetch_owner_bucket_count(&self, _owner: SubstrateAddress32) -> anyhow::Result<u32> {
-        anyhow::bail!("registry client does not support owner bucket count enumeration")
-    }
-
-    async fn fetch_owner_bucket_ids(
-        &self,
-        _owner: SubstrateAddress32,
-        _cursor: u32,
-        _limit: u32,
-    ) -> anyhow::Result<Vec<[u8; 32]>> {
-        anyhow::bail!("registry client does not support owner bucket enumeration")
-    }
 }
 
 #[async_trait]

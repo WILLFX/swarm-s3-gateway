@@ -12,10 +12,8 @@ use subxt_signer::sr25519::Keypair;
 
 use crate::{
     contracts_abi::{
-        decode_query_result, encode_bucket_get_bucket, encode_bucket_get_bucket_count,
-        encode_bucket_get_bucket_type, encode_bucket_get_owner_bucket_count,
+        decode_query_result, encode_bucket_get_bucket, encode_bucket_get_bucket_type,
         encode_bucket_get_owner_catalog_root, encode_bucket_get_owner_nonce,
-        encode_bucket_list_bucket_ids, encode_bucket_list_owner_bucket_ids,
         encode_identity_get_encryption_key, encode_identity_get_identity,
         BucketRecord as ContractBucketRecord, BucketType as ContractBucketType,
         EncryptionKeyRecord as ContractEncryptionKeyRecord,
@@ -209,79 +207,6 @@ impl ChainRegistryClient {
         Ok(maybe_bucket_type.map(chain_bucket_type_from_contract))
     }
 
-    pub async fn get_bucket_count(&self) -> Result<u32> {
-        let contract = self
-            .get_bucket_contract_address()
-            .await?
-            .ok_or_else(|| anyhow!("bucket contract address is not set in S3Contracts pallet"))?;
-
-        let return_data = self
-            .dry_run_contract_read(
-                contract,
-                encode_bucket_get_bucket_count(),
-                "bucket::get_bucket_count",
-            )
-            .await?;
-
-        decode_contract_query(&return_data, "bucket::get_bucket_count")
-    }
-
-    pub async fn list_bucket_ids(&self, cursor: u32, limit: u32) -> Result<Vec<[u8; 32]>> {
-        let contract = self
-            .get_bucket_contract_address()
-            .await?
-            .ok_or_else(|| anyhow!("bucket contract address is not set in S3Contracts pallet"))?;
-
-        let return_data = self
-            .dry_run_contract_read(
-                contract,
-                encode_bucket_list_bucket_ids(cursor, limit),
-                "bucket::list_bucket_ids",
-            )
-            .await?;
-
-        decode_contract_query(&return_data, "bucket::list_bucket_ids")
-    }
-
-    pub async fn get_owner_bucket_count(&self, owner: SubstrateAddress32) -> Result<u32> {
-        let contract = self
-            .get_bucket_contract_address()
-            .await?
-            .ok_or_else(|| anyhow!("bucket contract address is not set in S3Contracts pallet"))?;
-
-        let return_data = self
-            .dry_run_contract_read(
-                contract,
-                encode_bucket_get_owner_bucket_count(owner),
-                "bucket::get_owner_bucket_count",
-            )
-            .await?;
-
-        decode_contract_query(&return_data, "bucket::get_owner_bucket_count")
-    }
-
-    pub async fn list_owner_bucket_ids(
-        &self,
-        owner: SubstrateAddress32,
-        cursor: u32,
-        limit: u32,
-    ) -> Result<Vec<[u8; 32]>> {
-        let contract = self
-            .get_bucket_contract_address()
-            .await?
-            .ok_or_else(|| anyhow!("bucket contract address is not set in S3Contracts pallet"))?;
-
-        let return_data = self
-            .dry_run_contract_read(
-                contract,
-                encode_bucket_list_owner_bucket_ids(owner, cursor, limit),
-                "bucket::list_owner_bucket_ids",
-            )
-            .await?;
-
-        decode_contract_query(&return_data, "bucket::list_owner_bucket_ids")
-    }
-
     pub async fn get_owner_catalog_root(&self, owner: SubstrateAddress32) -> Result<Vec<u8>> {
         let contract = self
             .get_bucket_contract_address()
@@ -439,27 +364,6 @@ impl RegistryClient for ChainRegistryClient {
 
     async fn fetch_owner_catalog_root(&self, owner: SubstrateAddress32) -> anyhow::Result<Vec<u8>> {
         self.get_owner_catalog_root(owner).await
-    }
-
-    async fn fetch_bucket_count(&self) -> anyhow::Result<u32> {
-        self.get_bucket_count().await
-    }
-
-    async fn fetch_bucket_ids(&self, cursor: u32, limit: u32) -> anyhow::Result<Vec<[u8; 32]>> {
-        self.list_bucket_ids(cursor, limit).await
-    }
-
-    async fn fetch_owner_bucket_count(&self, owner: SubstrateAddress32) -> anyhow::Result<u32> {
-        self.get_owner_bucket_count(owner).await
-    }
-
-    async fn fetch_owner_bucket_ids(
-        &self,
-        owner: SubstrateAddress32,
-        cursor: u32,
-        limit: u32,
-    ) -> anyhow::Result<Vec<[u8; 32]>> {
-        self.list_owner_bucket_ids(owner, cursor, limit).await
     }
 }
 
