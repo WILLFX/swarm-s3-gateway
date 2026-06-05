@@ -2,6 +2,8 @@
 
 This package contains the Rust local S3-compatible proxy for TrustlessPrivate buckets, referred to in user-facing docs as trustless private buckets.
 
+The trustless proxy must not introduce a TypeScript or Node.js runtime.
+
 The local proxy is the client-side trust boundary. It handles local plaintext, local encryption/decryption, local private-key custody, recipient envelope creation, encrypted manifest handling, and ciphertext-only forwarding to the remote gateway.
 
 ## Trust boundary

@@ -233,6 +233,8 @@ The smoke script checks this for:
 
 Public bucket responses may still expose the Swarm reference header.
 
+Bee/Swarm writes are staged before chain compare-and-swap root updates. If a chain CAS fails after Bee accepts encrypted payload or manifest bytes, those bytes may remain in Bee as unanchored orphans. They are not authoritative bucket state: gateway reads, heads, lists, and deletes must resolve from the current chain-anchored roots, not from staged Bee pointer state. Operators may treat unanchored Bee references as storage-accounting or garbage-collection candidates once a reconciliation process exists.
+
 ## Operator signer environment variables
 
 The gateway and helper binaries must not silently use development signers in production.

@@ -128,6 +128,14 @@ impl RouteError {
         }
     }
 
+    fn anchor_failure(err: anyhow::Error) -> Self {
+        if error_chain_contains_stale_bucket_manifest_root(&err) {
+            return Self::conflict("encrypted manifest precondition failed");
+        }
+
+        Self::chain_failure()
+    }
+
     fn storage_failure() -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -138,6 +146,18 @@ impl RouteError {
     fn into_response(self) -> (StatusCode, String) {
         (self.status, self.message.to_string())
     }
+}
+
+fn error_chain_contains_stale_bucket_manifest_root(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .to_string()
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .flat_map(|ch| ch.to_lowercase())
+            .collect::<String>()
+            .contains("stalebucketmanifestroot")
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -515,7 +535,7 @@ async fn write_encrypted_manifest_with_anchor(
         _ => unreachable!("manifest anchor writes are only valid for manifest actions"),
     };
 
-    result.map_err(|_| RouteError::chain_failure())?;
+    result.map_err(RouteError::anchor_failure)?;
 
     Ok(put.swarm_reference)
 }
@@ -943,11 +963,16 @@ mod tests {
     struct SmokeAnchorState {
         put_updates: Vec<(String, String)>,
         delete_updates: Vec<(String, String)>,
+        fail_put_with_stale_root: bool,
     }
 
     impl SmokeAnchorClient {
         fn put_updates(&self) -> Vec<(String, String)> {
             self.inner.lock().unwrap().put_updates.clone()
+        }
+
+        fn fail_put_with_stale_root(&self) {
+            self.inner.lock().unwrap().fail_put_with_stale_root = true;
         }
     }
 
@@ -999,6 +1024,11 @@ mod tests {
                 .unwrap()
                 .put_updates
                 .push((expected_bucket_manifest_root, bucket_manifest_root.clone()));
+            if self.inner.lock().unwrap().fail_put_with_stale_root {
+                anyhow::bail!(
+                    "bucket contract error for bucket::update_bucket_manifest_root_for_put_cas: StaleBucketManifestRoot"
+                );
+            }
             Ok(bucket_manifest_root)
         }
 
@@ -1176,6 +1206,32 @@ mod tests {
         assert_eq!(list_response.ciphertext_hex, None);
         assert!(!list_response.metadata_only);
         assert!(!list_response.gateway_plaintext_access);
+    }
+
+    #[tokio::test]
+    async fn gateway_bee_smoke_stale_manifest_anchor_is_conflict_after_bee_write() {
+        let bee = SmokeBeeStorage::default();
+        let anchor = SmokeAnchorClient::default();
+        anchor.fail_put_with_stale_root();
+        let authorized = authorized_bucket(Vec::new());
+
+        let encrypted_manifest = b"encrypted-manifest-that-lost-cas";
+
+        let mut put = request("put_encrypted_manifest");
+        put.encrypted_manifest_hex = Some(hex::encode(encrypted_manifest));
+
+        let err = execute_for_test(&bee, &anchor, authorized.clone(), put)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert_eq!(err.1, "encrypted manifest precondition failed");
+        assert_eq!(
+            bee.pointed_object_bytes(&authorized.storage_bucket, TRUSTLESS_MANIFEST_KEY),
+            Some(encrypted_manifest.to_vec()),
+            "failed CAS may leave encrypted manifest bytes in Bee, but the chain root is unchanged"
+        );
+        assert_eq!(anchor.put_updates().len(), 1);
     }
 
     #[tokio::test]

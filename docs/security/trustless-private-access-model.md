@@ -248,3 +248,5 @@ Migration requires an explicit client-side re-encryption process:
 ## Security invariant
 
 For trustless private buckets, the gateway must be able to prove authorization and store or return ciphertext, but it must not be able to derive or recover plaintext private data, plaintext private manifests, plaintext owner catalogs, or plaintext data keys.
+
+The chain-anchored encrypted manifest root is the authoritative trustless bucket state. A failed manifest-root CAS can leave ciphertext objects or encrypted manifest bytes staged in Bee/Swarm, but those unanchored references must not become visible through trustless GET, HEAD, LIST, or DELETE semantics unless a later chain root anchors them.
