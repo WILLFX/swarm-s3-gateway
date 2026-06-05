@@ -235,10 +235,6 @@ Public bucket responses may still expose the Swarm reference header.
 
 Bee/Swarm writes are staged before chain compare-and-swap root updates. If a chain CAS fails after Bee accepts encrypted payload or manifest bytes, those bytes may remain in Bee as unanchored orphans. They are not authoritative bucket state: gateway reads, heads, lists, and deletes must resolve from the current chain-anchored roots, not from staged Bee pointer state. Operators may treat unanchored Bee references as storage-accounting or garbage-collection candidates once a reconciliation process exists.
 
-Production reconciliation must be driven from chain-authoritative bucket roots, not Bee pointer state alone. The bucket contract exposes paged bucket enumeration methods (`get_bucket_count`, `list_bucket_ids`, `get_owner_bucket_count`, `list_owner_bucket_ids`) so an operator job can walk live bucket IDs, fetch their current `bucket_manifest_root` records, and build the reachable root set before considering any Bee reference for cleanup.
-
-Bee cleanup should be implemented as pin reconciliation, not hard deletion. A future worker should compare Bee/gateway write inventory against the chain-visible reachable set, keep anchored or recently pending references, report old unanchored references in dry-run mode, and only unpin candidates with an explicit apply mode after the chain reachability check passes.
-
 ## Operator signer environment variables
 
 The gateway and helper binaries must not silently use development signers in production.

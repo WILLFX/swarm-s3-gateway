@@ -138,10 +138,6 @@ pub const IDENTITY_REVOKE_DELEGATION_SELECTOR: [u8; 4] = [0xb2, 0x30, 0x56, 0x5f
 
 pub const BUCKET_GET_BUCKET_SELECTOR: [u8; 4] = [0x6c, 0x5d, 0xca, 0xd3];
 pub const BUCKET_GET_BUCKET_TYPE_SELECTOR: [u8; 4] = [0x82, 0xc3, 0xd9, 0x39];
-pub const BUCKET_GET_BUCKET_COUNT_SELECTOR: [u8; 4] = [0x24, 0xb0, 0x83, 0xc1];
-pub const BUCKET_LIST_BUCKET_IDS_SELECTOR: [u8; 4] = [0x54, 0x4c, 0xe1, 0x4f];
-pub const BUCKET_GET_OWNER_BUCKET_COUNT_SELECTOR: [u8; 4] = [0x79, 0xb6, 0xaf, 0x65];
-pub const BUCKET_LIST_OWNER_BUCKET_IDS_SELECTOR: [u8; 4] = [0x94, 0x86, 0x3f, 0xb2];
 pub const BUCKET_GET_OWNER_NONCE_SELECTOR: [u8; 4] = [0x7a, 0x1c, 0x13, 0x7b];
 pub const BUCKET_GET_OWNER_CATALOG_ROOT_SELECTOR: [u8; 4] = [0x41, 0xe6, 0xc9, 0x81];
 pub const BUCKET_CREATE_BUCKET_SELECTOR: [u8; 4] = [0xbb, 0xb9, 0xf7, 0x40];
@@ -343,31 +339,6 @@ pub fn encode_bucket_get_bucket_type(bucket_name_hash: BucketNameHash) -> Vec<u8
     data
 }
 
-pub fn encode_bucket_get_bucket_count() -> Vec<u8> {
-    BUCKET_GET_BUCKET_COUNT_SELECTOR.to_vec()
-}
-
-pub fn encode_bucket_list_bucket_ids(cursor: u32, limit: u32) -> Vec<u8> {
-    let mut data = BUCKET_LIST_BUCKET_IDS_SELECTOR.to_vec();
-    cursor.encode_to(&mut data);
-    limit.encode_to(&mut data);
-    data
-}
-
-pub fn encode_bucket_get_owner_bucket_count(owner: AccountId32) -> Vec<u8> {
-    let mut data = BUCKET_GET_OWNER_BUCKET_COUNT_SELECTOR.to_vec();
-    owner.encode_to(&mut data);
-    data
-}
-
-pub fn encode_bucket_list_owner_bucket_ids(owner: AccountId32, cursor: u32, limit: u32) -> Vec<u8> {
-    let mut data = BUCKET_LIST_OWNER_BUCKET_IDS_SELECTOR.to_vec();
-    owner.encode_to(&mut data);
-    cursor.encode_to(&mut data);
-    limit.encode_to(&mut data);
-    data
-}
-
 pub fn encode_bucket_get_owner_nonce(owner: AccountId32) -> Vec<u8> {
     let mut data = BUCKET_GET_OWNER_NONCE_SELECTOR.to_vec();
     owner.encode_to(&mut data);
@@ -467,45 +438,6 @@ mod tests {
 
         assert_eq!(&encoded[..4], &BUCKET_GET_BUCKET_TYPE_SELECTOR);
         assert_eq!(&encoded[..4], &[0x82, 0xc3, 0xd9, 0x39]);
-    }
-
-    #[test]
-    fn encode_bucket_enumeration_reads_use_metadata_selectors() {
-        let owner = [7u8; 32];
-
-        assert_eq!(
-            &encode_bucket_get_bucket_count()[..4],
-            &BUCKET_GET_BUCKET_COUNT_SELECTOR
-        );
-        assert_eq!(
-            &encode_bucket_list_bucket_ids(10, 50)[..4],
-            &BUCKET_LIST_BUCKET_IDS_SELECTOR
-        );
-        assert_eq!(
-            &encode_bucket_get_owner_bucket_count(owner)[..4],
-            &BUCKET_GET_OWNER_BUCKET_COUNT_SELECTOR
-        );
-        assert_eq!(
-            &encode_bucket_list_owner_bucket_ids(owner, 10, 50)[..4],
-            &BUCKET_LIST_OWNER_BUCKET_IDS_SELECTOR
-        );
-
-        assert_eq!(
-            &encode_bucket_get_bucket_count()[..4],
-            &[0x24, 0xb0, 0x83, 0xc1]
-        );
-        assert_eq!(
-            &encode_bucket_list_bucket_ids(10, 50)[..4],
-            &[0x54, 0x4c, 0xe1, 0x4f]
-        );
-        assert_eq!(
-            &encode_bucket_get_owner_bucket_count(owner)[..4],
-            &[0x79, 0xb6, 0xaf, 0x65]
-        );
-        assert_eq!(
-            &encode_bucket_list_owner_bucket_ids(owner, 10, 50)[..4],
-            &[0x94, 0x86, 0x3f, 0xb2]
-        );
     }
 
     #[test]
