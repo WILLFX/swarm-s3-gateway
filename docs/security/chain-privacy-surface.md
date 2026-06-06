@@ -82,6 +82,10 @@ Root updates reveal activity timing. Observers may infer when an owner creates, 
 
 Encryption hides contents but not necessarily byte length. Encrypted catalog or manifest size may reveal approximate object counts or growth patterns.
 
+### Trustless ciphertext metadata
+
+Trustless object payloads use AWS ESDK encryption context for authenticated metadata. That context can be visible with the ciphertext, so it must contain only opaque bucket/context identifiers and policy version, not plaintext object keys or deterministic bucket/key hashes. The local proxy generates fresh opaque object context IDs for object PUTs and stores the plaintext key mapping only inside the encrypted manifest.
+
 ### Master key compromise
 
 If the gateway master service key leaks, private manifests and private object payloads may become readable. Production deployments must protect this key using proper secret management.

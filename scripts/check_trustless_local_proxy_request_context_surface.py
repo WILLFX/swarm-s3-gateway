@@ -15,16 +15,16 @@ required_source = [
     "plaintext_body_allowed_locally",
     "gateway_plaintext_access: false",
     "normalize_recipients",
-    "MissingObjectKeyId",
+    "normalize_optional",
     "UnexpectedPlaintextBody",
 ]
 
 required_tests = [
     "put_context_preserves_plaintext_only_at_local_boundary",
-    "get_head_delete_contexts_require_object_key_id_without_plaintext",
+    "get_head_delete_contexts_allow_missing_object_key_id_without_plaintext",
     "list_and_create_contexts_do_not_require_object_key_id",
     "context_builder_rejects_missing_required_identity_fields",
-    "context_builder_rejects_missing_object_key_id_for_object_operations",
+    "context_builder_preserves_optional_object_key_id_when_present",
     "context_builder_rejects_missing_recipients",
     "context_builder_rejects_plaintext_outside_put_boundary",
     "context_builder_accepts_real_local_s3_put_intent",

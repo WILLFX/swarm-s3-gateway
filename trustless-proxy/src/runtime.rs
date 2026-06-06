@@ -1302,7 +1302,6 @@ mod tests {
             &prepared,
             CiphertextGatewayRequest {
                 bucket: "bucket".to_owned(),
-                key: Some("secret.txt".to_owned()),
                 action: RemoteGatewayAction::GetCiphertextObject,
                 ciphertext_payload: None,
                 encrypted_manifest_payload: None,
@@ -1371,7 +1370,6 @@ mod tests {
             &prepared,
             CiphertextGatewayRequest {
                 bucket: "bucket".to_owned(),
-                key: Some("secret.txt".to_owned()),
                 action: RemoteGatewayAction::GetCiphertextObject,
                 ciphertext_payload: None,
                 encrypted_manifest_payload: None,
@@ -1982,7 +1980,6 @@ mod tests {
             &prepared,
             CiphertextGatewayRequest {
                 bucket: "bucket".to_owned(),
-                key: Some("secret.txt".to_owned()),
                 action: RemoteGatewayAction::GetCiphertextObject,
                 ciphertext_payload: None,
                 encrypted_manifest_payload: None,
@@ -2034,7 +2031,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(get_request.bucket, "bucket");
-        assert_eq!(get_request.key, Some("secret.txt".to_owned()));
         assert_eq!(get_request.action, RemoteGatewayAction::GetCiphertextObject);
         assert_eq!(get_request.ciphertext_reference_hex, Some("ab".repeat(32)));
         assert!(get_request.ciphertext_payload.is_none());
@@ -2073,7 +2069,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(head_request.bucket, "bucket");
-        assert_eq!(head_request.key, Some("secret.txt".to_owned()));
         assert_eq!(
             head_request.action,
             RemoteGatewayAction::HeadCiphertextObject
@@ -2109,7 +2104,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(list_request.bucket, "bucket");
-        assert!(list_request.key.is_none());
         assert_eq!(
             list_request.action,
             RemoteGatewayAction::ListCiphertextManifest
@@ -2136,7 +2130,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(put_request.bucket, "bucket");
-        assert_eq!(put_request.key, Some("secret.txt".to_owned()));
         assert_eq!(put_request.action, RemoteGatewayAction::PutCiphertextObject);
         assert_eq!(put_request.ciphertext_payload, Some(b"ciphertext".to_vec()));
         assert!(put_request.encrypted_manifest_payload.is_none());
@@ -2156,7 +2149,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(delete_request.bucket, "bucket");
-        assert_eq!(delete_request.key, Some("secret.txt".to_owned()));
         assert_eq!(
             delete_request.action,
             RemoteGatewayAction::DeleteCiphertextObject
@@ -2236,7 +2228,6 @@ mod tests {
         );
         assert_eq!(seen_request.ciphertext_reference_hex, Some("ab".repeat(32)));
         assert_eq!(seen_request.bucket, "bucket");
-        assert_eq!(seen_request.key, Some("secret.txt".to_owned()));
         assert!(!seen_request.plaintext_payload_present);
     }
 
@@ -2334,7 +2325,6 @@ mod tests {
             TrustlessPutOperationPlan {
                 object_request: CiphertextGatewayRequest {
                     bucket: "bucket".to_owned(),
-                    key: Some("secret.txt".to_owned()),
                     action: RemoteGatewayAction::PutCiphertextObject,
                     ciphertext_payload: Some(b"real-ciphertext".to_vec()),
                     encrypted_manifest_payload: None,
@@ -2366,7 +2356,6 @@ mod tests {
             TrustlessDeleteOperationPlan {
                 delete_request: CiphertextGatewayRequest {
                     bucket: "bucket".to_owned(),
-                    key: Some("secret.txt".to_owned()),
                     action: RemoteGatewayAction::DeleteCiphertextObject,
                     ciphertext_payload: None,
                     encrypted_manifest_payload: Some(b"real-encrypted-manifest".to_vec()),
@@ -2401,7 +2390,6 @@ mod tests {
             TrustlessDeleteOperationPlan {
                 delete_request: CiphertextGatewayRequest {
                     bucket: "bucket".to_owned(),
-                    key: Some("secret.txt".to_owned()),
                     action: RemoteGatewayAction::DeleteCiphertextObject,
                     ciphertext_payload: None,
                     encrypted_manifest_payload: Some(b"real-encrypted-manifest".to_vec()),
@@ -2478,7 +2466,6 @@ mod tests {
             TrustlessPutOperationPlan {
                 object_request: CiphertextGatewayRequest {
                     bucket: "bucket".to_owned(),
-                    key: Some("secret.txt".to_owned()),
                     action: RemoteGatewayAction::PutCiphertextObject,
                     ciphertext_payload: Some(b"real-ciphertext".to_vec()),
                     encrypted_manifest_payload: None,
@@ -2555,7 +2542,6 @@ mod tests {
             TrustlessPutOperationPlan {
                 object_request: CiphertextGatewayRequest {
                     bucket: "bucket".to_owned(),
-                    key: Some("secret.txt".to_owned()),
                     action: RemoteGatewayAction::DeleteCiphertextObject,
                     ciphertext_payload: Some(b"real-ciphertext".to_vec()),
                     encrypted_manifest_payload: None,
@@ -2583,7 +2569,6 @@ mod tests {
             TrustlessPutOperationPlan {
                 object_request: CiphertextGatewayRequest {
                     bucket: "bucket".to_owned(),
-                    key: Some("secret.txt".to_owned()),
                     action: RemoteGatewayAction::PutCiphertextObject,
                     ciphertext_payload: Some(b"real-ciphertext".to_vec()),
                     encrypted_manifest_payload: None,
@@ -2612,7 +2597,6 @@ mod tests {
             TrustlessDeleteOperationPlan {
                 delete_request: CiphertextGatewayRequest {
                     bucket: "bucket".to_owned(),
-                    key: Some("secret.txt".to_owned()),
                     action: RemoteGatewayAction::DeleteCiphertextObject,
                     ciphertext_payload: None,
                     encrypted_manifest_payload: Some(b"encrypted-manifest".to_vec()),

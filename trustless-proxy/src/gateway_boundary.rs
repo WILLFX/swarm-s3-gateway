@@ -6,7 +6,6 @@ use crate::planner::{RemoteGatewayAction, TrustlessRoutePlan};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CiphertextGatewayRequest {
     pub bucket: String,
-    pub key: Option<String>,
     pub action: RemoteGatewayAction,
     pub ciphertext_payload: Option<Vec<u8>>,
     pub encrypted_manifest_payload: Option<Vec<u8>>,
@@ -79,7 +78,6 @@ impl CiphertextGatewayBoundary {
 
         Ok(CiphertextGatewayRequest {
             bucket: require_bucket(&route_plan.bucket)?,
-            key: route_plan.key.clone(),
             action: RemoteGatewayAction::PutCiphertextObject,
             ciphertext_payload: Some(encrypted.ciphertext),
             encrypted_manifest_payload: None,
@@ -99,7 +97,6 @@ impl CiphertextGatewayBoundary {
 
         Ok(CiphertextGatewayRequest {
             bucket: require_bucket(&route_plan.bucket)?,
-            key: route_plan.key.clone(),
             action: RemoteGatewayAction::GetCiphertextObject,
             ciphertext_payload: None,
             encrypted_manifest_payload: None,
@@ -119,7 +116,6 @@ impl CiphertextGatewayBoundary {
 
         Ok(CiphertextGatewayRequest {
             bucket: require_bucket(&route_plan.bucket)?,
-            key: route_plan.key.clone(),
             action: RemoteGatewayAction::HeadCiphertextObject,
             ciphertext_payload: None,
             encrypted_manifest_payload: None,
@@ -136,7 +132,6 @@ impl CiphertextGatewayBoundary {
 
         Ok(CiphertextGatewayRequest {
             bucket: require_bucket(&route_plan.bucket)?,
-            key: None,
             action: RemoteGatewayAction::ListCiphertextManifest,
             ciphertext_payload: None,
             encrypted_manifest_payload: None,
@@ -159,7 +154,6 @@ impl CiphertextGatewayBoundary {
 
         Ok(CiphertextGatewayRequest {
             bucket,
-            key: None,
             action: RemoteGatewayAction::PutEncryptedManifest,
             ciphertext_payload: None,
             encrypted_manifest_payload: Some(encrypted_manifest_payload),
@@ -186,7 +180,6 @@ impl CiphertextGatewayBoundary {
 
         Ok(CiphertextGatewayRequest {
             bucket: require_bucket(&route_plan.bucket)?,
-            key: route_plan.key.clone(),
             action: RemoteGatewayAction::DeleteCiphertextObject,
             ciphertext_payload: None,
             encrypted_manifest_payload: Some(encrypted_manifest_payload),
@@ -442,7 +435,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(request.bucket, "bucket");
-        assert_eq!(request.key, None);
         assert_eq!(request.action, RemoteGatewayAction::PutEncryptedManifest);
         assert_eq!(
             request.encrypted_manifest_payload,

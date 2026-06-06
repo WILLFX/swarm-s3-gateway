@@ -45,6 +45,9 @@ pub enum TrustlessManifestJsonCodecError {
     #[error("duplicate manifest object key id: {0}")]
     DuplicateObjectKeyId(String),
 
+    #[error("duplicate manifest object key: {0}")]
+    DuplicateObjectKey(String),
+
     #[error("manifest JSON encode failed: {0}")]
     Encode(String),
 
@@ -147,9 +150,9 @@ fn canonical_manifest(
 
     let mut entries = manifest.entries.clone();
     entries.sort_by(|left, right| {
-        left.object_key_id
-            .cmp(&right.object_key_id)
-            .then_with(|| left.object_key.cmp(&right.object_key))
+        left.object_key
+            .cmp(&right.object_key)
+            .then_with(|| left.object_key_id.cmp(&right.object_key_id))
     });
 
     Ok(TrustlessManifest {
@@ -165,11 +168,19 @@ fn validate_manifest(manifest: &TrustlessManifest) -> Result<(), TrustlessManife
     }
 
     let mut object_key_ids = BTreeSet::new();
+    let mut object_keys = BTreeSet::new();
 
     for entry in &manifest.entries {
         validate_entry(entry)?;
 
+        let object_key = entry.object_key.trim().to_owned();
         let object_key_id = entry.object_key_id.trim().to_owned();
+
+        if !object_keys.insert(object_key.clone()) {
+            return Err(TrustlessManifestJsonCodecError::DuplicateObjectKey(
+                object_key,
+            ));
+        }
 
         if !object_key_ids.insert(object_key_id.clone()) {
             return Err(TrustlessManifestJsonCodecError::DuplicateObjectKeyId(
@@ -407,6 +418,19 @@ mod tests {
         assert_eq!(
             err,
             TrustlessManifestJsonCodecError::DuplicateObjectKeyId(hex::encode([1u8; 32]))
+        );
+    }
+
+    #[test]
+    fn manifest_json_codec_rejects_duplicate_object_keys() {
+        let mut manifest = sample_manifest();
+        manifest.entries = vec![entry(1, "docs/a.txt"), entry(2, "docs/a.txt")];
+
+        let err = TrustlessManifestJsonCodec::encode_manifest(&manifest).unwrap_err();
+
+        assert_eq!(
+            err,
+            TrustlessManifestJsonCodecError::DuplicateObjectKey("docs/a.txt".to_owned())
         );
     }
 

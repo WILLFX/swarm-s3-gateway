@@ -56,9 +56,6 @@ pub enum LocalTrustlessHttpMappingError {
     #[error("object key is required in HTTP path")]
     MissingObjectKey,
 
-    #[error("object key id is required for object operation")]
-    MissingObjectKeyId,
-
     #[error("PUT object requires a local plaintext body")]
     MissingPutPlaintextBody,
 
@@ -109,7 +106,7 @@ impl LocalTrustlessHttpMapper {
             recipients,
         } = context;
 
-        let object_key_id = object_key_id_for_operation(object_key_id, operation)?;
+        let object_key_id = object_key_id_for_operation(object_key_id, operation);
 
         Ok(LocalTrustlessRequestInput {
             operation,
@@ -268,25 +265,15 @@ fn parse_target(
 fn object_key_id_for_operation(
     object_key_id: Option<String>,
     operation: LocalS3Operation,
-) -> Result<Option<String>, LocalTrustlessHttpMappingError> {
+) -> Option<String> {
     match operation {
         LocalS3Operation::PutObject
         | LocalS3Operation::GetObject
         | LocalS3Operation::HeadObject
-        | LocalS3Operation::DeleteObject => {
-            let Some(object_key_id) = object_key_id else {
-                return Err(LocalTrustlessHttpMappingError::MissingObjectKeyId);
-            };
-
-            let object_key_id = object_key_id.trim().to_owned();
-
-            if object_key_id.is_empty() {
-                return Err(LocalTrustlessHttpMappingError::MissingObjectKeyId);
-            }
-
-            Ok(Some(object_key_id))
-        }
-        LocalS3Operation::ListObjectsV2 | LocalS3Operation::CreateTrustlessBucket => Ok(None),
+        | LocalS3Operation::DeleteObject => object_key_id
+            .map(|object_key_id| object_key_id.trim().to_owned())
+            .filter(|object_key_id| !object_key_id.is_empty()),
+        LocalS3Operation::ListObjectsV2 | LocalS3Operation::CreateTrustlessBucket => None,
     }
 }
 

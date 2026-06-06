@@ -29,9 +29,6 @@ pub enum TrustlessRequestContextError {
     #[error("bucket id is required")]
     MissingBucketId,
 
-    #[error("object key id is required for object operation")]
-    MissingObjectKeyId,
-
     #[error("local account is required")]
     MissingLocalAccount,
 
@@ -75,16 +72,7 @@ impl TrustlessRequestContextBuilder {
         )?;
         let recipients = normalize_recipients(input.recipients)?;
 
-        let object_key_id = match input.route_intent.operation {
-            LocalS3Operation::PutObject
-            | LocalS3Operation::GetObject
-            | LocalS3Operation::HeadObject
-            | LocalS3Operation::DeleteObject => Some(require_non_empty(
-                input.object_key_id.unwrap_or_default(),
-                TrustlessRequestContextError::MissingObjectKeyId,
-            )?),
-            LocalS3Operation::ListObjectsV2 | LocalS3Operation::CreateTrustlessBucket => None,
-        };
+        let object_key_id = normalize_optional(input.object_key_id);
 
         validate_plaintext_body(&input.route_intent)?;
 
@@ -151,6 +139,12 @@ fn require_non_empty(
     }
 
     Ok(value)
+}
+
+fn normalize_optional(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn normalize_recipients(
@@ -225,21 +219,21 @@ mod tests {
     }
 
     #[test]
-    fn get_head_delete_contexts_require_object_key_id_without_plaintext() {
+    fn get_head_delete_contexts_allow_missing_object_key_id_without_plaintext() {
         for operation in [
             LocalS3Operation::GetObject,
             LocalS3Operation::HeadObject,
             LocalS3Operation::DeleteObject,
         ] {
-            let context = TrustlessRequestContextBuilder::build(input(operation)).unwrap();
+            let mut input = input(operation);
+            input.object_key_id = None;
+
+            let context = TrustlessRequestContextBuilder::build(input).unwrap();
 
             assert_eq!(context.local_operation, operation);
             assert!(context.plaintext_body.is_none());
             assert!(!context.plaintext_body_allowed_locally);
-            assert_eq!(
-                context.preflight_request.object_key_id,
-                Some(hex::encode([2u8; 32]))
-            );
+            assert!(context.preflight_request.object_key_id.is_none());
             assert!(!context.gateway_plaintext_access);
         }
     }
@@ -294,14 +288,13 @@ mod tests {
     }
 
     #[test]
-    fn context_builder_rejects_missing_object_key_id_for_object_operations() {
+    fn context_builder_preserves_optional_object_key_id_when_present() {
+        let context =
+            TrustlessRequestContextBuilder::build(input(LocalS3Operation::GetObject)).unwrap();
+
         assert_eq!(
-            TrustlessRequestContextBuilder::build(TrustlessRequestContextInput {
-                object_key_id: None,
-                ..input(LocalS3Operation::GetObject)
-            })
-            .unwrap_err(),
-            TrustlessRequestContextError::MissingObjectKeyId
+            context.preflight_request.object_key_id,
+            Some(hex::encode([2u8; 32]))
         );
     }
 
