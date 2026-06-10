@@ -143,6 +143,9 @@ jobs:
       - name: Check gateway trustless ciphertext endpoint surface
         run: ./scripts/check_gateway_trustless_ciphertext_endpoint_surface.py
 
+      - name: Check trustless owner-only auth surface
+        run: ./scripts/check_trustless_owner_only_auth_surface.py
+
 
 
 

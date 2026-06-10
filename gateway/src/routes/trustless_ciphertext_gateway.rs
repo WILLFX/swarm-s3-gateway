@@ -212,11 +212,7 @@ async fn authorize_trustless_bucket(
         .map_err(|_| RouteError::chain_failure())?
         .ok_or_else(|| RouteError::not_found("trustless bucket was not found"))?;
 
-    if chain_bucket.owner != principal.owner {
-        return Err(RouteError::forbidden(
-            "trustless bucket is not owned by authenticated principal",
-        ));
-    }
+    enforce_owner_only_trustless_auth(principal, &chain_bucket)?;
 
     let bucket_type = state
         .registry_client
@@ -236,6 +232,19 @@ async fn authorize_trustless_bucket(
         storage_bucket: hex::encode(bucket_id),
         chain_bucket,
     })
+}
+
+fn enforce_owner_only_trustless_auth(
+    principal: &AwsPrincipal,
+    chain_bucket: &ChainBucketRecord,
+) -> Result<(), RouteError> {
+    if chain_bucket.owner != principal.owner {
+        return Err(RouteError::forbidden(
+            "trustless remote gateway access is owner-only until bucket-scoped delegation is implemented",
+        ));
+    }
+
+    Ok(())
 }
 
 async fn execute_ciphertext_gateway_request(
@@ -776,6 +785,13 @@ mod tests {
         }
     }
 
+    fn principal(owner: [u8; 32]) -> AwsPrincipal {
+        AwsPrincipal {
+            access_key_id: "test-access-key".to_owned(),
+            owner,
+        }
+    }
+
     async fn execute_for_test(
         bee: &SmokeBeeStorage,
         anchor: &SmokeAnchorClient,
@@ -834,6 +850,33 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("unknown field `key`"));
+    }
+
+    #[test]
+    fn owner_only_trustless_auth_rejects_non_owner_delegate_shape() {
+        let mut authorized = authorized_bucket(Vec::new());
+        let owner = [9u8; 32];
+        let delegate = [10u8; 32];
+        authorized.chain_bucket.owner = owner;
+
+        let error =
+            enforce_owner_only_trustless_auth(&principal(delegate), &authorized.chain_bucket)
+                .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.message,
+            "trustless remote gateway access is owner-only until bucket-scoped delegation is implemented"
+        );
+    }
+
+    #[test]
+    fn owner_only_trustless_auth_allows_bucket_owner() {
+        let mut authorized = authorized_bucket(Vec::new());
+        let owner = [9u8; 32];
+        authorized.chain_bucket.owner = owner;
+
+        enforce_owner_only_trustless_auth(&principal(owner), &authorized.chain_bucket).unwrap();
     }
 
     #[test]
