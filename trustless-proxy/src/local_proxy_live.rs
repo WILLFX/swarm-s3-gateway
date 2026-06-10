@@ -11,7 +11,7 @@ use crate::http_mapping::{
     LocalTrustlessHttpResponse,
 };
 use crate::local_keystore::LocalKeystoreResolver;
-use crate::manifest::{TrustlessManifestCipher, TrustlessManifestEntry};
+use crate::manifest::TrustlessManifestCipher;
 use crate::recipient_keys::RecipientKeyResolver;
 use crate::remote_gateway::TrustlessRemoteGatewayClient;
 use crate::types::{RecipientEncryptionKey, RecipientEnvelopeContext};
@@ -33,7 +33,6 @@ pub struct LocalTrustlessLiveServeResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalTrustlessLiveExecutionMetadata {
     pub http_context: LocalTrustlessHttpRequestContext,
-    pub manifest_entry: Option<TrustlessManifestEntry>,
     pub envelope_context: RecipientEnvelopeContext,
 }
 
@@ -135,51 +134,32 @@ impl LocalTrustlessLiveContextBuilder for LocalTrustlessHeaderContextBuilder {
         let local_account = required_header(headers, "x-s3w-local-account")?;
         let local_key_type = required_header(headers, "x-s3w-local-key-type")?;
         let recipients = parse_recipients(headers)?;
-        let object_key_id = match shape {
-            LiveRequestShape::PutObject | LiveRequestShape::ObjectMetadata => {
-                Some(required_header(headers, "x-s3w-object-key-id")?)
-            }
-            LiveRequestShape::BucketMetadata => optional_header(headers, "x-s3w-object-key-id"),
-        };
 
         let http_context = LocalTrustlessHttpRequestContext {
             bucket_id: bucket_id.clone(),
-            object_key_id: match shape {
-                LiveRequestShape::PutObject | LiveRequestShape::ObjectMetadata => {
-                    object_key_id.clone()
-                }
-                LiveRequestShape::BucketMetadata => None,
-            },
+            object_key_id: None,
             policy_version,
             local_account,
             local_key_type,
             recipients,
         };
 
-        let manifest_entry = match shape {
-            LiveRequestShape::PutObject => Some(TrustlessManifestEntry {
-                object_key: object_key_from_path(&request.path)?,
-                object_key_id: object_key_id
-                    .clone()
-                    .expect("PUT object shape must require object key id"),
-                ciphertext_ref: required_header(headers, "x-s3w-manifest-ciphertext-ref")?,
-                ciphertext_size: parse_u64_header(headers, "x-s3w-manifest-ciphertext-size")?,
-                content_type: optional_header(headers, "x-s3w-manifest-content-type"),
-                etag: optional_header(headers, "x-s3w-manifest-etag"),
-            }),
-            LiveRequestShape::ObjectMetadata | LiveRequestShape::BucketMetadata => None,
-        };
+        match shape {
+            LiveRequestShape::PutObject => {
+                object_key_from_path(&request.path)?;
+            }
+            LiveRequestShape::ObjectMetadata | LiveRequestShape::BucketMetadata => {}
+        }
 
         let envelope_context = RecipientEnvelopeContext {
             bucket_id: bucket_id.clone(),
-            object_key_id: object_key_id.unwrap_or(bucket_id),
+            object_key_id: bucket_id,
             policy_version,
             recipients: parse_recipient_keys(headers)?,
         };
 
         Ok(LocalTrustlessLiveExecutionMetadata {
             http_context,
-            manifest_entry,
             envelope_context,
         })
     }
@@ -344,7 +324,6 @@ where
     let response = executor.execute_live_http_request(LocalTrustlessExecutionInput {
         http_request: parsed.request,
         http_context: metadata.http_context,
-        manifest_entry: metadata.manifest_entry,
         envelope_context: metadata.envelope_context,
     })?;
 
@@ -845,18 +824,12 @@ mod tests {
         format!(
             "\
 x-s3w-bucket-id: {bucket_id}\r\n\
-x-s3w-object-key-id: {object_key_id}\r\n\
 x-s3w-policy-version: 7\r\n\
 x-s3w-local-account: alice\r\n\
 x-s3w-local-key-type: aws-esdk-rust-recipient-key\r\n\
 x-s3w-recipients: alice\r\n\
-x-s3w-recipient-keys: alice|aws-esdk-rust-recipient-key|1|true|{public_key_hex}\r\n\
-x-s3w-manifest-ciphertext-ref: bee://ciphertext/live-bind\r\n\
-x-s3w-manifest-ciphertext-size: 64\r\n\
-x-s3w-manifest-content-type: text/plain\r\n\
-x-s3w-manifest-etag: live-etag\r\n",
+x-s3w-recipient-keys: alice|aws-esdk-rust-recipient-key|1|true|{public_key_hex}\r\n",
             bucket_id = hex::encode([1u8; 32]),
-            object_key_id = hex::encode([2u8; 32]),
             public_key_hex = hex::encode("public-key")
         )
     }
@@ -956,13 +929,10 @@ x-s3w-recipient-keys: alice|aws-esdk-rust-recipient-key|1|true|{public_key_hex}\
         assert_eq!(input.http_request.path, "/bucket/secret.txt");
         assert_eq!(input.http_request.body, Some(body.to_vec()));
         assert_eq!(input.http_context.bucket_id, hex::encode([1u8; 32]));
-        assert_eq!(
-            input.http_context.object_key_id,
-            Some(hex::encode([2u8; 32]))
-        );
+        assert!(input.http_context.object_key_id.is_none());
         assert_eq!(input.http_context.policy_version, 7);
         assert_eq!(input.http_context.local_account, "alice");
-        assert_eq!(input.manifest_entry.unwrap().object_key, "secret.txt");
+        assert_eq!(input.envelope_context.object_key_id, hex::encode([1u8; 32]));
         assert_eq!(input.envelope_context.recipients.len(), 1);
         assert_eq!(
             input.envelope_context.recipients[0].public_key,
@@ -998,7 +968,6 @@ x-s3w-recipient-keys: alice|aws-esdk-rust-recipient-key|1|true|{public_key_hex}\
         let input = seen_input.lock().unwrap().clone().unwrap();
         assert_eq!(input.http_request.method, LocalTrustlessHttpMethod::Get);
         assert!(input.http_request.body.is_none());
-        assert!(input.manifest_entry.is_none());
     }
 
     #[test]
@@ -1032,7 +1001,6 @@ x-s3w-recipient-keys: alice|aws-esdk-rust-recipient-key|1|true|{public_key_hex}\
             Some("list-type=2&prefix=docs/".to_owned())
         );
         assert!(input.http_context.object_key_id.is_none());
-        assert!(input.manifest_entry.is_none());
         assert_eq!(input.envelope_context.object_key_id, hex::encode([1u8; 32]));
     }
 
@@ -1062,12 +1030,8 @@ x-s3w-recipient-keys: alice|aws-esdk-rust-recipient-key|1|true|{public_key_hex}\
         let input = seen_input.lock().unwrap().clone().unwrap();
         assert_eq!(input.http_request.method, LocalTrustlessHttpMethod::Delete);
         assert_eq!(input.http_request.path, "/bucket/secret.txt");
-        assert_eq!(
-            input.http_context.object_key_id,
-            Some(hex::encode([2u8; 32]))
-        );
-        assert!(input.manifest_entry.is_none());
-        assert_eq!(input.envelope_context.object_key_id, hex::encode([2u8; 32]));
+        assert!(input.http_context.object_key_id.is_none());
+        assert_eq!(input.envelope_context.object_key_id, hex::encode([1u8; 32]));
     }
 
     #[test]

@@ -71,8 +71,10 @@ On encryption, the keyring:
 2. Looks up authorized recipients for the bucket or object.
 3. Fetches each recipient's registered public encryption key from the identity contract.
 4. Wraps the data key into encrypted data-key envelopes for those recipients.
-5. Includes envelope metadata such as recipient account, encryption key version, bucket ID, object key ID, and policy version.
+5. Includes envelope metadata such as recipient account, encryption key version, bucket ID, opaque object context ID, and policy version.
 6. Returns encrypted data-key envelopes to the `aws-esdk` flow.
+
+AWS ESDK encryption context is authenticated metadata and may be visible to anyone with the ciphertext. For object payloads, the object context ID must therefore be an opaque locally generated value, not a plaintext object key, a caller-supplied privacy identifier, or a deterministic bucket/key hash. For manifest payloads, the local proxy uses a bucket-scoped manifest context.
 
 On decryption, the keyring:
 
@@ -134,11 +136,13 @@ The upload path for a trustless private bucket is:
 3. The local proxy checks or fetches the bucket policy and recipient set.
 4. The local proxy uses `aws-esdk` with the custom keyring to encrypt the object payload locally.
 5. The custom keyring wraps the data key to the owner and authorized recipients using public encryption keys from the identity contract.
-6. The local proxy builds encrypted object and bucket manifest updates.
-7. The local proxy sends only ciphertext, encrypted manifests, encrypted data-key envelopes, and anchor instructions to the remote gateway.
-8. The remote gateway stores ciphertext in Bee.
-9. The remote gateway anchors CAS-protected roots on-chain.
-10. The remote gateway never receives plaintext object bytes or plaintext data keys.
+6. The local proxy generates a fresh opaque object context ID for the new object version.
+7. The local proxy uploads only encrypted object bytes to the remote gateway.
+8. The remote gateway stores ciphertext in Bee and returns an immutable ciphertext reference.
+9. The local proxy writes the plaintext object key, opaque object context ID, ciphertext reference, and metadata into the encrypted bucket manifest locally.
+10. The local proxy sends only the encrypted manifest update and manifest-root precondition to the remote gateway.
+11. The remote gateway anchors CAS-protected roots on-chain.
+12. The remote gateway never receives plaintext object bytes, plaintext object keys, caller-supplied object key IDs, or plaintext data keys.
 
 ## Download flow
 
@@ -155,13 +159,15 @@ The download path for a trustless private bucket is:
 9. The local proxy returns plaintext to the local S3 client.
 10. The remote gateway never sees the plaintext response.
 
+The remote trustless object read request does not contain the plaintext object key. The plaintext key is used only inside the local proxy after decrypting the encrypted manifest.
+
 ## List and manifest flow
 
 For trustless private buckets, private listings must be decrypted locally.
 
 The remote gateway may return encrypted owner catalog and bucket manifest ciphertext. The local proxy decrypts those manifests and presents S3-compatible list results to the local S3 client.
 
-The remote gateway must not require plaintext private object names to serve trustless private list operations.
+The remote gateway must not require plaintext private object names or caller-supplied object key IDs to serve trustless private list operations.
 
 ## Delegation flow
 
@@ -216,6 +222,7 @@ For trustless private buckets, the remote gateway is responsible for:
 - Chain anchoring
 - CAS root updates
 - Returning encrypted blobs, encrypted manifests, and encrypted envelope data
+- Storing trustless object ciphertext as raw immutable Bee bytes and returning the resulting ciphertext reference
 - Serving object GET and HEAD reads only for explicit ciphertext references resolved by the local proxy from the encrypted manifest
 
 The remote gateway must not be responsible for:
@@ -226,6 +233,8 @@ The remote gateway must not be responsible for:
 - Data-key unwrapping
 - Private manifest decryption
 - Private owner catalog decryption
+- Receiving plaintext object keys in the trustless ciphertext endpoint
+- Receiving caller-supplied object key IDs as the trustless privacy primitive
 - Choosing object ciphertext by mutable bucket/key pointer fallback for trustless object reads
 
 ## Compatibility model
@@ -258,3 +267,5 @@ The chain-anchored encrypted manifest root is the authoritative trustless bucket
 Trustless object GET and HEAD requests must carry an explicit `ciphertext_reference_hex` resolved from the locally decrypted, chain-anchored encrypted manifest. Missing references are rejected; the remote gateway must not fall back to bucket/key pointer lookup for object reads.
 
 Trustless object DELETE requests must carry the encrypted manifest reference that the local proxy fetched and decrypted before removing the entry. Missing expected manifest references are rejected so DELETE cannot silently overwrite a concurrent manifest root.
+
+Trustless object PUT requests must not send plaintext object keys or caller-supplied object key IDs to the remote gateway. The local proxy generates a fresh opaque object context ID per object version, encrypts object bytes locally under that context, sends only ciphertext bytes to the remote gateway, receives an immutable ciphertext reference, and then stores the plaintext key to ciphertext reference mapping only inside the encrypted manifest.

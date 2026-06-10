@@ -3,16 +3,16 @@ use crate::{
     bee::client::BeeStorage,
     crypto::bucket_name_hash,
     orphan_reconciliation::{
-        record_anchor_attempt, record_anchor_failure, record_anchor_success, AnchorAttemptEvent,
-        AnchorJournalAction, GatewayBeeReference, GatewayBeeReferenceKind, GatewayWriteJournal,
-        JournalBucketType,
+        AnchorAttemptEvent, AnchorJournalAction, GatewayBeeReference, GatewayBeeReferenceKind,
+        GatewayWriteJournal, JournalBucketType, record_anchor_attempt, record_anchor_failure,
+        record_anchor_success,
     },
     traits::AnchorClient,
 };
 use axum::{
+    Json,
     extract::{Extension, State},
     http::StatusCode,
-    Json,
 };
 use bytes::Bytes;
 use common::types::{AwsPrincipal, ChainBucketRecord, ChainBucketType};
@@ -64,11 +64,11 @@ impl CiphertextGatewayAction {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CiphertextGatewayRequest {
     version: u32,
     action: String,
     bucket: String,
-    key: Option<String>,
     ciphertext_hex: Option<String>,
     #[serde(default)]
     ciphertext_reference_hex: Option<String>,
@@ -248,7 +248,6 @@ async fn execute_ciphertext_gateway_request(
 ) -> Result<CiphertextGatewayResponse, (StatusCode, String)> {
     match action {
         CiphertextGatewayAction::PutCiphertextObject => {
-            let key = required_key(&request).map_err(RouteError::into_response)?;
             reject_manifest_payload(&request).map_err(RouteError::into_response)?;
             reject_ciphertext_reference(&request).map_err(RouteError::into_response)?;
             reject_expected_manifest_reference(&request).map_err(RouteError::into_response)?;
@@ -257,18 +256,13 @@ async fn execute_ciphertext_gateway_request(
                     .map_err(RouteError::into_response)?;
 
             let put = bee_client
-                .put_object_and_update_pointer(
-                    &authorized.storage_bucket,
-                    key,
-                    Bytes::from(ciphertext),
-                )
+                .put_bytes(Bytes::from(ciphertext))
                 .await
                 .map_err(|_| RouteError::storage_failure().into_response())?;
 
-            Ok(metadata_response(action).with_ciphertext_reference(put.swarm_reference))
+            Ok(metadata_response(action).with_ciphertext_reference(put.reference))
         }
         CiphertextGatewayAction::GetCiphertextObject => {
-            required_key(&request).map_err(RouteError::into_response)?;
             reject_all_payloads(&request).map_err(RouteError::into_response)?;
             reject_expected_manifest_reference(&request).map_err(RouteError::into_response)?;
 
@@ -298,7 +292,6 @@ async fn execute_ciphertext_gateway_request(
             })
         }
         CiphertextGatewayAction::HeadCiphertextObject => {
-            required_key(&request).map_err(RouteError::into_response)?;
             reject_all_payloads(&request).map_err(RouteError::into_response)?;
             reject_expected_manifest_reference(&request).map_err(RouteError::into_response)?;
 
@@ -319,7 +312,6 @@ async fn execute_ciphertext_gateway_request(
             Ok(metadata_response(action))
         }
         CiphertextGatewayAction::ListCiphertextManifest => {
-            reject_key(&request).map_err(RouteError::into_response)?;
             reject_all_payloads(&request).map_err(RouteError::into_response)?;
             reject_ciphertext_reference(&request).map_err(RouteError::into_response)?;
             reject_expected_manifest_reference(&request).map_err(RouteError::into_response)?;
@@ -358,7 +350,6 @@ async fn execute_ciphertext_gateway_request(
             })
         }
         CiphertextGatewayAction::PutEncryptedManifest => {
-            reject_key(&request).map_err(RouteError::into_response)?;
             reject_ciphertext_payload(&request).map_err(RouteError::into_response)?;
             reject_ciphertext_reference(&request).map_err(RouteError::into_response)?;
             let encrypted_manifest = decode_required_hex(
@@ -382,7 +373,6 @@ async fn execute_ciphertext_gateway_request(
             Ok(metadata_response(action).with_encrypted_manifest_reference(manifest_reference))
         }
         CiphertextGatewayAction::DeleteCiphertextObject => {
-            reject_key(&request).map_err(RouteError::into_response)?;
             reject_ciphertext_payload(&request).map_err(RouteError::into_response)?;
             reject_ciphertext_reference(&request).map_err(RouteError::into_response)?;
             let encrypted_manifest = decode_required_hex(
@@ -411,7 +401,6 @@ async fn execute_ciphertext_gateway_request(
             Ok(metadata_response(action).with_encrypted_manifest_reference(manifest_reference))
         }
         CiphertextGatewayAction::CreateTrustlessBucket => {
-            reject_key(&request).map_err(RouteError::into_response)?;
             reject_all_payloads(&request).map_err(RouteError::into_response)?;
             reject_ciphertext_reference(&request).map_err(RouteError::into_response)?;
             reject_expected_manifest_reference(&request).map_err(RouteError::into_response)?;
@@ -614,31 +603,6 @@ fn validate_common_request(request: &CiphertextGatewayRequest) -> Result<(), Rou
     Ok(())
 }
 
-fn required_key(request: &CiphertextGatewayRequest) -> Result<&str, RouteError> {
-    request
-        .key
-        .as_deref()
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
-        .ok_or_else(|| RouteError::bad_request("object key is required"))
-}
-
-fn reject_key(request: &CiphertextGatewayRequest) -> Result<(), RouteError> {
-    if request
-        .key
-        .as_deref()
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
-        .is_some()
-    {
-        return Err(RouteError::bad_request(
-            "object key is not allowed for this action",
-        ));
-    }
-
-    Ok(())
-}
-
 fn reject_ciphertext_payload(request: &CiphertextGatewayRequest) -> Result<(), RouteError> {
     if request.ciphertext_hex.is_some() {
         return Err(RouteError::bad_request(
@@ -787,7 +751,6 @@ mod tests {
             version: WIRE_VERSION,
             action: action.to_string(),
             bucket: "bucket-a".to_string(),
-            key: None,
             ciphertext_hex: None,
             ciphertext_reference_hex: None,
             encrypted_manifest_hex: None,
@@ -860,24 +823,17 @@ mod tests {
     }
 
     #[test]
-    fn put_requires_object_key() {
-        let request = request("put_ciphertext_object");
+    fn rejects_object_key_wire_field() {
+        let err = serde_json::from_value::<CiphertextGatewayRequest>(serde_json::json!({
+            "version": WIRE_VERSION,
+            "action": "put_ciphertext_object",
+            "bucket": "bucket-a",
+            "key": "private/object.txt",
+            "ciphertext_hex": hex::encode(b"ciphertext")
+        }))
+        .unwrap_err();
 
-        let error = required_key(&request).unwrap_err();
-
-        assert_eq!(error.status, StatusCode::BAD_REQUEST);
-        assert_eq!(error.message, "object key is required");
-    }
-
-    #[test]
-    fn list_rejects_object_key() {
-        let mut request = request("list_ciphertext_manifest");
-        request.key = Some("private/object.txt".to_string());
-
-        let error = reject_key(&request).unwrap_err();
-
-        assert_eq!(error.status, StatusCode::BAD_REQUEST);
-        assert_eq!(error.message, "object key is not allowed for this action");
+        assert!(err.to_string().contains("unknown field `key`"));
     }
 
     #[test]
@@ -917,7 +873,6 @@ mod tests {
         let action = CiphertextGatewayAction::parse(&request.action).unwrap();
         assert_eq!(action, CiphertextGatewayAction::PutEncryptedManifest);
 
-        reject_key(&request).unwrap();
         reject_ciphertext_payload(&request).unwrap();
 
         let decoded = decode_required_hex(
@@ -1125,9 +1080,12 @@ mod tests {
             &self,
             data: Bytes,
         ) -> anyhow::Result<crate::bee::client::BeePutBytesResult> {
-            Ok(crate::bee::client::BeePutBytesResult {
-                reference: format!("smoke-ref-{}", data.len()),
-            })
+            let mut inner = self.inner.lock().unwrap();
+            inner.put_count += 1;
+            let reference = format!("{:064x}", inner.put_count);
+            inner.objects.insert(reference.clone(), data.to_vec());
+
+            Ok(crate::bee::client::BeePutBytesResult { reference })
         }
 
         async fn get_pointer_bytes(&self, topic: [u8; 32]) -> anyhow::Result<Option<Vec<u8>>> {
@@ -1169,7 +1127,6 @@ mod tests {
         let ciphertext = b"remote-object-ciphertext";
 
         let mut put = request("put_ciphertext_object");
-        put.key = Some("docs/a.txt".to_owned());
         put.ciphertext_hex = Some(hex::encode(ciphertext));
 
         let put_response = execute_for_test(&bee, &anchor, authorized.clone(), put)
@@ -1181,12 +1138,16 @@ mod tests {
         assert!(!put_response.gateway_plaintext_access);
         let ciphertext_reference = put_response.ciphertext_reference_hex.clone().unwrap();
         assert_eq!(
-            bee.pointed_object_bytes(&authorized.storage_bucket, "docs/a.txt"),
+            bee.inner
+                .lock()
+                .unwrap()
+                .objects
+                .get(&ciphertext_reference)
+                .cloned(),
             Some(ciphertext.to_vec())
         );
 
         let mut get = request("get_ciphertext_object");
-        get.key = Some("docs/a.txt".to_owned());
         get.ciphertext_reference_hex = Some(ciphertext_reference.clone());
 
         let get_response = execute_for_test(&bee, &anchor, authorized, get)
@@ -1335,8 +1296,7 @@ mod tests {
                 .insert(topic, hex::decode(format!("{:064x}", 99)).unwrap());
         }
 
-        let mut get = request("get_ciphertext_object");
-        get.key = Some("docs/missing-payload.txt".to_owned());
+        let get = request("get_ciphertext_object");
 
         let err = execute_for_test(&bee, &anchor, authorized, get)
             .await
@@ -1353,7 +1313,6 @@ mod tests {
         let authorized = authorized_bucket(Vec::new());
 
         let mut put = request("put_ciphertext_object");
-        put.key = Some("docs/a.txt".to_owned());
         put.ciphertext_hex = Some(hex::encode(b"ciphertext-only"));
         put.gateway_plaintext_access = Some(true);
 

@@ -1,6 +1,8 @@
+use aes_gcm::aead::{OsRng, rand_core::RngCore};
 use thiserror::Error;
 
 use crate::config::TrustlessProxyConfig;
+use crate::encryption::{TrustlessEncryptRequest, TrustlessEncryptionBoundary};
 use crate::gateway_boundary::{CiphertextGatewayBoundary, CiphertextGatewayBoundaryError};
 use crate::http_mapping::{
     LocalTrustlessHttpRequest, LocalTrustlessHttpRequestContext, LocalTrustlessHttpResponse,
@@ -11,7 +13,7 @@ use crate::manifest::{
     TrustlessManifestCipher, TrustlessManifestEntry, TrustlessManifestError,
 };
 use crate::planner::{PlannerError, RemoteGatewayAction, TrustlessRoutePlanner};
-use crate::preflight::TrustlessOperationPreflightBuilder;
+use crate::preflight::{TrustlessOperationPreflightBuilder, TrustlessPreflightRequest};
 use crate::recipient_keys::RecipientKeyResolver;
 use crate::remote_gateway::{
     RemoteGatewayClientError, TrustlessRemoteGatewayClient, TrustlessRemoteGatewayExecutor,
@@ -36,7 +38,6 @@ pub struct LocalTrustlessExecutionEngine<C, RK, LK, G> {
 pub struct LocalTrustlessExecutionInput {
     pub http_request: LocalTrustlessHttpRequest,
     pub http_context: LocalTrustlessHttpRequestContext,
-    pub manifest_entry: Option<TrustlessManifestEntry>,
     pub envelope_context: RecipientEnvelopeContext,
 }
 
@@ -69,8 +70,8 @@ pub enum LocalTrustlessExecutionEngineError {
     #[error("gateway plaintext access is not allowed")]
     GatewayPlaintextAccessRejected,
 
-    #[error("PUT execution requires a local manifest entry")]
-    MissingManifestEntryForPut,
+    #[error("prepared runtime response is missing object key")]
+    MissingPreparedObjectKey,
 
     #[error("remote gateway returned unexpected action: expected {expected:?}, got {actual:?}")]
     UnexpectedRemoteResponseAction {
@@ -157,39 +158,40 @@ where
             LocalS3Operation::PutObject => {
                 let runtime_prepared =
                     &prepared.handler_prepared_response.runtime_prepared_response;
-                let manifest_entry = input
-                    .manifest_entry
-                    .clone()
-                    .ok_or(LocalTrustlessExecutionEngineError::MissingManifestEntryForPut)?;
+                let manifest_context = manifest_envelope_context(&input.envelope_context);
+                let current_manifest =
+                    self.fetch_and_decrypt_current_manifest(runtime_prepared, &manifest_context)?;
 
-                let current_manifest = self.fetch_and_decrypt_current_manifest(
-                    runtime_prepared,
-                    &input.envelope_context,
-                )?;
-
-                let plan =
-                    LocalTrustlessRuntime::build_prepared_put_operation_plan_with_configured_aws_esdk(
-                        runtime_prepared,
-                        current_manifest.manifest,
-                        manifest_entry,
-                        input.envelope_context.clone(),
+                let object_key = runtime_prepared_object_key(runtime_prepared)?;
+                let object_context_id = fresh_object_context_id_hex();
+                let object_context =
+                    object_envelope_context(&input.envelope_context, object_context_id.clone());
+                let plaintext = runtime_prepared_put_plaintext(runtime_prepared)?;
+                let mut preflight_request = runtime_prepared_preflight_request(runtime_prepared);
+                preflight_request.object_key_id = Some(object_context_id.clone());
+                let preflight = self
+                    .preflight_builder
+                    .preflight_put_object(preflight_request)?;
+                let keyring =
+                    LocalTrustlessRuntime::build_aws_esdk_raw_rsa_keyring_from_local_selection(
                         &self.proxy_config,
-                        &self.preflight_builder,
-                        self.manifest_cipher.clone(),
+                        preflight.local_private_key.clone(),
                     )?;
-
-                if plan.gateway_plaintext_access
-                    || plan.encrypted_manifest.gateway_plaintext_access
-                    || plan.object_request.plaintext_payload_present
-                {
-                    return Err(LocalTrustlessExecutionEngineError::GatewayPlaintextAccessRejected);
-                }
-
-                let object_request =
-                    LocalTrustlessRuntime::build_prepared_put_operation_remote_request(
-                        runtime_prepared,
-                        plan.clone(),
-                    )?;
+                let encrypted_object = TrustlessEncryptionBoundary::new(keyring).encrypt_for_put(
+                    TrustlessEncryptRequest {
+                        plaintext,
+                        preflight,
+                    },
+                )?;
+                let ciphertext_size = encrypted_object.ciphertext.len() as u64;
+                let object_request = CiphertextGatewayBoundary::put_ciphertext_request(
+                    &TrustlessRoutePlanner::plan_put_object(
+                        runtime_prepared_bucket(runtime_prepared),
+                        object_key.clone(),
+                        Some(&object_context),
+                    )?,
+                    encrypted_object,
+                )?;
 
                 let object_response = LocalTrustlessRuntime::execute_prepared_remote_request(
                     runtime_prepared,
@@ -202,6 +204,28 @@ where
                     RemoteGatewayAction::PutCiphertextObject,
                 )?;
 
+                let ciphertext_ref = object_response
+                    .ciphertext_reference_hex
+                    .clone()
+                    .filter(|reference| !reference.trim().is_empty())
+                    .ok_or(LocalTrustlessExecutionEngineError::Runtime(
+                        LocalTrustlessRuntimeError::MissingCiphertextReference,
+                    ))?;
+                let manifest_entry = TrustlessManifestEntry {
+                    object_key,
+                    object_key_id: object_context_id,
+                    ciphertext_ref,
+                    ciphertext_size,
+                    content_type: None,
+                    etag: None,
+                };
+                let manifest_boundary =
+                    TrustlessManifestBoundary::new(self.manifest_cipher.clone());
+                let manifest_mutation = manifest_boundary
+                    .upsert_entry_locally(current_manifest.manifest, manifest_entry)?;
+                let manifest_write = manifest_boundary
+                    .encrypt_manifest_locally(manifest_mutation.manifest, manifest_context)?;
+
                 if object_response.gateway_plaintext_access
                     || prepared.http_response.gateway_plaintext_access
                 {
@@ -210,7 +234,7 @@ where
 
                 let manifest_request = CiphertextGatewayBoundary::put_encrypted_manifest_request(
                     runtime_prepared_bucket(runtime_prepared),
-                    plan.encrypted_manifest.ciphertext,
+                    manifest_write.encrypted_manifest.ciphertext,
                     current_manifest.encrypted_manifest_reference_hex,
                 )?;
 
@@ -230,10 +254,9 @@ where
             LocalS3Operation::GetObject => {
                 let runtime_prepared =
                     &prepared.handler_prepared_response.runtime_prepared_response;
-                let current_manifest = self.fetch_and_decrypt_current_manifest(
-                    runtime_prepared,
-                    &input.envelope_context,
-                )?;
+                let manifest_context = manifest_envelope_context(&input.envelope_context);
+                let current_manifest =
+                    self.fetch_and_decrypt_current_manifest(runtime_prepared, &manifest_context)?;
                 let manifest_entry = manifest_entry_for_runtime_request(
                     &current_manifest.manifest,
                     runtime_prepared,
@@ -255,7 +278,7 @@ where
                 let completion = self.server.complete_prepared_get_with_configured_aws_esdk(
                     prepared,
                     gateway_response,
-                    input.envelope_context,
+                    object_envelope_context(&input.envelope_context, manifest_entry.object_key_id),
                     &self.proxy_config,
                     &self.preflight_builder,
                     self.manifest_cipher.clone(),
@@ -272,10 +295,9 @@ where
             LocalS3Operation::HeadObject => {
                 let runtime_prepared =
                     &prepared.handler_prepared_response.runtime_prepared_response;
-                let current_manifest = self.fetch_and_decrypt_current_manifest(
-                    runtime_prepared,
-                    &input.envelope_context,
-                )?;
+                let manifest_context = manifest_envelope_context(&input.envelope_context);
+                let current_manifest =
+                    self.fetch_and_decrypt_current_manifest(runtime_prepared, &manifest_context)?;
                 let manifest_entry = manifest_entry_for_runtime_request(
                     &current_manifest.manifest,
                     runtime_prepared,
@@ -310,10 +332,9 @@ where
             LocalS3Operation::ListObjectsV2 => {
                 let runtime_prepared =
                     &prepared.handler_prepared_response.runtime_prepared_response;
-                let current_manifest = self.fetch_and_decrypt_current_manifest(
-                    runtime_prepared,
-                    &input.envelope_context,
-                )?;
+                let manifest_context = manifest_envelope_context(&input.envelope_context);
+                let current_manifest =
+                    self.fetch_and_decrypt_current_manifest(runtime_prepared, &manifest_context)?;
 
                 let prefix = runtime_prepared_prefix(runtime_prepared);
                 let list_result = TrustlessManifestBoundary::new(self.manifest_cipher.clone())
@@ -330,33 +351,38 @@ where
             LocalS3Operation::DeleteObject => {
                 let runtime_prepared =
                     &prepared.handler_prepared_response.runtime_prepared_response;
-                let current_manifest = self.fetch_and_decrypt_current_manifest(
+                let manifest_context = manifest_envelope_context(&input.envelope_context);
+                let current_manifest =
+                    self.fetch_and_decrypt_current_manifest(runtime_prepared, &manifest_context)?;
+                let manifest_entry = manifest_entry_for_runtime_request(
+                    &current_manifest.manifest,
                     runtime_prepared,
-                    &input.envelope_context,
                 )?;
 
-                let plan = LocalTrustlessRuntime::build_prepared_delete_operation_plan_with_configured_aws_esdk(
-                    runtime_prepared,
+                let mut preflight_request = runtime_prepared_preflight_request(runtime_prepared);
+                preflight_request.object_key_id = Some(manifest_entry.object_key_id.clone());
+                let preflight = self
+                    .preflight_builder
+                    .preflight_delete_object(preflight_request)?;
+                let manifest_boundary =
+                    TrustlessManifestBoundary::new(self.manifest_cipher.clone());
+                let manifest_mutation = manifest_boundary.remove_entry_locally(
                     current_manifest.manifest,
+                    manifest_entry.object_key_id,
+                )?;
+                let manifest_write = manifest_boundary
+                    .encrypt_manifest_locally(manifest_mutation.manifest, manifest_context)?;
+                let request = CiphertextGatewayBoundary::delete_ciphertext_request(
+                    &preflight.route_plan,
+                    manifest_write.encrypted_manifest.ciphertext,
                     current_manifest.encrypted_manifest_reference_hex.clone(),
-                    input.envelope_context.clone(),
-                    &self.proxy_config,
-                    &self.preflight_builder,
-                    self.manifest_cipher.clone(),
                 )?;
 
-                if plan.gateway_plaintext_access
-                    || plan.encrypted_manifest.gateway_plaintext_access
-                    || plan.delete_request.plaintext_payload_present
+                if manifest_write.encrypted_manifest.gateway_plaintext_access
+                    || request.plaintext_payload_present
                 {
                     return Err(LocalTrustlessExecutionEngineError::GatewayPlaintextAccessRejected);
                 }
-
-                let request =
-                    LocalTrustlessRuntime::build_prepared_delete_operation_remote_request(
-                        runtime_prepared,
-                        plan,
-                    )?;
 
                 let gateway_response = LocalTrustlessRuntime::execute_prepared_remote_request(
                     runtime_prepared,
@@ -490,9 +516,9 @@ fn completed_metadata_http_response(operation: LocalS3Operation) -> LocalTrustle
     }
 }
 
-fn runtime_prepared_object_key_id(
+fn runtime_prepared_preflight_request(
     prepared: &LocalTrustlessRuntimePreparedResponse,
-) -> Result<String, LocalTrustlessExecutionEngineError> {
+) -> TrustlessPreflightRequest {
     prepared
         .handler_response
         .request_preparation
@@ -500,12 +526,33 @@ fn runtime_prepared_object_key_id(
         .pipeline_plan
         .request_context
         .preflight_request
-        .object_key_id
         .clone()
-        .filter(|object_key_id| !object_key_id.trim().is_empty())
+}
+
+fn runtime_prepared_object_key(
+    prepared: &LocalTrustlessRuntimePreparedResponse,
+) -> Result<String, LocalTrustlessExecutionEngineError> {
+    runtime_prepared_preflight_request(prepared)
+        .key
+        .filter(|object_key| !object_key.trim().is_empty())
+        .ok_or(LocalTrustlessExecutionEngineError::MissingPreparedObjectKey)
+}
+
+fn runtime_prepared_put_plaintext(
+    prepared: &LocalTrustlessRuntimePreparedResponse,
+) -> Result<Vec<u8>, LocalTrustlessExecutionEngineError> {
+    prepared
+        .handler_response
+        .request_preparation
+        .prepared_operation
+        .pipeline_plan
+        .request_context
+        .plaintext_body
+        .clone()
+        .filter(|body| !body.is_empty())
         .ok_or_else(|| {
             LocalTrustlessExecutionEngineError::Runtime(
-                LocalTrustlessRuntimeError::PreparedRemoteRequestMissingObjectKeyId,
+                LocalTrustlessRuntimeError::MissingPreparedPutPlaintextBody,
             )
         })
 }
@@ -523,18 +570,39 @@ fn manifest_entry_for_runtime_request(
     manifest: &TrustlessManifest,
     prepared: &LocalTrustlessRuntimePreparedResponse,
 ) -> Result<TrustlessManifestEntry, LocalTrustlessExecutionEngineError> {
-    let object_key_id = runtime_prepared_object_key_id(prepared)?;
+    let object_key = runtime_prepared_object_key(prepared)?;
 
     manifest
         .entries
         .iter()
-        .find(|entry| entry.object_key_id == object_key_id)
+        .find(|entry| entry.object_key == object_key)
         .cloned()
         .ok_or_else(|| {
             LocalTrustlessExecutionEngineError::Manifest(
-                TrustlessManifestError::ManifestEntryNotFound(object_key_id),
+                TrustlessManifestError::ManifestEntryNotFound(object_key),
             )
         })
+}
+
+fn manifest_envelope_context(context: &RecipientEnvelopeContext) -> RecipientEnvelopeContext {
+    let mut manifest_context = context.clone();
+    manifest_context.object_key_id = manifest_context.bucket_id.clone();
+    manifest_context
+}
+
+fn object_envelope_context(
+    context: &RecipientEnvelopeContext,
+    object_key_id: String,
+) -> RecipientEnvelopeContext {
+    let mut object_context = context.clone();
+    object_context.object_key_id = object_key_id;
+    object_context
+}
+
+fn fresh_object_context_id_hex() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
 }
 
 #[cfg(test)]
@@ -874,7 +942,6 @@ mod tests {
         LocalTrustlessExecutionInput {
             http_request: http_request(method, body),
             http_context: http_context(),
-            manifest_entry: Some(engine_manifest_entry()),
             envelope_context: envelope_context(public_key_pem),
         }
     }
@@ -1091,9 +1158,7 @@ mod tests {
         );
 
         assert_eq!(requests[0].bucket, "bucket");
-        assert_eq!(requests[0].key, None);
         assert_eq!(requests[2].bucket, "bucket");
-        assert_eq!(requests[2].key, None);
         assert!(requests[2].encrypted_manifest_payload.is_some());
         assert_eq!(
             requests[2].expected_manifest_reference_hex,
@@ -1206,7 +1271,6 @@ mod tests {
         input.http_request.path = "/bucket".to_owned();
         input.http_request.query = Some("list-type=2&prefix=secret".to_owned());
         input.http_context.object_key_id = None;
-        input.manifest_entry = None;
 
         let response = engine.execute_http_request(input).unwrap();
 

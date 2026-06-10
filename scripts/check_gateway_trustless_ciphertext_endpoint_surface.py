@@ -47,6 +47,7 @@ def extract_match_arm(label: str, next_label: str) -> str:
 required_endpoint_tokens = [
     'const WIRE_VERSION: u32 = 1',
     'const TRUSTLESS_MANIFEST_KEY: &str = "__s3w_trustless_manifest"',
+    '#[serde(deny_unknown_fields)]',
     'put_ciphertext_object',
     'get_ciphertext_object',
     'head_ciphertext_object',
@@ -59,6 +60,7 @@ required_endpoint_tokens = [
     'encrypted_manifest_reference_hex',
     'expected_manifest_reference_hex',
     'gateway_plaintext_access',
+    'put_bytes',
     'put_object_and_update_pointer',
     'update_bucket_manifest_root_for_put_anchor',
     'update_bucket_manifest_root_for_delete_anchor',
@@ -132,6 +134,10 @@ if "post(routes::trustless_ciphertext_gateway::handle)" not in main_text:
     errors.append("main.rs does not route POST to trustless ciphertext handler")
 
 for forbidden in [
+    "key: Option<String>",
+    "request.key",
+    "required_key",
+    "reject_key",
     "plaintext_payload",
     "plaintext_object",
     "plaintext_manifest",

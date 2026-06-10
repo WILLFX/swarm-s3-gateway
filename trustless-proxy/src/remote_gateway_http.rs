@@ -112,7 +112,6 @@ struct RemoteGatewayHttpRequestEnvelope {
     version: u32,
     action: String,
     bucket: String,
-    key: Option<String>,
     ciphertext_hex: Option<String>,
     encrypted_manifest_hex: Option<String>,
     ciphertext_reference_hex: Option<String>,
@@ -673,7 +672,6 @@ fn request_to_http_envelope(
         version: WIRE_VERSION,
         action: action_to_wire(request.action).to_owned(),
         bucket: request.bucket,
-        key: request.key,
         ciphertext_hex: request.ciphertext_payload.map(hex::encode),
         encrypted_manifest_hex: request.encrypted_manifest_payload.map(hex::encode),
         ciphertext_reference_hex: request.ciphertext_reference_hex,
@@ -827,7 +825,6 @@ mod tests {
     fn request(action: RemoteGatewayAction) -> CiphertextGatewayRequest {
         CiphertextGatewayRequest {
             bucket: "bucket".to_owned(),
-            key: Some("secret.txt".to_owned()),
             action,
             ciphertext_payload: None,
             encrypted_manifest_payload: None,
@@ -908,15 +905,10 @@ mod tests {
         let executor = TrustlessRemoteGatewayExecutor::new(client);
 
         let bucket = format!("trustless-http-sigv4-live-{}", std::process::id());
-        let object_key = format!(
-            "docs/sigv4-{}.bin",
-            OffsetDateTime::now_utc().unix_timestamp_nanos()
-        );
         let ciphertext = b"rust remote gateway http sigv4 ciphertext".to_vec();
 
         let mut put = request(RemoteGatewayAction::PutCiphertextObject);
         put.bucket = bucket.clone();
-        put.key = Some(object_key.clone());
         put.ciphertext_payload = Some(ciphertext.clone());
 
         let put_result = executor.execute(put).unwrap();
@@ -930,7 +922,6 @@ mod tests {
 
         let mut get = request(RemoteGatewayAction::GetCiphertextObject);
         get.bucket = bucket;
-        get.key = Some(object_key);
         get.ciphertext_reference_hex = put_result.ciphertext_reference_hex;
 
         let get_result = executor.execute(get).unwrap();
@@ -1076,7 +1067,7 @@ mod tests {
         assert_eq!(body["version"], WIRE_VERSION);
         assert_eq!(body["action"], "put_ciphertext_object");
         assert_eq!(body["bucket"], "bucket");
-        assert_eq!(body["key"], "secret.txt");
+        assert!(body.get("key").is_none());
         assert_eq!(body["ciphertext_hex"], hex::encode(b"ciphertext"));
         assert!(body["ciphertext_reference_hex"].is_null());
         assert!(body["expected_manifest_reference_hex"].is_null());
@@ -1181,7 +1172,6 @@ mod tests {
         let executor = TrustlessRemoteGatewayExecutor::new(client);
 
         let mut request = request(RemoteGatewayAction::PutEncryptedManifest);
-        request.key = None;
         request.encrypted_manifest_payload = Some(b"encrypted-manifest".to_vec());
         request.expected_manifest_reference_hex = Some("ef".repeat(32));
 
@@ -1192,7 +1182,7 @@ mod tests {
         let body = transport.seen_body_json();
 
         assert_eq!(body["action"], "put_encrypted_manifest");
-        assert!(body["key"].is_null());
+        assert!(body.get("key").is_none());
         assert_eq!(
             body["encrypted_manifest_hex"],
             hex::encode(b"encrypted-manifest")
@@ -1370,7 +1360,6 @@ mod tests {
             (
                 RemoteGatewayAction::PutCiphertextObject,
                 "put_ciphertext_object",
-                Some("object.txt"),
                 Some(b"ciphertext-object".to_vec()),
                 None,
                 None,
@@ -1380,7 +1369,6 @@ mod tests {
             (
                 RemoteGatewayAction::GetCiphertextObject,
                 "get_ciphertext_object",
-                Some("object.txt"),
                 None,
                 None,
                 Some(b"ciphertext-object".to_vec()),
@@ -1390,7 +1378,6 @@ mod tests {
             (
                 RemoteGatewayAction::HeadCiphertextObject,
                 "head_ciphertext_object",
-                Some("object.txt"),
                 None,
                 None,
                 None,
@@ -1403,14 +1390,12 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
                 Some(b"encrypted-manifest".to_vec()),
                 false,
             ),
             (
                 RemoteGatewayAction::PutEncryptedManifest,
                 "put_encrypted_manifest",
-                None,
                 None,
                 Some(b"encrypted-manifest".to_vec()),
                 None,
@@ -1420,7 +1405,6 @@ mod tests {
             (
                 RemoteGatewayAction::DeleteCiphertextObject,
                 "delete_ciphertext_object",
-                None,
                 None,
                 Some(b"encrypted-manifest".to_vec()),
                 None,
@@ -1434,7 +1418,6 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
                 true,
             ),
         ];
@@ -1442,7 +1425,6 @@ mod tests {
         for (
             action,
             expected_wire_action,
-            key,
             ciphertext_payload,
             encrypted_manifest_payload,
             response_ciphertext_payload,
@@ -1502,7 +1484,6 @@ mod tests {
             let response = client
                 .execute_ciphertext_request(CiphertextGatewayRequest {
                     bucket: "bucket-a".to_owned(),
-                    key: key.map(str::to_owned),
                     action,
                     ciphertext_payload: ciphertext_payload.clone(),
                     encrypted_manifest_payload: encrypted_manifest_payload.clone(),
@@ -1521,11 +1502,11 @@ mod tests {
             let body = transport.seen_body_json();
             let object = body.as_object().unwrap();
 
-            assert_eq!(object.len(), 8);
+            assert_eq!(object.len(), 7);
             assert!(object.contains_key("version"));
             assert!(object.contains_key("action"));
             assert!(object.contains_key("bucket"));
-            assert!(object.contains_key("key"));
+            assert!(!object.contains_key("key"));
             assert!(object.contains_key("ciphertext_hex"));
             assert!(object.contains_key("encrypted_manifest_hex"));
             assert!(object.contains_key("ciphertext_reference_hex"));
@@ -1534,11 +1515,6 @@ mod tests {
             assert_eq!(body["version"], WIRE_VERSION);
             assert_eq!(body["action"], expected_wire_action);
             assert_eq!(body["bucket"], "bucket-a");
-
-            match key {
-                Some(expected_key) => assert_eq!(body["key"], expected_key),
-                None => assert!(body["key"].is_null()),
-            }
 
             match ciphertext_payload {
                 Some(expected_payload) => {

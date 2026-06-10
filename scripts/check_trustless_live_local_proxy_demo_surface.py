@@ -16,7 +16,6 @@ required_script_tokens = [
     "cargo run -q -p trustless-proxy --bin trustless_proxy_dev_encrypt_empty_manifest",
     '"action":"put_encrypted_manifest"',
     "x-s3w-bucket-id",
-    "x-s3w-object-key-id",
     "x-s3w-policy-version",
     "x-s3w-local-account",
     "x-s3w-local-key-type",
@@ -65,6 +64,11 @@ for token in required_manifest_helper_tokens:
 for forbidden in [
     "gateway_plaintext_access=true",
     "x-s3w-gateway-plaintext-access: true",
+    "x-s3w-object-key-id",
+    "x-s3w-manifest-ciphertext-ref",
+    "x-s3w-manifest-ciphertext-size",
+    "x-s3w-manifest-content-type",
+    "x-s3w-manifest-etag",
 ]:
     if forbidden in script:
         raise SystemExit(f"FAILED: forbidden plaintext gateway access token found: {forbidden}")

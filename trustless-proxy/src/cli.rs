@@ -921,17 +921,12 @@ mod tests {
         format!(
             "\
 x-s3w-bucket-id: {bucket_id}\r\n\
-x-s3w-object-key-id: {object_key_id}\r\n\
 x-s3w-policy-version: 7\r\n\
 x-s3w-local-account: alice\r\n\
 x-s3w-local-key-type: aws-esdk-rust-recipient-key\r\n\
 x-s3w-recipients: alice\r\n\
-x-s3w-recipient-keys: alice|aws-esdk-rust-recipient-key|1|true|{public_key_hex}\r\n\
-x-s3w-manifest-ciphertext-ref: bee://ciphertext/cli-live\r\n\
-x-s3w-manifest-ciphertext-size: 64\r\n\
-",
+x-s3w-recipient-keys: alice|aws-esdk-rust-recipient-key|1|true|{public_key_hex}\r\n",
             bucket_id = hex::encode([1u8; 32]),
-            object_key_id = hex::encode([2u8; 32]),
             public_key_hex = hex::encode("public-key")
         )
     }
@@ -1010,7 +1005,8 @@ x-s3w-manifest-ciphertext-size: 64\r\n\
         let input = seen_input.lock().unwrap().clone().unwrap();
         assert_eq!(input.http_request.path, "/bucket/live.txt");
         assert_eq!(input.http_request.body, Some(body.to_vec()));
-        assert_eq!(input.manifest_entry.unwrap().object_key, "live.txt");
+        assert!(input.http_context.object_key_id.is_none());
+        assert_eq!(input.envelope_context.object_key_id, hex::encode([1u8; 32]));
         assert_eq!(input.envelope_context.recipients.len(), 1);
     }
 

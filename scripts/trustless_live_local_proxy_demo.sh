@@ -101,7 +101,6 @@ source "$KEY_MATERIAL_DIR/local-proxy-key-material.env"
 BUCKET="trustless-local-proxy-demo-${RUN_ID}"
 OBJECT_KEY="docs/plaintext.txt"
 BUCKET_ID="$(hash_hex "$BUCKET")"
-OBJECT_KEY_ID="$(hash_hex "${BUCKET}/${OBJECT_KEY}")"
 POLICY_VERSION="1"
 
 log "seeding empty encrypted manifest"
@@ -112,14 +111,14 @@ EMPTY_MANIFEST_HEX="$(
   TRUSTLESS_PROXY_DEV_MANIFEST_ACCOUNT="$S3W_LOCAL_PROXY_ACCOUNT" \
   TRUSTLESS_PROXY_DEV_MANIFEST_KEY_TYPE="$S3W_LOCAL_PROXY_KEY_TYPE" \
   TRUSTLESS_PROXY_DEV_MANIFEST_BUCKET_ID="$BUCKET_ID" \
-  TRUSTLESS_PROXY_DEV_MANIFEST_OBJECT_KEY_ID="$OBJECT_KEY_ID" \
+  TRUSTLESS_PROXY_DEV_MANIFEST_OBJECT_KEY_ID="$BUCKET_ID" \
   TRUSTLESS_PROXY_DEV_MANIFEST_POLICY_VERSION="$POLICY_VERSION" \
     cargo run -q -p trustless-proxy --bin trustless_proxy_dev_encrypt_empty_manifest
 )"
 
 SEED_MANIFEST_JSON="$RUN_DIR/seed-empty-manifest.json"
 cat > "$SEED_MANIFEST_JSON" <<EOFSEED
-{"version":1,"action":"put_encrypted_manifest","bucket":"${BUCKET}","key":null,"ciphertext_hex":null,"encrypted_manifest_hex":"${EMPTY_MANIFEST_HEX}","plaintext_payload_present":false,"gateway_plaintext_access":false}
+{"version":1,"action":"put_encrypted_manifest","bucket":"${BUCKET}","ciphertext_hex":null,"encrypted_manifest_hex":"${EMPTY_MANIFEST_HEX}","gateway_plaintext_access":false}
 EOFSEED
 
 SEED_MANIFEST_HASH="$(sha256sum "$SEED_MANIFEST_JSON" | awk '{print $1}')"
@@ -176,16 +175,11 @@ printf 'hello from local trustless proxy plaintext %s\n' "$RUN_ID" > "$PAYLOAD_F
 
 COMMON_HEADERS=(
   -H "x-s3w-bucket-id: ${BUCKET_ID}"
-  -H "x-s3w-object-key-id: ${OBJECT_KEY_ID}"
   -H "x-s3w-policy-version: ${POLICY_VERSION}"
   -H "x-s3w-local-account: ${S3W_LOCAL_PROXY_ACCOUNT}"
   -H "x-s3w-local-key-type: ${S3W_LOCAL_PROXY_KEY_TYPE}"
   -H "x-s3w-recipients: ${S3W_LOCAL_PROXY_ACCOUNT}"
   -H "x-s3w-recipient-keys: ${S3W_RECIPIENT_KEY_HEADER}"
-  -H "x-s3w-manifest-ciphertext-ref: live-local-proxy-demo/${OBJECT_KEY_ID}"
-  -H "x-s3w-manifest-ciphertext-size: $(wc -c < "$PAYLOAD_FILE" | tr -d ' ')"
-  -H "x-s3w-manifest-content-type: text/plain"
-  -H "x-s3w-manifest-etag: live-local-proxy-demo-${RUN_ID}"
 )
 
 log "PUT plaintext through local proxy"

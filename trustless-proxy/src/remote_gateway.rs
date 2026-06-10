@@ -287,7 +287,6 @@ mod tests {
     fn request(action: RemoteGatewayAction) -> CiphertextGatewayRequest {
         CiphertextGatewayRequest {
             bucket: "bucket".to_owned(),
-            key: Some("secret.txt".to_owned()),
             action,
             ciphertext_payload: None,
             encrypted_manifest_payload: None,
@@ -364,7 +363,6 @@ mod tests {
     #[test]
     fn remote_gateway_accepts_put_encrypted_manifest_payload_only() {
         let mut request = request(RemoteGatewayAction::PutEncryptedManifest);
-        request.key = None;
         request.encrypted_manifest_payload = Some(b"encrypted-manifest".to_vec());
         request.expected_manifest_reference_hex = Some("01".repeat(32));
 
@@ -461,7 +459,6 @@ mod tests {
     #[test]
     fn remote_gateway_rejects_put_encrypted_manifest_with_ciphertext_payload() {
         let mut request = request(RemoteGatewayAction::PutEncryptedManifest);
-        request.key = None;
         request.encrypted_manifest_payload = Some(b"encrypted-manifest".to_vec());
         request.ciphertext_payload = Some(b"ciphertext".to_vec());
 

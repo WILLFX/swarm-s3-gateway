@@ -171,16 +171,18 @@ where
         if let Some(existing) = manifest
             .entries
             .iter_mut()
-            .find(|existing| existing.object_key_id == entry.object_key_id)
+            .find(|existing| existing.object_key == entry.object_key)
         {
             *existing = entry;
         } else {
             manifest.entries.push(entry);
         }
 
-        manifest
-            .entries
-            .sort_by(|left, right| left.object_key_id.cmp(&right.object_key_id));
+        manifest.entries.sort_by(|left, right| {
+            left.object_key
+                .cmp(&right.object_key)
+                .then_with(|| left.object_key_id.cmp(&right.object_key_id))
+        });
         manifest.manifest_version = manifest.manifest_version.saturating_add(1);
 
         Ok(TrustlessManifestMutation {
@@ -385,7 +387,7 @@ mod tests {
                 manifest(),
                 TrustlessManifestEntry {
                     ciphertext_size: 999,
-                    ..entry("docs/a.txt", "object-a")
+                    ..entry("docs/a.txt", "fresh-object-a")
                 },
             )
             .unwrap();
@@ -395,6 +397,7 @@ mod tests {
         assert_eq!(mutation.manifest.manifest_version, 2);
         assert_eq!(mutation.manifest.entries.len(), 2);
         assert_eq!(mutation.manifest.entries[0].ciphertext_size, 999);
+        assert_eq!(mutation.manifest.entries[0].object_key_id, "fresh-object-a");
     }
 
     #[test]
@@ -405,14 +408,14 @@ mod tests {
             .upsert_entry_locally(manifest(), entry("docs/c.txt", "object-c"))
             .unwrap();
 
-        let ids = mutation
+        let keys = mutation
             .manifest
             .entries
             .iter()
-            .map(|entry| entry.object_key_id.as_str())
+            .map(|entry| entry.object_key.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(ids, vec!["object-a", "object-b", "object-c"]);
+        assert_eq!(keys, vec!["docs/a.txt", "docs/c.txt", "images/b.png"]);
         assert_eq!(mutation.manifest.manifest_version, 2);
     }
 
