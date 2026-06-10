@@ -118,14 +118,16 @@ The authorized client can decrypt because one encrypted data-key envelope is add
 
 The gateway and unauthorized users see only ciphertext and encrypted data-key envelopes.
 
+The remote trustless gateway is owner-only in the current implementation. Current identity-contract delegation is owner-wide, not bucket-scoped, so it is not used to authorize remote trustless gateway access.
+
 The owner or authorized writer creates envelopes for:
 
 - The owner
 - Current authorized readers
-- Current authorized delegates
+- Future bucket-scoped authorized delegates, once delegate-aware trustless authorization is implemented
 - Any other policy-approved recipients
 
-A delegate receives access only if the delegate has a valid public encryption key registered in the identity contract and the owner or authorized writer includes an envelope for that key.
+A future delegate receives access only if the delegate is authorized for the specific trustless bucket or policy scope, has a valid public encryption key registered in the identity contract, and the owner or authorized writer includes an envelope for that key.
 
 ## Upload flow
 
@@ -169,12 +171,18 @@ The remote gateway may return encrypted owner catalog and bucket manifest cipher
 
 The remote gateway must not require plaintext private object names or caller-supplied object key IDs to serve trustless private list operations.
 
-## Delegation flow
+## Delegation boundary and future flow
 
-The delegation path is:
+The remote trustless gateway is owner-only in the current implementation.
+
+Current identity-contract delegation is owner-wide, not bucket-scoped. A direct gateway check against that delegation model would make a delegate authorization apply too broadly across an owner's trustless buckets. Do not wire owner-wide delegation into the trustless remote gateway path.
+
+Delegate-aware trustless authorization must first introduce bucket-scoped or policy-scoped delegation, then enable the remote gateway to authorize non-owner callers against that exact scope.
+
+The future delegation path is:
 
 1. Delegate registers an encryption public key in the identity contract.
-2. Owner grants delegate access on-chain.
+2. Owner grants delegate access on-chain for a specific trustless bucket or policy scope.
 3. Owner or authorized writer fetches the delegate's registered public encryption key.
 4. Owner or authorized writer creates an encrypted data-key envelope for the delegate.
 5. Remote gateway stores or anchors the encrypted envelope but cannot decrypt it.
@@ -217,7 +225,7 @@ The MVP does not need to support MPC, hardware wallets, secure enclaves, browser
 For trustless private buckets, the remote gateway is responsible for:
 
 - SigV4 authentication
-- Authorization checks
+- Owner-only authorization checks until bucket-scoped delegate authorization is implemented
 - Bee storage and retrieval of ciphertext
 - Chain anchoring
 - CAS root updates
@@ -269,3 +277,5 @@ Trustless object GET and HEAD requests must carry an explicit `ciphertext_refere
 Trustless object DELETE requests must carry the encrypted manifest reference that the local proxy fetched and decrypted before removing the entry. Missing expected manifest references are rejected so DELETE cannot silently overwrite a concurrent manifest root.
 
 Trustless object PUT requests must not send plaintext object keys or caller-supplied object key IDs to the remote gateway. The local proxy generates a fresh opaque object context ID per object version, encrypts object bytes locally under that context, sends only ciphertext bytes to the remote gateway, receives an immutable ciphertext reference, and then stores the plaintext key to ciphertext reference mapping only inside the encrypted manifest.
+
+Trustless remote gateway access is owner-only until bucket-scoped or policy-scoped delegation exists. The existing owner-wide identity delegation model must not be used as the trustless remote gateway authorization check.
