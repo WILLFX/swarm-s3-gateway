@@ -1,23 +1,23 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use common::types::{
     AccessKeyHash, ChainBucketRecord, ChainBucketType, ChainEncryptionKeyRecord,
     ChainRegistryEntry, SubstrateAddress32,
 };
 use subxt::{
-    utils::{AccountId32, H256},
     OnlineClient, PolkadotConfig,
+    utils::{AccountId32, H256},
 };
 use subxt_signer::sr25519::Keypair;
 
 use crate::{
     contracts_abi::{
-        decode_query_result, encode_bucket_get_bucket, encode_bucket_get_bucket_type,
-        encode_bucket_get_owner_catalog_root, encode_bucket_get_owner_nonce,
-        encode_identity_get_encryption_key, encode_identity_get_identity,
         BucketRecord as ContractBucketRecord, BucketType as ContractBucketType,
         EncryptionKeyRecord as ContractEncryptionKeyRecord,
-        IdentityRecord as ContractIdentityRecord,
+        IdentityRecord as ContractIdentityRecord, decode_query_result, encode_bucket_get_bucket,
+        encode_bucket_get_bucket_type, encode_bucket_get_owner_catalog_root,
+        encode_bucket_get_owner_nonce, encode_identity_get_encryption_key,
+        encode_identity_get_identity,
     },
     s3_runtime::api,
     traits::RegistryClient,
@@ -311,27 +311,6 @@ impl ChainRegistryClient {
             .wait_for_finalized_success()
             .await
             .context("delete_bucket extrinsic failed before finalization")?;
-
-        Ok(events.extrinsic_hash())
-    }
-
-    pub async fn submit_increment_encryption_version(
-        &self,
-        bucket_name_hash: [u8; 32],
-        signer: &Keypair,
-    ) -> Result<H256> {
-        let call = api::tx()
-            .s3_registry()
-            .increment_encryption_version(bucket_name_hash);
-
-        let mut tx_api = self.inner.tx().await.context("failed to build tx API")?;
-        let events = tx_api
-            .sign_and_submit_then_watch_default(&call, signer)
-            .await
-            .context("failed to submit increment_encryption_version extrinsic")?
-            .wait_for_finalized_success()
-            .await
-            .context("increment_encryption_version extrinsic failed before finalization")?;
 
         Ok(events.extrinsic_hash())
     }

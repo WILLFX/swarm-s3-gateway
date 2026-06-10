@@ -122,6 +122,14 @@ pub enum BucketError {
     Error7,
     #[codec(index = 8)]
     Error8,
+    #[codec(index = 9)]
+    Error9,
+    #[codec(index = 10)]
+    Error10,
+    #[codec(index = 11)]
+    Error11,
+    #[codec(index = 12)]
+    Error12,
 }
 
 pub const IDENTITY_REGISTER_IDENTITY_SELECTOR: [u8; 4] = [0x87, 0xeb, 0xe7, 0xfb];
@@ -145,7 +153,6 @@ pub const BUCKET_DELETE_BUCKET_SELECTOR: [u8; 4] = [0x36, 0x5e, 0x58, 0xd9];
 pub const BUCKET_CREATE_BUCKET_CAS_SELECTOR: [u8; 4] = [0x7d, 0xe5, 0x66, 0x94];
 pub const BUCKET_CREATE_TRUSTLESS_BUCKET_CAS_SELECTOR: [u8; 4] = [0x0e, 0xe0, 0x6e, 0x35];
 pub const BUCKET_DELETE_BUCKET_CAS_SELECTOR: [u8; 4] = [0x35, 0x3d, 0x92, 0xb3];
-pub const BUCKET_INCREMENT_ENCRYPTION_VERSION_SELECTOR: [u8; 4] = [0x55, 0xb8, 0x5e, 0xd6];
 pub const BUCKET_UPDATE_BUCKET_MANIFEST_ROOT_FOR_PUT_SELECTOR: [u8; 4] = [0x5c, 0x0b, 0x7e, 0xab];
 pub const BUCKET_UPDATE_BUCKET_MANIFEST_ROOT_FOR_DELETE_SELECTOR: [u8; 4] =
     [0x94, 0xbc, 0x4c, 0x0d];
@@ -314,16 +321,6 @@ pub fn encode_bucket_delete_bucket_cas(
     owner_signature.encode_to(&mut data);
     expected_owner_catalog_root.encode_to(&mut data);
     owner_catalog_root.encode_to(&mut data);
-    data
-}
-
-pub fn encode_bucket_increment_encryption_version(
-    bucket_name_hash: BucketNameHash,
-    owner_signature: [u8; 64],
-) -> Vec<u8> {
-    let mut data = BUCKET_INCREMENT_ENCRYPTION_VERSION_SELECTOR.to_vec();
-    bucket_name_hash.encode_to(&mut data);
-    owner_signature.encode_to(&mut data);
     data
 }
 
