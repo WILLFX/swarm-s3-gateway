@@ -1,4 +1,6 @@
 use aes_gcm::aead::{OsRng, rand_core::RngCore};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::config::TrustlessProxyConfig;
@@ -25,6 +27,8 @@ use crate::runtime::{
 use crate::s3_surface::LocalS3Operation;
 use crate::server::{LocalTrustlessServer, LocalTrustlessServerError};
 use crate::types::RecipientEnvelopeContext;
+
+const LOCAL_LIST_CONTINUATION_TOKEN_PREFIX: &str = "s3gw-local-list-v1";
 
 pub struct LocalTrustlessExecutionEngine<C, RK, LK, G> {
     server: LocalTrustlessServer,
@@ -81,6 +85,12 @@ pub enum LocalTrustlessExecutionEngineError {
 
     #[error("execution engine does not support operation yet: {0:?}")]
     UnsupportedOperation(LocalS3Operation),
+
+    #[error("invalid ListObjectsV2 query: {0}")]
+    InvalidListQuery(String),
+
+    #[error("invalid ListObjectsV2 continuation token: {0}")]
+    InvalidListContinuationToken(String),
 }
 
 impl From<LocalTrustlessServerError> for LocalTrustlessExecutionEngineError {
@@ -146,6 +156,7 @@ where
         &self,
         input: LocalTrustlessExecutionInput,
     ) -> Result<LocalTrustlessHttpResponse, LocalTrustlessExecutionEngineError> {
+        let request_query = input.http_request.query.clone();
         let prepared = self
             .server
             .prepare_http_request(input.http_request, input.http_context)?;
@@ -163,10 +174,17 @@ where
                     self.fetch_and_decrypt_current_manifest(runtime_prepared, &manifest_context)?;
 
                 let object_key = runtime_prepared_object_key(runtime_prepared)?;
-                let object_context_id = fresh_object_context_id_hex();
+                let object_context_id = current_manifest
+                    .manifest
+                    .entries
+                    .iter()
+                    .find(|entry| entry.object_key == object_key)
+                    .map(|entry| entry.object_key_id.clone())
+                    .unwrap_or_else(fresh_object_context_id_hex);
                 let object_context =
                     object_envelope_context(&input.envelope_context, object_context_id.clone());
                 let plaintext = runtime_prepared_put_plaintext(runtime_prepared)?;
+                let etag = sha256_hex(&plaintext);
                 let mut preflight_request = runtime_prepared_preflight_request(runtime_prepared);
                 preflight_request.object_key_id = Some(object_context_id.clone());
                 let preflight = self
@@ -217,7 +235,7 @@ where
                     ciphertext_ref,
                     ciphertext_size,
                     content_type: None,
-                    etag: None,
+                    etag: Some(etag),
                 };
                 let manifest_boundary =
                     TrustlessManifestBoundary::new(self.manifest_cipher.clone());
@@ -336,7 +354,19 @@ where
                 let current_manifest =
                     self.fetch_and_decrypt_current_manifest(runtime_prepared, &manifest_context)?;
 
+                let list_query = parse_local_list_query(request_query.as_deref())?;
                 let prefix = runtime_prepared_prefix(runtime_prepared);
+                if list_query.prefix != prefix {
+                    return Err(LocalTrustlessExecutionEngineError::InvalidListQuery(
+                        "parsed list prefix does not match prepared request prefix".to_owned(),
+                    ));
+                }
+                let list_snapshot = resolve_local_list_snapshot(
+                    &current_manifest,
+                    &input.envelope_context.bucket_id,
+                    prefix.as_deref().unwrap_or_default(),
+                    list_query.continuation_token.as_deref(),
+                )?;
                 let list_result = TrustlessManifestBoundary::new(self.manifest_cipher.clone())
                     .list_metadata_locally(&current_manifest.manifest, prefix.as_deref())?;
 
@@ -346,7 +376,29 @@ where
                     return Err(LocalTrustlessExecutionEngineError::GatewayPlaintextAccessRejected);
                 }
 
-                Ok(completed_metadata_http_response(prepared.operation))
+                let page = page_trustless_list_entries(
+                    list_result.entries,
+                    list_query.max_keys,
+                    list_snapshot.after_key.as_deref(),
+                );
+                let next_continuation_token = page
+                    .next_after_key
+                    .as_deref()
+                    .map(|after_key| {
+                        encode_local_list_continuation_token(&list_snapshot, after_key)
+                    })
+                    .transpose()?;
+                let body = trustless_list_objects_v2_response_body(
+                    &runtime_prepared_bucket(runtime_prepared),
+                    prefix.as_deref(),
+                    list_query.max_keys,
+                    list_query.continuation_token.as_deref(),
+                    page.is_truncated,
+                    next_continuation_token.as_deref(),
+                    &page.entries,
+                );
+
+                Ok(completed_list_http_response(body))
             }
             LocalS3Operation::DeleteObject => {
                 let runtime_prepared =
@@ -514,6 +566,352 @@ fn completed_metadata_http_response(operation: LocalS3Operation) -> LocalTrustle
         plaintext_returned_locally: false,
         gateway_plaintext_access: false,
     }
+}
+
+fn completed_list_http_response(body: Vec<u8>) -> LocalTrustlessHttpResponse {
+    LocalTrustlessHttpResponse {
+        status_code: 200,
+        body: Some(body),
+        headers: vec![
+            ("content-type".to_owned(), "application/xml".to_owned()),
+            (
+                "x-s3w-trustless-state".to_owned(),
+                "ReadyMetadataOnly".to_owned(),
+            ),
+            (
+                "x-s3w-remote-gateway-required".to_owned(),
+                "true".to_owned(),
+            ),
+            (
+                "x-s3w-gateway-plaintext-access".to_owned(),
+                "false".to_owned(),
+            ),
+        ],
+        metadata_only: true,
+        plaintext_returned_locally: false,
+        gateway_plaintext_access: false,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalListQuery {
+    prefix: Option<String>,
+    max_keys: usize,
+    continuation_token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalListSnapshot {
+    bucket_id: String,
+    encrypted_manifest_reference_hex: String,
+    manifest_version: u64,
+    prefix: String,
+    after_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LocalListContinuationTokenPayload {
+    schema: String,
+    bucket_id: String,
+    encrypted_manifest_reference_hex: String,
+    manifest_version: u64,
+    prefix: String,
+    after_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrustlessListPage {
+    entries: Vec<TrustlessManifestEntry>,
+    is_truncated: bool,
+    next_after_key: Option<String>,
+}
+
+fn parse_local_list_query(
+    query: Option<&str>,
+) -> Result<LocalListQuery, LocalTrustlessExecutionEngineError> {
+    let prefix = query_value(query, "prefix");
+    let max_keys = match query_value(query, "max-keys") {
+        Some(raw) => raw.parse::<usize>().map_err(|_| {
+            LocalTrustlessExecutionEngineError::InvalidListQuery(
+                "max-keys must be an unsigned integer".to_owned(),
+            )
+        })?,
+        None => 1000,
+    };
+
+    Ok(LocalListQuery {
+        prefix,
+        max_keys,
+        continuation_token: query_value(query, "continuation-token"),
+    })
+}
+
+fn resolve_local_list_snapshot(
+    current_manifest: &CurrentTrustlessManifest,
+    bucket_id: &str,
+    prefix: &str,
+    continuation_token: Option<&str>,
+) -> Result<LocalListSnapshot, LocalTrustlessExecutionEngineError> {
+    let current_reference = current_manifest
+        .encrypted_manifest_reference_hex
+        .clone()
+        .unwrap_or_default();
+    let bucket_id = bucket_id.trim().to_owned();
+
+    let Some(continuation_token) = continuation_token else {
+        return Ok(LocalListSnapshot {
+            bucket_id,
+            encrypted_manifest_reference_hex: current_reference,
+            manifest_version: current_manifest.manifest.manifest_version,
+            prefix: prefix.to_owned(),
+            after_key: None,
+        });
+    };
+
+    let payload = decode_local_list_continuation_token(continuation_token)?;
+
+    if payload.bucket_id != bucket_id {
+        return Err(
+            LocalTrustlessExecutionEngineError::InvalidListContinuationToken(
+                "token bucket id does not match request bucket".to_owned(),
+            ),
+        );
+    }
+
+    if payload.prefix != prefix {
+        return Err(
+            LocalTrustlessExecutionEngineError::InvalidListContinuationToken(
+                "token prefix does not match request prefix".to_owned(),
+            ),
+        );
+    }
+
+    if payload.encrypted_manifest_reference_hex != current_reference {
+        return Err(
+            LocalTrustlessExecutionEngineError::InvalidListContinuationToken(
+                "encrypted manifest changed since the continuation token was issued".to_owned(),
+            ),
+        );
+    }
+
+    if payload.manifest_version != current_manifest.manifest.manifest_version {
+        return Err(
+            LocalTrustlessExecutionEngineError::InvalidListContinuationToken(
+                "manifest version changed since the continuation token was issued".to_owned(),
+            ),
+        );
+    }
+
+    Ok(LocalListSnapshot {
+        bucket_id,
+        encrypted_manifest_reference_hex: payload.encrypted_manifest_reference_hex,
+        manifest_version: payload.manifest_version,
+        prefix: payload.prefix,
+        after_key: Some(payload.after_key),
+    })
+}
+
+fn encode_local_list_continuation_token(
+    snapshot: &LocalListSnapshot,
+    after_key: &str,
+) -> Result<String, LocalTrustlessExecutionEngineError> {
+    let after_key = after_key.trim();
+
+    if after_key.is_empty() {
+        return Err(
+            LocalTrustlessExecutionEngineError::InvalidListContinuationToken(
+                "continuation after_key is required".to_owned(),
+            ),
+        );
+    }
+
+    let payload = LocalListContinuationTokenPayload {
+        schema: LOCAL_LIST_CONTINUATION_TOKEN_PREFIX.to_owned(),
+        bucket_id: snapshot.bucket_id.clone(),
+        encrypted_manifest_reference_hex: snapshot.encrypted_manifest_reference_hex.clone(),
+        manifest_version: snapshot.manifest_version,
+        prefix: snapshot.prefix.clone(),
+        after_key: after_key.to_owned(),
+    };
+
+    let payload_bytes = serde_json::to_vec(&payload).map_err(|error| {
+        LocalTrustlessExecutionEngineError::InvalidListContinuationToken(error.to_string())
+    })?;
+
+    Ok(format!(
+        "{}:{}",
+        LOCAL_LIST_CONTINUATION_TOKEN_PREFIX,
+        hex::encode(payload_bytes)
+    ))
+}
+
+fn decode_local_list_continuation_token(
+    token: &str,
+) -> Result<LocalListContinuationTokenPayload, LocalTrustlessExecutionEngineError> {
+    let Some(payload_hex) = token
+        .trim()
+        .strip_prefix(LOCAL_LIST_CONTINUATION_TOKEN_PREFIX)
+        .and_then(|rest| rest.strip_prefix(':'))
+    else {
+        return Err(
+            LocalTrustlessExecutionEngineError::InvalidListContinuationToken(
+                "token must be an opaque s3gw-local-list-v1 token".to_owned(),
+            ),
+        );
+    };
+
+    let payload_bytes = hex::decode(payload_hex).map_err(|error| {
+        LocalTrustlessExecutionEngineError::InvalidListContinuationToken(error.to_string())
+    })?;
+    let payload: LocalListContinuationTokenPayload = serde_json::from_slice(&payload_bytes)
+        .map_err(|error| {
+            LocalTrustlessExecutionEngineError::InvalidListContinuationToken(error.to_string())
+        })?;
+
+    if payload.schema != LOCAL_LIST_CONTINUATION_TOKEN_PREFIX {
+        return Err(
+            LocalTrustlessExecutionEngineError::InvalidListContinuationToken(
+                "token schema is invalid".to_owned(),
+            ),
+        );
+    }
+
+    if payload.after_key.trim().is_empty() {
+        return Err(
+            LocalTrustlessExecutionEngineError::InvalidListContinuationToken(
+                "token after_key is required".to_owned(),
+            ),
+        );
+    }
+
+    Ok(payload)
+}
+
+fn page_trustless_list_entries(
+    mut entries: Vec<TrustlessManifestEntry>,
+    max_keys: usize,
+    after_key: Option<&str>,
+) -> TrustlessListPage {
+    entries.sort_by(|left, right| {
+        left.object_key
+            .cmp(&right.object_key)
+            .then_with(|| left.object_key_id.cmp(&right.object_key_id))
+    });
+
+    let mut entries = entries
+        .into_iter()
+        .filter(|entry| after_key.is_none_or(|after_key| entry.object_key.as_str() > after_key))
+        .collect::<Vec<_>>();
+
+    let is_truncated = entries.len() > max_keys;
+    let next_after_key = if is_truncated && max_keys > 0 {
+        entries
+            .get(max_keys - 1)
+            .map(|entry| entry.object_key.clone())
+    } else {
+        None
+    };
+
+    entries.truncate(max_keys);
+
+    TrustlessListPage {
+        entries,
+        is_truncated,
+        next_after_key,
+    }
+}
+
+fn trustless_list_objects_v2_response_body(
+    bucket: &str,
+    prefix: Option<&str>,
+    max_keys: usize,
+    continuation_token: Option<&str>,
+    is_truncated: bool,
+    next_continuation_token: Option<&str>,
+    entries: &[TrustlessManifestEntry],
+) -> Vec<u8> {
+    let mut body = String::new();
+    body.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
+    body.push_str(r#"<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">"#);
+    push_xml_text(&mut body, "Name", bucket);
+    push_xml_text(&mut body, "Prefix", prefix.unwrap_or(""));
+    push_xml_text(&mut body, "MaxKeys", &max_keys.to_string());
+    push_xml_text(&mut body, "KeyCount", &entries.len().to_string());
+    push_xml_text(
+        &mut body,
+        "IsTruncated",
+        if is_truncated { "true" } else { "false" },
+    );
+
+    if let Some(token) = continuation_token {
+        push_xml_text(&mut body, "ContinuationToken", token);
+    }
+
+    if let Some(token) = next_continuation_token {
+        push_xml_text(&mut body, "NextContinuationToken", token);
+    }
+
+    for entry in entries {
+        body.push_str("<Contents>");
+        push_xml_text(&mut body, "Key", &entry.object_key);
+        let etag = entry
+            .etag
+            .as_deref()
+            .map(|etag| format!("\"{etag}\""))
+            .unwrap_or_default();
+        push_xml_text(&mut body, "ETag", &etag);
+        push_xml_text(&mut body, "Size", &entry.ciphertext_size.to_string());
+        push_xml_text(&mut body, "StorageClass", "STANDARD");
+        body.push_str("</Contents>");
+    }
+
+    body.push_str("</ListBucketResult>");
+    body.into_bytes()
+}
+
+fn push_xml_text(body: &mut String, tag: &str, value: &str) {
+    body.push('<');
+    body.push_str(tag);
+    body.push('>');
+    body.push_str(&escape_xml(value));
+    body.push_str("</");
+    body.push_str(tag);
+    body.push('>');
+}
+
+fn escape_xml(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(ch),
+        }
+    }
+
+    escaped
+}
+
+fn query_value(query: Option<&str>, key: &str) -> Option<String> {
+    query?
+        .split('&')
+        .filter_map(|part| part.split_once('='))
+        .find_map(|(left, right)| {
+            if left == key {
+                Some(right.trim().to_owned())
+            } else {
+                None
+            }
+        })
+        .filter(|value| !value.is_empty())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn runtime_prepared_preflight_request(
@@ -1237,7 +1635,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status_code, 200);
-        assert!(response.body.is_none());
+        let body = String::from_utf8(response.body.clone().expect("LIST should return XML body"))
+            .expect("LIST body should be UTF-8 XML");
+        assert!(body.contains("<ListBucketResult"));
+        assert!(body.contains("<Key>secret.txt</Key>"));
+        assert!(body.contains("<Size>64</Size>"));
+        assert!(response.metadata_only);
         assert!(!response.gateway_plaintext_access);
 
         let requests = seen_requests.borrow();
@@ -1287,6 +1690,38 @@ mod tests {
         assert!(requests[0].ciphertext_payload.is_none());
         assert!(requests[0].encrypted_manifest_payload.is_none());
         assert!(!requests[0].plaintext_payload_present);
+    }
+
+    #[test]
+    fn local_list_continuation_token_detects_manifest_drift() {
+        let current_manifest = CurrentTrustlessManifest {
+            manifest: engine_manifest(),
+            encrypted_manifest_reference_hex: Some("ab".repeat(32)),
+        };
+        let snapshot =
+            resolve_local_list_snapshot(&current_manifest, &hex::encode([1u8; 32]), "secret", None)
+                .unwrap();
+        let token = encode_local_list_continuation_token(&snapshot, "secret.txt").unwrap();
+
+        let advanced_manifest = CurrentTrustlessManifest {
+            manifest: TrustlessManifest {
+                manifest_version: 2,
+                ..engine_manifest()
+            },
+            encrypted_manifest_reference_hex: Some("cd".repeat(32)),
+        };
+        let err = resolve_local_list_snapshot(
+            &advanced_manifest,
+            &hex::encode([1u8; 32]),
+            "secret",
+            Some(&token),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("encrypted manifest changed"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

@@ -1,22 +1,28 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::{
     extract::{Extension, Path, Query, State},
     response::Response,
 };
 use common::types::{AwsPrincipal, ChainBucketRecord, ChainBucketType};
-use serde::Deserialize;
+use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 
 use crate::{
     app_state::AppState,
     crypto::bucket_name_hash,
     manifest::{
-        read_private_bucket_manifest_v2, BucketManifest, ObjectManifest, PrivateBucketManifestV2,
+        BucketManifest, ObjectManifest, PrivateBucketManifestV2, read_private_bucket_manifest_v2,
     },
     s3_response::{
-        chain_error_response, list_objects_v2_response, omit_swarm_ref_for_private_response,
-        ListObjectsV2Entry, S3ErrorKind, S3ErrorResponse,
+        ListObjectsV2Entry, S3ErrorKind, S3ErrorResponse, chain_error_response,
+        list_objects_v2_response, omit_swarm_ref_for_private_response,
     },
 };
+
+type HmacSha256 = Hmac<Sha256>;
+
+const LIST_CONTINUATION_TOKEN_PREFIX: &str = "s3gw-list-v1";
 
 #[derive(Debug, Deserialize)]
 pub struct ListObjectsV2Query {
@@ -56,6 +62,21 @@ pub async fn handle(
 
     let prefix = query.prefix.unwrap_or_default();
     let max_keys = query.max_keys.unwrap_or(1000);
+    let snapshot = match resolve_list_snapshot(
+        &chain_bucket,
+        bucket_id,
+        &prefix,
+        query.continuation_token.as_deref(),
+        &state.master_service_key,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            return S3ErrorResponse::new(S3ErrorKind::InvalidRequest)
+                .with_message(format!("invalid continuation-token: {err}"))
+                .with_resource(format!("/{bucket}"))
+                .into_response();
+        }
+    };
 
     let objects = if chain_bucket.is_private {
         let bucket_type = match state.registry_client.fetch_bucket_type(bucket_id).await {
@@ -83,7 +104,8 @@ pub async fn handle(
                     &state,
                     &principal,
                     &bucket,
-                    &chain_bucket,
+                    &snapshot.manifest_root,
+                    snapshot.encryption_version,
                     &prefix,
                 )
                 .await
@@ -101,7 +123,7 @@ pub async fn handle(
             }
         }
     } else {
-        match load_objects_from_anchored_bucket(&state, &chain_bucket, &prefix).await {
+        match load_objects_from_anchored_bucket(&state, &snapshot.manifest_root, &prefix).await {
             Ok(objects) => objects,
             Err(err) => {
                 return S3ErrorResponse::new(S3ErrorKind::InternalError)
@@ -112,7 +134,21 @@ pub async fn handle(
         }
     };
 
-    let page = page_list_objects(objects, max_keys, query.continuation_token.as_deref());
+    let page = page_list_objects(objects, max_keys, snapshot.after_key.as_deref());
+    let next_continuation_token = match page.next_after_key.as_deref() {
+        Some(after_key) => {
+            match encode_list_continuation_token(&snapshot, after_key, &state.master_service_key) {
+                Ok(token) => Some(token),
+                Err(err) => {
+                    return S3ErrorResponse::new(S3ErrorKind::InternalError)
+                        .with_message(format!("failed to build continuation token: {err}"))
+                        .with_resource(format!("/{bucket}"))
+                        .into_response();
+                }
+            }
+        }
+        None => None,
+    };
 
     omit_swarm_ref_for_private_response(
         list_objects_v2_response(
@@ -125,7 +161,7 @@ pub async fn handle(
             max_keys,
             query.continuation_token.as_deref(),
             page.is_truncated,
-            page.next_continuation_token.as_deref(),
+            next_continuation_token.as_deref(),
             &page.objects,
         ),
         chain_bucket.is_private,
@@ -136,7 +172,7 @@ pub async fn handle(
 struct ListObjectsPage {
     objects: Vec<ListObjectsV2Entry>,
     is_truncated: bool,
-    next_continuation_token: Option<String>,
+    next_after_key: Option<String>,
 }
 
 fn page_list_objects(
@@ -165,18 +201,187 @@ fn page_list_objects(
     ListObjectsPage {
         objects: after_token,
         is_truncated,
-        next_continuation_token,
+        next_after_key: next_continuation_token,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ListSnapshot {
+    bucket_id_hex: String,
+    manifest_root: Vec<u8>,
+    encryption_version: u32,
+    creation_date: u64,
+    prefix: String,
+    after_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ListContinuationTokenPayload {
+    schema: String,
+    bucket_id_hex: String,
+    manifest_root_hex: String,
+    encryption_version: u32,
+    creation_date: u64,
+    prefix: String,
+    after_key: String,
+}
+
+fn resolve_list_snapshot(
+    chain_bucket: &ChainBucketRecord,
+    bucket_id: [u8; 32],
+    prefix: &str,
+    continuation_token: Option<&str>,
+    signing_key: &[u8; 32],
+) -> Result<ListSnapshot> {
+    let bucket_id_hex = hex::encode(bucket_id);
+
+    let Some(continuation_token) = continuation_token else {
+        return Ok(ListSnapshot {
+            bucket_id_hex,
+            manifest_root: chain_bucket.bucket_manifest_root.clone(),
+            encryption_version: chain_bucket.encryption_version,
+            creation_date: chain_bucket.creation_date,
+            prefix: prefix.to_owned(),
+            after_key: None,
+        });
+    };
+
+    let payload = decode_list_continuation_token(continuation_token, signing_key)?;
+
+    if payload.bucket_id_hex != bucket_id_hex {
+        bail!("token bucket id does not match request bucket");
+    }
+
+    if payload.prefix != prefix {
+        bail!("token prefix does not match request prefix");
+    }
+
+    if payload.encryption_version != chain_bucket.encryption_version {
+        bail!("token encryption version does not match current bucket");
+    }
+
+    if payload.creation_date != chain_bucket.creation_date {
+        bail!("token bucket creation date does not match current bucket");
+    }
+
+    let manifest_root = decode_swarm_reference_or_empty(&payload.manifest_root_hex)?;
+
+    Ok(ListSnapshot {
+        bucket_id_hex,
+        manifest_root,
+        encryption_version: payload.encryption_version,
+        creation_date: payload.creation_date,
+        prefix: payload.prefix,
+        after_key: Some(payload.after_key),
+    })
+}
+
+fn encode_list_continuation_token(
+    snapshot: &ListSnapshot,
+    after_key: &str,
+    signing_key: &[u8; 32],
+) -> Result<String> {
+    let after_key = after_key.trim();
+
+    if after_key.is_empty() {
+        bail!("continuation after_key is required");
+    }
+
+    let payload = ListContinuationTokenPayload {
+        schema: LIST_CONTINUATION_TOKEN_PREFIX.to_owned(),
+        bucket_id_hex: snapshot.bucket_id_hex.clone(),
+        manifest_root_hex: hex::encode(&snapshot.manifest_root),
+        encryption_version: snapshot.encryption_version,
+        creation_date: snapshot.creation_date,
+        prefix: snapshot.prefix.clone(),
+        after_key: after_key.to_owned(),
+    };
+    let payload_bytes =
+        serde_json::to_vec(&payload).context("failed to encode continuation token payload")?;
+    let signature = sign_list_token_payload(&payload_bytes, signing_key);
+
+    Ok(format!(
+        "{}:{}:{}",
+        LIST_CONTINUATION_TOKEN_PREFIX,
+        hex::encode(payload_bytes),
+        hex::encode(signature)
+    ))
+}
+
+fn decode_list_continuation_token(
+    token: &str,
+    signing_key: &[u8; 32],
+) -> Result<ListContinuationTokenPayload> {
+    let mut parts = token.trim().split(':');
+    let prefix = parts.next().unwrap_or_default();
+    let payload_hex = parts.next().unwrap_or_default();
+    let signature_hex = parts.next().unwrap_or_default();
+
+    if prefix != LIST_CONTINUATION_TOKEN_PREFIX
+        || payload_hex.is_empty()
+        || signature_hex.is_empty()
+        || parts.next().is_some()
+    {
+        bail!("token must be an opaque signed s3gw-list-v1 token");
+    }
+
+    let payload_bytes =
+        hex::decode(payload_hex).context("token payload must be hex encoded JSON")?;
+    let signature = hex::decode(signature_hex).context("token signature must be hex encoded")?;
+    let expected = sign_list_token_payload(&payload_bytes, signing_key);
+
+    if signature.as_slice() != expected.as_slice() {
+        bail!("token signature is invalid");
+    }
+
+    let payload: ListContinuationTokenPayload =
+        serde_json::from_slice(&payload_bytes).context("token payload must decode as JSON")?;
+
+    if payload.schema != LIST_CONTINUATION_TOKEN_PREFIX {
+        bail!("token schema is invalid");
+    }
+
+    if payload.after_key.trim().is_empty() {
+        bail!("token after_key is required");
+    }
+
+    let _ = decode_swarm_reference_or_empty(&payload.manifest_root_hex)?;
+
+    Ok(payload)
+}
+
+fn sign_list_token_payload(payload: &[u8], signing_key: &[u8; 32]) -> Vec<u8> {
+    let mut mac =
+        HmacSha256::new_from_slice(signing_key).expect("HMAC accepts fixed-size signing keys");
+    mac.update(payload);
+    mac.finalize().into_bytes().to_vec()
+}
+
+fn decode_swarm_reference_or_empty(value: &str) -> Result<Vec<u8>> {
+    let value = value.trim();
+
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let bytes = hex::decode(value).context("manifest root must be hex encoded")?;
+
+    if bytes.len() != 32 {
+        bail!("manifest root must be a 32-byte Swarm reference");
+    }
+
+    Ok(bytes)
 }
 
 async fn load_private_objects_from_anchored_bucket(
     state: &AppState,
     principal: &AwsPrincipal,
     bucket: &str,
-    chain_bucket: &ChainBucketRecord,
+    manifest_root: &[u8],
+    encryption_version: u32,
     prefix: &str,
 ) -> Result<Vec<ListObjectsV2Entry>> {
-    if chain_bucket.bucket_manifest_root.is_empty() {
+    if manifest_root.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -185,8 +390,8 @@ async fn load_private_objects_from_anchored_bucket(
         &state.master_service_key,
         &principal.owner,
         bucket,
-        chain_bucket.encryption_version,
-        &chain_bucket.bucket_manifest_root,
+        encryption_version,
+        manifest_root,
     )
     .await?
     {
@@ -225,15 +430,14 @@ fn list_entries_from_private_bucket_manifest(
 
 async fn load_objects_from_anchored_bucket(
     state: &AppState,
-    chain_bucket: &ChainBucketRecord,
+    manifest_root: &[u8],
     prefix: &str,
 ) -> Result<Vec<ListObjectsV2Entry>> {
-    if chain_bucket.bucket_manifest_root.is_empty() {
+    if manifest_root.is_empty() {
         return Ok(Vec::new());
     }
 
-    let bucket_manifest =
-        read_bucket_manifest_from_root(state, &chain_bucket.bucket_manifest_root).await?;
+    let bucket_manifest = read_bucket_manifest_from_root(state, manifest_root).await?;
 
     let mut objects = Vec::new();
 
@@ -345,7 +549,7 @@ mod tests {
             vec!["docs/a.txt", "docs/b.txt"]
         );
         assert!(page.is_truncated);
-        assert_eq!(page.next_continuation_token.as_deref(), Some("docs/b.txt"));
+        assert_eq!(page.next_after_key.as_deref(), Some("docs/b.txt"));
     }
 
     #[test]
@@ -368,7 +572,76 @@ mod tests {
             vec!["docs/c.txt"]
         );
         assert!(!page.is_truncated);
-        assert!(page.next_continuation_token.is_none());
+        assert!(page.next_after_key.is_none());
+    }
+
+    #[test]
+    fn list_continuation_token_is_signed_and_bound_to_snapshot() {
+        let signing_key = [9u8; 32];
+        let bucket_id = [7u8; 32];
+        let chain_bucket = ChainBucketRecord {
+            owner: [1u8; 32],
+            is_private: false,
+            encryption_version: 3,
+            creation_date: 42,
+            bucket_manifest_root: vec![4u8; 32],
+        };
+        let snapshot = resolve_list_snapshot(&chain_bucket, bucket_id, "docs/", None, &signing_key)
+            .expect("initial snapshot should resolve from chain root");
+        let token = encode_list_continuation_token(&snapshot, "docs/b.txt", &signing_key)
+            .expect("token should encode");
+
+        let resumed = resolve_list_snapshot(
+            &ChainBucketRecord {
+                bucket_manifest_root: vec![8u8; 32],
+                ..chain_bucket.clone()
+            },
+            bucket_id,
+            "docs/",
+            Some(&token),
+            &signing_key,
+        )
+        .expect("signed token should resolve its original snapshot even after root advances");
+
+        assert_eq!(resumed.manifest_root, vec![4u8; 32]);
+        assert_eq!(resumed.after_key.as_deref(), Some("docs/b.txt"));
+
+        let err = resolve_list_snapshot(
+            &chain_bucket,
+            bucket_id,
+            "images/",
+            Some(&token),
+            &signing_key,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("prefix"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn list_continuation_token_rejects_signature_tampering() {
+        let signing_key = [9u8; 32];
+        let chain_bucket = ChainBucketRecord {
+            owner: [1u8; 32],
+            is_private: false,
+            encryption_version: 1,
+            creation_date: 1,
+            bucket_manifest_root: vec![4u8; 32],
+        };
+        let snapshot =
+            resolve_list_snapshot(&chain_bucket, [7u8; 32], "", None, &signing_key).unwrap();
+        let mut token = encode_list_continuation_token(&snapshot, "b.txt", &signing_key).unwrap();
+        token.push('0');
+
+        let err = resolve_list_snapshot(&chain_bucket, [7u8; 32], "", Some(&token), &signing_key)
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("signature") || err.to_string().contains("token"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

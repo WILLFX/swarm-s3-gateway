@@ -143,6 +143,10 @@ jobs:
         run: ./scripts/check_trustless_chain_recipient_key_adapter_surface.py
       - name: Check trustless remote gateway HTTP client surface
         run: ./scripts/check_trustless_remote_gateway_http_client_surface.py
+
+      - name: Check list snapshot pagination surface
+        run: ./scripts/check_list_snapshot_pagination_surface.py
+
       - name: Check gateway trustless ciphertext endpoint surface
         run: ./scripts/check_gateway_trustless_ciphertext_endpoint_surface.py
 
@@ -210,6 +214,15 @@ jobs:
 
       - name: Check gateway orphan reconciliation surface
         run: ./scripts/check_gateway_orphan_reconciliation_surface.py
+
+      - name: Install trustless proxy native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake nasm
+
+      - name: Check trustless proxy
+        run: cargo check -p trustless-proxy
+
+      - name: Test trustless proxy
+        run: cargo test -p trustless-proxy -- --nocapture
 
       - name: Check gateway
         run: cargo check -p gateway
