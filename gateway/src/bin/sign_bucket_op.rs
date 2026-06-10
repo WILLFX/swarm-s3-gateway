@@ -1,6 +1,6 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use gateway::{chain::registry::ChainRegistryClient, crypto::bucket_name_hash};
-use sp_core::{sr25519, Pair as _};
+use sp_core::{Pair as _, sr25519};
 use std::env;
 
 fn decode_32_hex(value: &str, name: &str) -> Result<[u8; 32]> {
@@ -14,11 +14,11 @@ fn decode_32_hex(value: &str, name: &str) -> Result<[u8; 32]> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let op = env::args().nth(1).ok_or_else(|| {
-        anyhow!("usage: sign_bucket_op <create|create-trustless|delete|increment> <bucket> [private|public]")
+        anyhow!("usage: sign_bucket_op <create|create-trustless|delete> <bucket> [private|public]")
     })?;
 
     let bucket = env::args().nth(2).ok_or_else(|| {
-        anyhow!("usage: sign_bucket_op <create|create-trustless|delete|increment> <bucket> [private|public]")
+        anyhow!("usage: sign_bucket_op <create|create-trustless|delete> <bucket> [private|public]")
     })?;
 
     let visibility = env::args().nth(3).unwrap_or_else(|| "public".to_string());
@@ -59,10 +59,9 @@ async fn main() -> Result<()> {
         "create" => b"s3gw/v1/create_bucket",
         "create-trustless" => b"s3gw/v1/create_trustless_bucket",
         "delete" => b"s3gw/v1/delete_bucket",
-        "increment" => b"s3gw/v1/increment_encryption_version",
         other => {
             return Err(anyhow!(
-                "unsupported op: {other}; use create, create-trustless, delete, or increment"
+                "unsupported op: {other}; use create, create-trustless, or delete"
             ));
         }
     };

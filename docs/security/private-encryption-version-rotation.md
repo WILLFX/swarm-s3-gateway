@@ -47,6 +47,12 @@ The gateway does not yet provide a production-safe bucket encryption rotation wo
 
 Do not expose `increment_encryption_version` as an operator/user rotation feature until the bucket manifest migration/versioning design is implemented and covered by smoke tests.
 
+The gateway operator signing helper must not sign increment operations, and the gateway chain/contract clients must not expose a ready-made increment submission path.
+
+The bucket contract rejects `increment_encryption_version` once `bucket_manifest_root` is non-empty. This is a fail-closed guard for the unsafe populated-bucket case, not a full rotation workflow.
+
+An empty-root version increment is still only a low-level contract primitive. It must not be presented as production rotation because it does not migrate or re-encrypt existing manifests or objects.
+
 ## Required future smoke test
 
 A full rotation smoke must prove:

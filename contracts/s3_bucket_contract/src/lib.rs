@@ -4,8 +4,9 @@
 mod s3_bucket_contract {
     use ink::{
         env::{
-            call::{build_call, ExecutionInput, Selector},
-            sr25519_verify, DefaultEnvironment,
+            DefaultEnvironment,
+            call::{ExecutionInput, Selector, build_call},
+            sr25519_verify,
         },
         prelude::vec::Vec,
         storage::Mapping,
@@ -31,6 +32,7 @@ mod s3_bucket_contract {
         StaleBucketManifestRoot,
         StaleOwnerCatalogRoot,
         BucketTypeAlreadyExists,
+        BucketManifestRootNotEmpty,
     }
 
     pub type Result<T> = core::result::Result<T, Error>;
@@ -360,6 +362,10 @@ mod s3_bucket_contract {
 
             self.verify_increment_signature(owner, bucket_name_hash, nonce, owner_signature)?;
             self.ensure_increment_authorized(owner, self.env().caller())?;
+
+            if !record.bucket_manifest_root.is_empty() {
+                return Err(Error::BucketManifestRootNotEmpty);
+            }
 
             let new_version = match record.encryption_version.checked_add(1) {
                 Some(v) => v,
@@ -718,8 +724,8 @@ mod s3_bucket_contract {
     mod tests {
         use super::*;
         use ink::env::{self, test};
-        use sp_core::sr25519;
         use sp_core::Pair;
+        use sp_core::sr25519;
 
         fn set_caller(caller: AccountId) {
             test::set_caller::<env::DefaultEnvironment>(caller);
@@ -1250,6 +1256,50 @@ mod s3_bucket_contract {
             assert_eq!(
                 c.increment_encryption_version(hash(1), sig.0),
                 Err(Error::InvalidSignature)
+            );
+        }
+
+        #[ink::test]
+        fn increment_rejects_non_empty_bucket_manifest_root() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner = account_from_pair(&pair);
+            let owner_bytes = account_bytes_from_pair(&pair);
+
+            set_caller(owner);
+            let create_nonce = c.get_owner_nonce(owner_bytes);
+            let create_sig = pair.sign(&create_payload(&c, hash(1), true, create_nonce));
+            assert_eq!(
+                c.create_bucket(owner, hash(1), true, create_sig.0, Vec::new()),
+                Ok(())
+            );
+
+            let manifest_root = vec![7u8; 32];
+            assert_eq!(
+                c.update_bucket_manifest_root_for_put(hash(1), manifest_root.clone()),
+                Ok(())
+            );
+
+            let nonce = c.get_owner_nonce(owner_bytes);
+            let sig = pair.sign(&increment_payload(&c, hash(1), nonce));
+
+            assert_eq!(
+                c.increment_encryption_version(hash(1), sig.0),
+                Err(Error::BucketManifestRootNotEmpty)
+            );
+
+            let record = c
+                .get_bucket(hash(1))
+                .expect("bucket must still exist after rejected increment");
+            assert_eq!(record.encryption_version, 1);
+            assert_eq!(record.bucket_manifest_root, manifest_root);
+            assert_eq!(
+                c.get_owner_nonce(owner_bytes),
+                nonce,
+                "rejected increment must not consume the owner nonce"
             );
         }
 
