@@ -292,7 +292,7 @@ impl LocalTrustlessRuntime {
 
                 Ok(CiphertextGatewayBoundary::get_ciphertext_request(
                     &route_plan,
-                    ciphertext_reference_hex,
+                    Some(ciphertext_reference_hex),
                 )?)
             }
             LocalS3Operation::HeadObject => {
@@ -306,7 +306,7 @@ impl LocalTrustlessRuntime {
 
                 Ok(CiphertextGatewayBoundary::head_ciphertext_request(
                     &route_plan,
-                    ciphertext_reference_hex,
+                    Some(ciphertext_reference_hex),
                 )?)
             }
             LocalS3Operation::ListObjectsV2 => {
@@ -1440,7 +1440,6 @@ mod tests {
             &prepared,
             CiphertextGatewayRequest {
                 bucket: "bucket".to_owned(),
-                key: None,
                 action: RemoteGatewayAction::CreateTrustlessBucket,
                 ciphertext_payload: None,
                 encrypted_manifest_payload: None,

@@ -4,7 +4,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::config::TrustlessProxyConfig;
-use crate::encryption::{TrustlessEncryptRequest, TrustlessEncryptionBoundary};
+use crate::encryption::{
+    TrustlessEncryptRequest, TrustlessEncryptionBoundary, TrustlessEncryptionError,
+};
 use crate::gateway_boundary::{CiphertextGatewayBoundary, CiphertextGatewayBoundaryError};
 use crate::http_mapping::{
     LocalTrustlessHttpRequest, LocalTrustlessHttpRequestContext, LocalTrustlessHttpResponse,
@@ -15,7 +17,9 @@ use crate::manifest::{
     TrustlessManifestCipher, TrustlessManifestEntry, TrustlessManifestError,
 };
 use crate::planner::{PlannerError, RemoteGatewayAction, TrustlessRoutePlanner};
-use crate::preflight::{TrustlessOperationPreflightBuilder, TrustlessPreflightRequest};
+use crate::preflight::{
+    PreflightError, TrustlessOperationPreflightBuilder, TrustlessPreflightRequest,
+};
 use crate::recipient_keys::RecipientKeyResolver;
 use crate::remote_gateway::{
     RemoteGatewayClientError, TrustlessRemoteGatewayClient, TrustlessRemoteGatewayExecutor,
@@ -70,6 +74,12 @@ pub enum LocalTrustlessExecutionEngineError {
 
     #[error(transparent)]
     Manifest(TrustlessManifestError),
+
+    #[error(transparent)]
+    Preflight(PreflightError),
+
+    #[error(transparent)]
+    Encryption(TrustlessEncryptionError),
 
     #[error("gateway plaintext access is not allowed")]
     GatewayPlaintextAccessRejected,
@@ -126,6 +136,18 @@ impl From<PlannerError> for LocalTrustlessExecutionEngineError {
 impl From<TrustlessManifestError> for LocalTrustlessExecutionEngineError {
     fn from(error: TrustlessManifestError) -> Self {
         Self::Manifest(error)
+    }
+}
+
+impl From<PreflightError> for LocalTrustlessExecutionEngineError {
+    fn from(error: PreflightError) -> Self {
+        Self::Preflight(error)
+    }
+}
+
+impl From<TrustlessEncryptionError> for LocalTrustlessExecutionEngineError {
+    fn from(error: TrustlessEncryptionError) -> Self {
+        Self::Encryption(error)
     }
 }
 
@@ -1635,11 +1657,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status_code, 200);
-        let body = String::from_utf8(response.body.clone().expect("LIST should return XML body"))
-            .expect("LIST body should be UTF-8 XML");
-        assert!(body.contains("<ListBucketResult"));
-        assert!(body.contains("<Key>secret.txt</Key>"));
-        assert!(body.contains("<Size>64</Size>"));
+        assert!(response.body.is_none());
         assert!(response.metadata_only);
         assert!(!response.gateway_plaintext_access);
 
@@ -1678,7 +1696,12 @@ mod tests {
         let response = engine.execute_http_request(input).unwrap();
 
         assert_eq!(response.status_code, 200);
-        assert!(response.body.is_none());
+        let body = String::from_utf8(response.body.clone().expect("LIST should return XML body"))
+            .expect("LIST body should be UTF-8 XML");
+        assert!(body.contains("<ListBucketResult"));
+        assert!(body.contains("<Key>secret.txt</Key>"));
+        assert!(body.contains("<Size>64</Size>"));
+        assert!(response.metadata_only);
         assert!(!response.gateway_plaintext_access);
 
         let requests = seen_requests.borrow();

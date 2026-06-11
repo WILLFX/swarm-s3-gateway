@@ -743,7 +743,9 @@ fn is_loopback_remote_gateway_url(url: &reqwest::Url) -> bool {
         return false;
     };
 
-    if matches!(host, "localhost" | "127.0.0.1" | "::1") {
+    let host = host.trim_matches(|character| matches!(character, '[' | ']'));
+
+    if host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1") {
         return true;
     }
 
