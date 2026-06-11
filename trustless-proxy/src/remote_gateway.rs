@@ -432,13 +432,13 @@ mod tests {
 
     #[test]
     fn remote_gateway_requires_ciphertext_reference_for_reads() {
-        let request = request(RemoteGatewayAction::GetCiphertextObject);
+        let get_request = request(RemoteGatewayAction::GetCiphertextObject);
 
         let client =
             MockRemoteGatewayClient::new(response(RemoteGatewayAction::GetCiphertextObject));
         let executor = TrustlessRemoteGatewayExecutor::new(client);
 
-        let err = executor.execute(request).unwrap_err();
+        let err = executor.execute(get_request).unwrap_err();
 
         assert_eq!(err, RemoteGatewayClientError::MissingCiphertextReference);
         assert!(executor.client.seen_request().is_none());

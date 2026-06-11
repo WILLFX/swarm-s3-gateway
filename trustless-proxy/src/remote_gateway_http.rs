@@ -135,8 +135,11 @@ pub enum RemoteGatewayHttpClientError {
     #[error("remote gateway base URL is required")]
     MissingBaseUrl,
 
-    #[error("remote gateway base URL must start with http:// or https://")]
+    #[error("remote gateway base URL must be an absolute http:// or https:// URL")]
     InvalidBaseUrl,
+
+    #[error("remote gateway HTTP is only allowed for localhost or loopback development URLs")]
+    InsecureRemoteGatewayUrl,
 
     #[error("plaintext payload must never be sent to the remote gateway")]
     PlaintextPayloadRejected,
@@ -244,6 +247,7 @@ impl ReqwestRemoteGatewayHttpTransport {
         Self {
             client: reqwest::blocking::Client::builder()
                 .timeout(remote_gateway_http_timeout_from_env())
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("reqwest client builder accepts configured timeout"),
         }
@@ -723,11 +727,31 @@ fn validate_base_url(base_url: &str) -> Result<(), RemoteGatewayHttpClientError>
         return Err(RemoteGatewayHttpClientError::MissingBaseUrl);
     }
 
-    if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
-        return Err(RemoteGatewayHttpClientError::InvalidBaseUrl);
+    let parsed =
+        reqwest::Url::parse(base_url).map_err(|_| RemoteGatewayHttpClientError::InvalidBaseUrl)?;
+
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_remote_gateway_url(&parsed) => Ok(()),
+        "http" => Err(RemoteGatewayHttpClientError::InsecureRemoteGatewayUrl),
+        _ => Err(RemoteGatewayHttpClientError::InvalidBaseUrl),
+    }
+}
+
+fn is_loopback_remote_gateway_url(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+
+    let host = host.trim_matches(|character| matches!(character, '[' | ']'));
+
+    if host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1") {
+        return true;
     }
 
-    Ok(())
+    host.parse::<std::net::IpAddr>()
+        .map(|address| address.is_loopback())
+        .unwrap_or(false)
 }
 
 fn action_to_wire(action: RemoteGatewayAction) -> &'static str {
@@ -1339,6 +1363,57 @@ mod tests {
     }
 
     #[test]
+    fn http_client_rejects_non_loopback_http_base_url() {
+        let transport = MockHttpTransport::new(response(RemoteGatewayAction::GetCiphertextObject));
+
+        let err = RemoteGatewayHttpClient::with_transport(
+            RemoteGatewayHttpClientConfig {
+                base_url: "http://gateway.local".to_owned(),
+                sigv4_auth: None,
+            },
+            transport,
+        )
+        .unwrap_err();
+
+        assert_eq!(err, RemoteGatewayHttpClientError::InsecureRemoteGatewayUrl);
+    }
+
+    #[test]
+    fn http_client_accepts_loopback_http_base_url_for_dev() {
+        for base_url in [
+            "http://127.0.0.1:3000",
+            "http://localhost:3000",
+            "http://[::1]:3000",
+        ] {
+            let transport =
+                MockHttpTransport::new(response(RemoteGatewayAction::GetCiphertextObject));
+
+            RemoteGatewayHttpClient::with_transport(
+                RemoteGatewayHttpClientConfig {
+                    base_url: base_url.to_owned(),
+                    sigv4_auth: None,
+                },
+                transport,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn http_client_accepts_https_base_url() {
+        let transport = MockHttpTransport::new(response(RemoteGatewayAction::GetCiphertextObject));
+
+        RemoteGatewayHttpClient::with_transport(
+            RemoteGatewayHttpClientConfig {
+                base_url: "https://gateway.local".to_owned(),
+                sigv4_auth: None,
+            },
+            transport,
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn http_client_rejects_unknown_response_action() {
         let mut response = response(RemoteGatewayAction::GetCiphertextObject);
         response.action = "unknown-action".to_owned();
@@ -1474,7 +1549,7 @@ mod tests {
 
             let client = RemoteGatewayHttpClient::with_transport(
                 RemoteGatewayHttpClientConfig {
-                    base_url: "http://gateway.local/".to_owned(),
+                    base_url: "https://gateway.local/".to_owned(),
                     sigv4_auth: None,
                 },
                 transport.clone(),
@@ -1496,7 +1571,7 @@ mod tests {
 
             assert_eq!(
                 transport.state.borrow().seen_url.as_deref(),
-                Some("http://gateway.local/trustless/v1/ciphertext-gateway")
+                Some("https://gateway.local/trustless/v1/ciphertext-gateway")
             );
 
             let body = transport.seen_body_json();
