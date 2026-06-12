@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import re
 from pathlib import Path
 
 boundary = Path("trustless-proxy/src/gateway_boundary.rs").read_text()
@@ -56,6 +57,28 @@ for forbidden in [
 ]:
     if forbidden in boundary:
         raise SystemExit(f"FAILED: forbidden trustless gateway boundary token: {forbidden}")
+
+request_struct = re.search(
+    r"pub struct CiphertextGatewayRequest\s*\{(?P<body>.*?)\n\}",
+    boundary,
+    re.S,
+)
+if not request_struct:
+    raise SystemExit("FAILED: missing CiphertextGatewayRequest struct body")
+
+for forbidden in [
+    "object_key",
+    "objectKey",
+    "object_key_id",
+    "objectKeyId",
+    "caller_object_id",
+    "callerSuppliedObjectId",
+    "key:",
+]:
+    if forbidden in request_struct.group("body"):
+        raise SystemExit(
+            f"FAILED: ciphertext gateway request leaks local/private field: {forbidden}"
+        )
 
 for token in required_tests:
     if token not in boundary:

@@ -871,6 +871,39 @@ mod tests {
         }
     }
 
+    fn assert_remote_body_excludes_object_keys_and_ids(body: &serde_json::Value) {
+        let object = body.as_object().unwrap();
+        for forbidden in [
+            "object_key",
+            "objectKey",
+            "object_key_id",
+            "objectKeyId",
+            "caller_object_id",
+            "callerSuppliedObjectId",
+            "key",
+        ] {
+            assert!(
+                !object.contains_key(forbidden),
+                "remote HTTP envelope leaked field {forbidden}"
+            );
+        }
+
+        let encoded = serde_json::to_string(body).unwrap();
+        for forbidden in [
+            "object_key",
+            "objectKey",
+            "object_key_id",
+            "objectKeyId",
+            "caller_object_id",
+            "callerSuppliedObjectId",
+        ] {
+            assert!(
+                !encoded.contains(forbidden),
+                "remote HTTP envelope leaked token {forbidden}"
+            );
+        }
+    }
+
     fn client_with_transport(
         response: RemoteGatewayHttpResponseEnvelope,
     ) -> (
@@ -1013,10 +1046,8 @@ mod tests {
             .map(|(_, value)| value)
             .unwrap();
 
-        assert!(
-            authorization
-                .contains("Credential=s3w-dev-access-key/20260602/us-east-1/s3/aws4_request")
-        );
+        assert!(authorization
+            .contains("Credential=s3w-dev-access-key/20260602/us-east-1/s3/aws4_request"));
         assert!(authorization.contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date"));
         assert!(authorization.contains("Signature="));
     }
@@ -1088,10 +1119,10 @@ mod tests {
 
         let body = transport.seen_body_json();
 
+        assert_remote_body_excludes_object_keys_and_ids(&body);
         assert_eq!(body["version"], WIRE_VERSION);
         assert_eq!(body["action"], "put_ciphertext_object");
         assert_eq!(body["bucket"], "bucket");
-        assert!(body.get("key").is_none());
         assert_eq!(body["ciphertext_hex"], hex::encode(b"ciphertext"));
         assert!(body["ciphertext_reference_hex"].is_null());
         assert!(body["expected_manifest_reference_hex"].is_null());
@@ -1159,6 +1190,7 @@ mod tests {
 
         let body = transport.seen_body_json();
 
+        assert_remote_body_excludes_object_keys_and_ids(&body);
         assert_eq!(body["action"], "get_ciphertext_object");
         assert_eq!(body["ciphertext_reference_hex"], "ab".repeat(32));
         assert!(body["expected_manifest_reference_hex"].is_null());
@@ -1205,8 +1237,8 @@ mod tests {
 
         let body = transport.seen_body_json();
 
+        assert_remote_body_excludes_object_keys_and_ids(&body);
         assert_eq!(body["action"], "put_encrypted_manifest");
-        assert!(body.get("key").is_none());
         assert_eq!(
             body["encrypted_manifest_hex"],
             hex::encode(b"encrypted-manifest")
@@ -1234,6 +1266,7 @@ mod tests {
 
         let body = transport.seen_body_json();
 
+        assert_remote_body_excludes_object_keys_and_ids(&body);
         assert_eq!(body["action"], "delete_ciphertext_object");
         assert_eq!(
             body["encrypted_manifest_hex"],
@@ -1577,11 +1610,11 @@ mod tests {
             let body = transport.seen_body_json();
             let object = body.as_object().unwrap();
 
+            assert_remote_body_excludes_object_keys_and_ids(&body);
             assert_eq!(object.len(), 7);
             assert!(object.contains_key("version"));
             assert!(object.contains_key("action"));
             assert!(object.contains_key("bucket"));
-            assert!(!object.contains_key("key"));
             assert!(object.contains_key("ciphertext_hex"));
             assert!(object.contains_key("encrypted_manifest_hex"));
             assert!(object.contains_key("ciphertext_reference_hex"));

@@ -22,10 +22,16 @@ required = {
     "unpin gated by policy": (worker, "apply && auto_unpin_allowed && pinned"),
     "trustless ciphertext report-only kind": (module, "TrustlessCiphertextPayload"),
     "trustless decrypt refusal": (module, "gateway cannot decrypt trustless manifests"),
+    "report status enum": (module, "ReconciliationReportStatus"),
+    "manifest holder proof status": (module, "ManifestHolderProofRequired"),
+    "manifest holder proof requirement": (module, "ManifestHolderReachabilityProof"),
+    "worker report status output": (worker, "report_status"),
+    "worker proof output": (worker, "proof_required"),
     "pending report-only policy": (module, "anchor result is pending"),
     "anchor attempt candidates": (module, "collect_anchor_attempt_candidates"),
     "docs journal env": (docs, "S3GW_BEE_WRITE_JOURNAL_PATH"),
     "docs explicit apply": (docs, "--apply"),
+    "docs manifest-holder status": (docs, "report_status=manifest_holder_proof_required"),
     "workflow guard": (workflow, "check_gateway_orphan_reconciliation_surface.py"),
 }
 

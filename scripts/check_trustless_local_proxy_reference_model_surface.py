@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import re
 from pathlib import Path
 
 references = Path("trustless-proxy/src/references.rs").read_text()
@@ -21,11 +22,12 @@ required_source = [
     "encrypted_manifest_reference",
     "encrypted_manifest_only: true",
     "gateway_plaintext_access: false",
+    "Serialize",
 ]
 
 required_tests = [
     "object_reference_keeps_plaintext_key_local_and_gateway_ciphertext_only",
-    "remote_object_reference_excludes_plaintext_object_key",
+    "remote_object_reference_excludes_plaintext_object_key_and_id",
     "manifest_entry_roundtrip_preserves_local_metadata",
     "encrypted_manifest_reference_is_encrypted_only",
     "reference_model_rejects_missing_fields_and_empty_ciphertext",
@@ -54,6 +56,28 @@ for forbidden in [
 ]:
     if forbidden in references:
         raise SystemExit(f"FAILED: forbidden trustless reference token: {forbidden}")
+
+remote_struct = re.search(
+    r"pub struct TrustlessRemoteObjectReference\s*\{(?P<body>.*?)\n\}",
+    references,
+    re.S,
+)
+if not remote_struct:
+    raise SystemExit("FAILED: missing TrustlessRemoteObjectReference struct body")
+
+for forbidden in [
+    "object_key",
+    "objectKey",
+    "object_key_id",
+    "objectKeyId",
+    "caller_object_id",
+    "callerSuppliedObjectId",
+    "key:",
+]:
+    if forbidden in remote_struct.group("body"):
+        raise SystemExit(
+            f"FAILED: remote trustless object reference leaks local/private field: {forbidden}"
+        )
 
 for token in required_tests:
     if token not in references:

@@ -1,3 +1,4 @@
+use serde::Serialize;
 use thiserror::Error;
 
 use crate::manifest::TrustlessManifestEntry;
@@ -26,10 +27,9 @@ pub struct TrustlessObjectReference {
     pub gateway_plaintext_access: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TrustlessRemoteObjectReference {
     pub bucket_id: String,
-    pub object_key_id: String,
     pub ciphertext_ref: String,
     pub ciphertext_size: u64,
     pub gateway_plaintext_access: bool,
@@ -113,7 +113,6 @@ impl TrustlessReferenceModel {
 
         Ok(TrustlessRemoteObjectReference {
             bucket_id: reference.bucket_id.clone(),
-            object_key_id: reference.object_key_id.clone(),
             ciphertext_ref: reference.ciphertext_ref.clone(),
             ciphertext_size: reference.ciphertext_size,
             gateway_plaintext_access: false,
@@ -215,15 +214,46 @@ mod tests {
     }
 
     #[test]
-    fn remote_object_reference_excludes_plaintext_object_key() {
+    fn remote_object_reference_excludes_plaintext_object_key_and_id() {
         let reference = TrustlessReferenceModel::object_reference(input()).unwrap();
 
         let remote = TrustlessReferenceModel::remote_object_reference(&reference).unwrap();
 
         assert_eq!(remote.bucket_id, reference.bucket_id);
-        assert_eq!(remote.object_key_id, reference.object_key_id);
         assert_eq!(remote.ciphertext_ref, reference.ciphertext_ref);
         assert!(!remote.gateway_plaintext_access);
+
+        let body = serde_json::to_value(&remote).unwrap();
+        let body_object = body.as_object().unwrap();
+        for forbidden in [
+            "object_key",
+            "objectKey",
+            "object_key_id",
+            "objectKeyId",
+            "caller_object_id",
+            "callerSuppliedObjectId",
+            "key",
+        ] {
+            assert!(
+                !body_object.contains_key(forbidden),
+                "remote object reference leaked field {forbidden}"
+            );
+        }
+
+        let debug = format!("{remote:?}");
+        for forbidden in [
+            "object_key",
+            "objectKey",
+            "object_key_id",
+            "objectKeyId",
+            "caller_object_id",
+            "callerSuppliedObjectId",
+        ] {
+            assert!(
+                !debug.contains(forbidden),
+                "remote object reference debug leaked token {forbidden}"
+            );
+        }
     }
 
     #[test]
