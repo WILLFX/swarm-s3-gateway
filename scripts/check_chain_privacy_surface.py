@@ -20,6 +20,8 @@ REQUIRED_CONTRACT_TOKENS = [
     "bucket_manifest_root",
     "owner_catalog_root",
     "is_private",
+    "bucket_generation",
+    "bucket_state_epoch",
     "encryption_version",
 ]
 
@@ -39,6 +41,11 @@ for token in FORBIDDEN_CONTRACT_TOKENS:
 for token in REQUIRED_CONTRACT_TOKENS:
     if token not in contract_text:
         fail(f"contract surface missing expected root/hash token: {token}")
+
+doc = Path("docs/security/chain-privacy-surface.md").read_text()
+for token in ["`bucket_generation`", "`bucket_state_epoch`", "delete/recreate ABA races"]:
+    if token not in doc:
+        fail(f"chain privacy docs missing bucket epoch/generation disclosure: {token}")
 
 manifest = Path("gateway/src/manifest.rs").read_text()
 

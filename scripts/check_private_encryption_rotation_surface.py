@@ -12,12 +12,16 @@ text = doc.read_text()
 
 required_doc_phrases = [
     "simply incrementing the on-chain bucket `encryption_version` is not enough",
+    "expected `bucket_generation`, `bucket_state_epoch`, `encryption_version`, and `bucket_manifest_root`",
     "migrate/re-encrypt the bucket manifest under the new version",
     "store the bucket manifest's encryption version alongside the bucket manifest root",
     "does not yet provide a production-safe bucket encryption rotation workflow",
     "Do not expose `increment_encryption_version` as an operator/user rotation feature",
     "The gateway operator signing helper must not sign increment operations",
     "The bucket contract rejects `increment_encryption_version` once `bucket_manifest_root` is non-empty",
+    "the contract first checks the caller's expected generation, state epoch, encryption version, and empty root",
+    "then increments `bucket_state_epoch`",
+    "stale first writer",
     "not a full rotation workflow",
 ]
 
@@ -46,8 +50,20 @@ for token in [
 bucket_contract = Path("contracts/s3_bucket_contract/src/lib.rs").read_text()
 for token in [
     "BucketManifestRootNotEmpty",
+    "StaleBucketGeneration",
+    "StaleBucketStateEpoch",
+    "StaleEncryptionVersion",
+    "pub fn increment_encryption_version",
+    "expected_bucket_generation",
+    "expected_bucket_state_epoch",
+    "expected_encryption_version",
+    "expected_bucket_manifest_root",
+    "self.ensure_bucket_state_matches",
+    "record.bucket_state_epoch.checked_add(1)",
     "if !record.bucket_manifest_root.is_empty()",
     "return Err(Error::BucketManifestRootNotEmpty)",
+    "stale_first_write_after_empty_rotation_fails_epoch_cas",
+    "manifest_root_cas_rejects_stale_encryption_version_even_when_epoch_matches",
     "increment_rejects_non_empty_bucket_manifest_root",
 ]:
     if token not in bucket_contract:

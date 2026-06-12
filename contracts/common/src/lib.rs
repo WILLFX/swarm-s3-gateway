@@ -62,6 +62,8 @@ pub enum BucketType {
 pub struct BucketRecord {
     pub owner: AccountId32,
     pub is_private: bool,
+    pub bucket_generation: u64,
+    pub bucket_state_epoch: u64,
     pub encryption_version: u32,
     pub creation_date: u64,
     pub bucket_manifest_root: Vec<u8>,

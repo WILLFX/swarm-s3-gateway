@@ -168,16 +168,24 @@ impl AnchorClient for ContractAnchorClient {
         bucket_id: [u8; 32],
         owner_signature: [u8; 64],
         expected_owner_catalog_root: String,
+        expected_bucket_generation: u64,
+        expected_bucket_state_epoch: u64,
+        expected_bucket_manifest_root: String,
         owner_catalog_root: String,
     ) -> Result<String> {
         let expected_owner_catalog_root =
             decode_swarm_reference_or_empty(&expected_owner_catalog_root)?;
+        let expected_bucket_manifest_root =
+            decode_swarm_reference_or_empty(&expected_bucket_manifest_root)?;
         let owner_catalog_root = decode_swarm_reference_or_empty(&owner_catalog_root)?;
 
         let input_data = encode_bucket_delete_bucket_cas(
             bucket_id,
             owner_signature,
             expected_owner_catalog_root,
+            expected_bucket_generation,
+            expected_bucket_state_epoch,
+            expected_bucket_manifest_root,
             owner_catalog_root,
         );
 
@@ -188,6 +196,9 @@ impl AnchorClient for ContractAnchorClient {
     async fn update_bucket_manifest_root_for_put_anchor(
         &self,
         bucket_id: [u8; 32],
+        expected_bucket_generation: u64,
+        expected_bucket_state_epoch: u64,
+        expected_encryption_version: u32,
         expected_bucket_manifest_root: String,
         bucket_manifest_root: String,
     ) -> Result<String> {
@@ -197,6 +208,9 @@ impl AnchorClient for ContractAnchorClient {
 
         let input_data = encode_bucket_update_bucket_manifest_root_for_put_cas(
             bucket_id,
+            expected_bucket_generation,
+            expected_bucket_state_epoch,
+            expected_encryption_version,
             expected_bucket_manifest_root,
             bucket_manifest_root,
         );
@@ -211,6 +225,9 @@ impl AnchorClient for ContractAnchorClient {
     async fn update_bucket_manifest_root_for_delete_anchor(
         &self,
         bucket_id: [u8; 32],
+        expected_bucket_generation: u64,
+        expected_bucket_state_epoch: u64,
+        expected_encryption_version: u32,
         expected_bucket_manifest_root: String,
         bucket_manifest_root: String,
     ) -> Result<String> {
@@ -220,6 +237,9 @@ impl AnchorClient for ContractAnchorClient {
 
         let input_data = encode_bucket_update_bucket_manifest_root_for_delete_cas(
             bucket_id,
+            expected_bucket_generation,
+            expected_bucket_state_epoch,
+            expected_encryption_version,
             expected_bucket_manifest_root,
             bucket_manifest_root,
         );
@@ -237,6 +257,9 @@ impl AnchorClient for ContractAnchorClient {
         bucket_id: [u8; 32],
         _object_key_id: [u8; 32],
         _swarm_ref: String,
+        expected_bucket_generation: u64,
+        expected_bucket_state_epoch: u64,
+        expected_encryption_version: u32,
         expected_bucket_manifest_root: String,
         bucket_manifest_root: String,
         _size: u64,
@@ -244,6 +267,9 @@ impl AnchorClient for ContractAnchorClient {
     ) -> Result<String> {
         self.update_bucket_manifest_root_for_put_anchor(
             bucket_id,
+            expected_bucket_generation,
+            expected_bucket_state_epoch,
+            expected_encryption_version,
             expected_bucket_manifest_root,
             bucket_manifest_root,
         )

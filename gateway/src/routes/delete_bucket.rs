@@ -93,6 +93,9 @@ pub async fn handle(
             bucket_id,
             owner_signature,
             expected_owner_catalog_root,
+            chain_bucket.bucket_generation,
+            chain_bucket.bucket_state_epoch,
+            hex::encode(&chain_bucket.bucket_manifest_root),
             owner_catalog_root,
         )
         .await

@@ -3,16 +3,16 @@ use crate::{
     bee::client::BeeStorage,
     crypto::bucket_name_hash,
     orphan_reconciliation::{
-        AnchorAttemptEvent, AnchorJournalAction, GatewayBeeReference, GatewayBeeReferenceKind,
-        GatewayWriteJournal, JournalBucketType, record_anchor_attempt, record_anchor_failure,
-        record_anchor_success,
+        record_anchor_attempt, record_anchor_failure, record_anchor_success, AnchorAttemptEvent,
+        AnchorJournalAction, GatewayBeeReference, GatewayBeeReferenceKind, GatewayWriteJournal,
+        JournalBucketType,
     },
     traits::AnchorClient,
 };
 use axum::{
-    Json,
     extract::{Extension, State},
     http::StatusCode,
+    Json,
 };
 use bytes::Bytes;
 use common::types::{AwsPrincipal, ChainBucketRecord, ChainBucketType};
@@ -240,7 +240,7 @@ fn enforce_owner_only_trustless_auth(
 ) -> Result<(), RouteError> {
     if chain_bucket.owner != principal.owner {
         return Err(RouteError::forbidden(
-            "trustless remote gateway access is owner-only until bucket-scoped delegation is implemented",
+            "trustless remote gateway access is owner-only; bucket-scoped anchor delegation does not grant remote user access",
         ));
     }
 
@@ -524,6 +524,9 @@ async fn write_encrypted_manifest_with_anchor(
             anchor_client
                 .update_bucket_manifest_root_for_put_anchor(
                     authorized.bucket_id,
+                    authorized.chain_bucket.bucket_generation,
+                    authorized.chain_bucket.bucket_state_epoch,
+                    authorized.chain_bucket.encryption_version,
                     expected_root,
                     put.swarm_reference.clone(),
                 )
@@ -533,6 +536,9 @@ async fn write_encrypted_manifest_with_anchor(
             anchor_client
                 .update_bucket_manifest_root_for_delete_anchor(
                     authorized.bucket_id,
+                    authorized.chain_bucket.bucket_generation,
+                    authorized.chain_bucket.bucket_state_epoch,
+                    authorized.chain_bucket.encryption_version,
                     expected_root,
                     put.swarm_reference.clone(),
                 )
@@ -778,6 +784,8 @@ mod tests {
             chain_bucket: ChainBucketRecord {
                 owner: [9u8; 32],
                 is_private: true,
+                bucket_generation: 1,
+                bucket_state_epoch: 1,
                 encryption_version: 1,
                 creation_date: 0,
                 bucket_manifest_root: manifest_root,
@@ -866,7 +874,7 @@ mod tests {
         assert_eq!(error.status, StatusCode::FORBIDDEN);
         assert_eq!(
             error.message,
-            "trustless remote gateway access is owner-only until bucket-scoped delegation is implemented"
+            "trustless remote gateway access is owner-only; bucket-scoped anchor delegation does not grant remote user access"
         );
     }
 
@@ -1053,6 +1061,9 @@ mod tests {
             _bucket_id: [u8; 32],
             _owner_signature: [u8; 64],
             _expected_owner_catalog_root: String,
+            _expected_bucket_generation: u64,
+            _expected_bucket_state_epoch: u64,
+            _expected_bucket_manifest_root: String,
             _owner_catalog_root: String,
         ) -> anyhow::Result<String> {
             anyhow::bail!("delete_bucket_anchor should not be used by ciphertext endpoint tests")
@@ -1061,6 +1072,9 @@ mod tests {
         async fn update_bucket_manifest_root_for_put_anchor(
             &self,
             _bucket_id: [u8; 32],
+            _expected_bucket_generation: u64,
+            _expected_bucket_state_epoch: u64,
+            _expected_encryption_version: u32,
             expected_bucket_manifest_root: String,
             bucket_manifest_root: String,
         ) -> anyhow::Result<String> {
@@ -1080,6 +1094,9 @@ mod tests {
         async fn update_bucket_manifest_root_for_delete_anchor(
             &self,
             _bucket_id: [u8; 32],
+            _expected_bucket_generation: u64,
+            _expected_bucket_state_epoch: u64,
+            _expected_encryption_version: u32,
             expected_bucket_manifest_root: String,
             bucket_manifest_root: String,
         ) -> anyhow::Result<String> {
@@ -1097,6 +1114,9 @@ mod tests {
             _bucket_id: [u8; 32],
             _object_key_id: [u8; 32],
             _swarm_ref: String,
+            _expected_bucket_generation: u64,
+            _expected_bucket_state_epoch: u64,
+            _expected_encryption_version: u32,
             _expected_bucket_manifest_root: String,
             _bucket_manifest_root: String,
             _size: u64,

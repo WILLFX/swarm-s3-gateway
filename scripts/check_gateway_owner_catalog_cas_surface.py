@@ -17,12 +17,21 @@ required = [
     (anchor, "encode_bucket_delete_bucket_cas"),
     (anchor, "bucket::create_bucket_cas"),
     (anchor, "bucket::delete_bucket_cas"),
+    (anchor, "expected_bucket_generation"),
+    (anchor, "expected_bucket_state_epoch"),
+    (anchor, "expected_bucket_manifest_root"),
     (abi, "BUCKET_CREATE_BUCKET_CAS_SELECTOR"),
     (abi, "BUCKET_DELETE_BUCKET_CAS_SELECTOR"),
     (abi, "encode_bucket_create_bucket_cas"),
     (abi, "encode_bucket_delete_bucket_cas"),
+    (abi, "expected_bucket_generation"),
+    (abi, "expected_bucket_state_epoch"),
+    (abi, "expected_bucket_manifest_root"),
     (create_route, "expected_owner_catalog_root"),
     (delete_route, "expected_owner_catalog_root"),
+    (delete_route, "chain_bucket.bucket_generation"),
+    (delete_route, "chain_bucket.bucket_state_epoch"),
+    (delete_route, "chain_bucket.bucket_manifest_root"),
     (tests, "private bucket create must CAS against the owner catalog root it read"),
     (tests, "private bucket delete must CAS against the owner catalog root it read"),
 ]
@@ -41,5 +50,7 @@ legacy_forbidden = [
 for token in legacy_forbidden:
     if token in anchor:
         fail(f"anchor client still uses legacy non-CAS owner-catalog token: {token}")
+    if token in abi:
+        fail(f"contract ABI still exposes legacy non-CAS owner-catalog token: {token}")
 
 print("Gateway owner catalog CAS surface guard passed.")

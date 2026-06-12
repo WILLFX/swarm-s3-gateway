@@ -195,6 +195,9 @@ impl AnchorClient for RecordingAnchorClient {
         _bucket_id: [u8; 32],
         _owner_signature: [u8; 64],
         _expected_owner_catalog_root: String,
+        _expected_bucket_generation: u64,
+        _expected_bucket_state_epoch: u64,
+        _expected_bucket_manifest_root: String,
         _owner_catalog_root: String,
     ) -> Result<String> {
         bail!("delete_bucket_anchor should not be used by private PUT")
@@ -203,6 +206,9 @@ impl AnchorClient for RecordingAnchorClient {
     async fn update_bucket_manifest_root_for_put_anchor(
         &self,
         _bucket_id: [u8; 32],
+        _expected_bucket_generation: u64,
+        _expected_bucket_state_epoch: u64,
+        _expected_encryption_version: u32,
         _expected_bucket_manifest_root: String,
         _bucket_manifest_root: String,
     ) -> Result<String> {
@@ -212,6 +218,9 @@ impl AnchorClient for RecordingAnchorClient {
     async fn update_bucket_manifest_root_for_delete_anchor(
         &self,
         _bucket_id: [u8; 32],
+        _expected_bucket_generation: u64,
+        _expected_bucket_state_epoch: u64,
+        _expected_encryption_version: u32,
         _expected_bucket_manifest_root: String,
         _bucket_manifest_root: String,
     ) -> Result<String> {
@@ -224,6 +233,9 @@ impl AnchorClient for RecordingAnchorClient {
         bucket_id: [u8; 32],
         object_key_id: [u8; 32],
         swarm_ref: String,
+        _expected_bucket_generation: u64,
+        _expected_bucket_state_epoch: u64,
+        _expected_encryption_version: u32,
         expected_bucket_manifest_root: String,
         bucket_manifest_root: String,
         size: u64,
@@ -311,6 +323,8 @@ async fn private_put_encrypts_payload_writes_manifests_anchors_and_hides_swarm_r
     let chain_bucket = ChainBucketRecord {
         owner,
         is_private: true,
+        bucket_generation: 1,
+        bucket_state_epoch: 1,
         encryption_version,
         creation_date: 0,
         bucket_manifest_root: Vec::new(),
@@ -492,6 +506,8 @@ async fn private_put_failed_anchor_leaves_new_manifest_unanchored_and_hidden() -
     let chain_bucket = ChainBucketRecord {
         owner,
         is_private: true,
+        bucket_generation: 1,
+        bucket_state_epoch: 1,
         encryption_version,
         creation_date: 0,
         bucket_manifest_root: hex::decode(&initial_record.manifest_reference)?,
@@ -604,6 +620,8 @@ async fn trustless_private_put_fails_before_gateway_payload_manifest_or_anchor_w
     let chain_bucket = ChainBucketRecord {
         owner,
         is_private: true,
+        bucket_generation: 1,
+        bucket_state_epoch: 1,
         encryption_version,
         creation_date: 0,
         bucket_manifest_root: vec![9u8; 32],
@@ -685,6 +703,8 @@ async fn private_put_does_not_anchor_when_existing_bucket_manifest_cannot_decryp
     let chain_bucket = ChainBucketRecord {
         owner,
         is_private: true,
+        bucket_generation: 1,
+        bucket_state_epoch: 1,
         encryption_version,
         creation_date: 0,
         bucket_manifest_root: hex::decode(&corrupt_bucket_manifest_reference)?,

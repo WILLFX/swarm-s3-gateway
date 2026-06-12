@@ -43,7 +43,7 @@ require_tokens(
         "enforce_owner_only_trustless_auth(principal, &chain_bucket)?;",
         "fn enforce_owner_only_trustless_auth(",
         "chain_bucket.owner != principal.owner",
-        "trustless remote gateway access is owner-only until bucket-scoped delegation is implemented",
+        "trustless remote gateway access is owner-only; bucket-scoped anchor delegation does not grant remote user access",
     ],
 )
 
@@ -79,6 +79,8 @@ require_tokens(
         "The remote trustless gateway is owner-only in the current implementation.",
         "Current identity-contract delegation is owner-wide, not bucket-scoped.",
         "Do not wire owner-wide delegation into the trustless remote gateway path.",
+        "Bucket-scoped anchor delegation does not grant remote user access.",
+        "contract authorization path for trustless-private manifest-root mutation",
     ],
 )
 

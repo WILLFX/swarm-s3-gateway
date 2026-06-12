@@ -238,6 +238,9 @@ impl AnchorClient for RecordingAnchorClient {
         bucket_id: [u8; 32],
         owner_signature: [u8; 64],
         expected_owner_catalog_root: String,
+        _expected_bucket_generation: u64,
+        _expected_bucket_state_epoch: u64,
+        _expected_bucket_manifest_root: String,
         owner_catalog_root: String,
     ) -> Result<String> {
         *self.delete_call.lock().unwrap() = Some(DeleteBucketAnchorRecord {
@@ -253,6 +256,9 @@ impl AnchorClient for RecordingAnchorClient {
     async fn update_bucket_manifest_root_for_put_anchor(
         &self,
         _bucket_id: [u8; 32],
+        _expected_bucket_generation: u64,
+        _expected_bucket_state_epoch: u64,
+        _expected_encryption_version: u32,
         _expected_bucket_manifest_root: String,
         _bucket_manifest_root: String,
     ) -> Result<String> {
@@ -262,6 +268,9 @@ impl AnchorClient for RecordingAnchorClient {
     async fn update_bucket_manifest_root_for_delete_anchor(
         &self,
         _bucket_id: [u8; 32],
+        _expected_bucket_generation: u64,
+        _expected_bucket_state_epoch: u64,
+        _expected_encryption_version: u32,
         _expected_bucket_manifest_root: String,
         _bucket_manifest_root: String,
     ) -> Result<String> {
@@ -274,6 +283,9 @@ impl AnchorClient for RecordingAnchorClient {
         _bucket_id: [u8; 32],
         _object_key_id: [u8; 32],
         _swarm_ref: String,
+        _expected_bucket_generation: u64,
+        _expected_bucket_state_epoch: u64,
+        _expected_encryption_version: u32,
         _expected_bucket_manifest_root: String,
         _bucket_manifest_root: String,
         _size: u64,
@@ -552,6 +564,8 @@ async fn trustless_private_delete_bucket_fails_before_gateway_manifest_or_catalo
     let chain_bucket = ChainBucketRecord {
         owner,
         is_private: true,
+        bucket_generation: 1,
+        bucket_state_epoch: 1,
         encryption_version: 1,
         creation_date: 0,
         bucket_manifest_root: vec![9u8; 32],
@@ -626,6 +640,8 @@ async fn private_delete_empty_bucket_removes_owner_catalog_entry_and_delete_anch
     let chain_bucket = ChainBucketRecord {
         owner,
         is_private: true,
+        bucket_generation: 1,
+        bucket_state_epoch: 1,
         encryption_version,
         creation_date: 0,
         bucket_manifest_root: Vec::new(),
@@ -741,6 +757,8 @@ async fn private_delete_non_empty_bucket_rejects_before_catalog_update_or_delete
     let chain_bucket = ChainBucketRecord {
         owner,
         is_private: true,
+        bucket_generation: 1,
+        bucket_state_epoch: 1,
         encryption_version,
         creation_date: 0,
         bucket_manifest_root: hex::decode(&private_manifest_record.manifest_reference)?,

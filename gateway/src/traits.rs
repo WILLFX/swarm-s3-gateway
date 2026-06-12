@@ -49,12 +49,18 @@ pub trait AnchorClient: Send + Sync {
         bucket_id: [u8; 32],
         owner_signature: [u8; 64],
         expected_owner_catalog_root: String,
+        expected_bucket_generation: u64,
+        expected_bucket_state_epoch: u64,
+        expected_bucket_manifest_root: String,
         owner_catalog_root: String,
     ) -> anyhow::Result<String>;
 
     async fn update_bucket_manifest_root_for_put_anchor(
         &self,
         bucket_id: [u8; 32],
+        expected_bucket_generation: u64,
+        expected_bucket_state_epoch: u64,
+        expected_encryption_version: u32,
         expected_bucket_manifest_root: String,
         bucket_manifest_root: String,
     ) -> anyhow::Result<String>;
@@ -62,6 +68,9 @@ pub trait AnchorClient: Send + Sync {
     async fn update_bucket_manifest_root_for_delete_anchor(
         &self,
         bucket_id: [u8; 32],
+        expected_bucket_generation: u64,
+        expected_bucket_state_epoch: u64,
+        expected_encryption_version: u32,
         expected_bucket_manifest_root: String,
         bucket_manifest_root: String,
     ) -> anyhow::Result<String>;
@@ -72,6 +81,9 @@ pub trait AnchorClient: Send + Sync {
         bucket_id: [u8; 32],
         object_key_id: [u8; 32],
         swarm_ref: String,
+        expected_bucket_generation: u64,
+        expected_bucket_state_epoch: u64,
+        expected_encryption_version: u32,
         expected_bucket_manifest_root: String,
         bucket_manifest_root: String,
         size: u64,
