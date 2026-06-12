@@ -1,23 +1,23 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use common::types::{
     AccessKeyHash, ChainBucketRecord, ChainBucketType, ChainEncryptionKeyRecord,
     ChainRegistryEntry, SubstrateAddress32,
 };
 use subxt::{
-    OnlineClient, PolkadotConfig,
     utils::{AccountId32, H256},
+    OnlineClient, PolkadotConfig,
 };
 use subxt_signer::sr25519::Keypair;
 
 use crate::{
     contracts_abi::{
+        decode_query_result, encode_bucket_get_bucket, encode_bucket_get_bucket_type,
+        encode_bucket_get_owner_catalog_root, encode_bucket_get_owner_nonce,
+        encode_identity_get_encryption_key, encode_identity_get_identity,
         BucketRecord as ContractBucketRecord, BucketType as ContractBucketType,
         EncryptionKeyRecord as ContractEncryptionKeyRecord,
-        IdentityRecord as ContractIdentityRecord, decode_query_result, encode_bucket_get_bucket,
-        encode_bucket_get_bucket_type, encode_bucket_get_owner_catalog_root,
-        encode_bucket_get_owner_nonce, encode_identity_get_encryption_key,
-        encode_identity_get_identity,
+        IdentityRecord as ContractIdentityRecord,
     },
     s3_runtime::api,
     traits::RegistryClient,
@@ -178,6 +178,8 @@ impl ChainRegistryClient {
         Ok(maybe_bucket.map(|entry| ChainBucketRecord {
             owner: entry.owner,
             is_private: entry.is_private,
+            bucket_generation: entry.bucket_generation,
+            bucket_state_epoch: entry.bucket_state_epoch,
             encryption_version: entry.encryption_version,
             creation_date: entry.creation_date,
             bucket_manifest_root: entry.bucket_manifest_root,

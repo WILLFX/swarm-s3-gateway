@@ -185,6 +185,9 @@ impl AnchorClient for FailingAnchorClient {
         _bucket_id: [u8; 32],
         _owner_signature: [u8; 64],
         _expected_owner_catalog_root: String,
+        _expected_bucket_generation: u64,
+        _expected_bucket_state_epoch: u64,
+        _expected_bucket_manifest_root: String,
         _owner_catalog_root: String,
     ) -> Result<String> {
         bail!("delete_bucket_anchor should not be used by public PUT")
@@ -193,6 +196,9 @@ impl AnchorClient for FailingAnchorClient {
     async fn update_bucket_manifest_root_for_put_anchor(
         &self,
         _bucket_id: [u8; 32],
+        _expected_bucket_generation: u64,
+        _expected_bucket_state_epoch: u64,
+        _expected_encryption_version: u32,
         _expected_bucket_manifest_root: String,
         _bucket_manifest_root: String,
     ) -> Result<String> {
@@ -202,6 +208,9 @@ impl AnchorClient for FailingAnchorClient {
     async fn update_bucket_manifest_root_for_delete_anchor(
         &self,
         _bucket_id: [u8; 32],
+        _expected_bucket_generation: u64,
+        _expected_bucket_state_epoch: u64,
+        _expected_encryption_version: u32,
         _expected_bucket_manifest_root: String,
         _bucket_manifest_root: String,
     ) -> Result<String> {
@@ -214,6 +223,9 @@ impl AnchorClient for FailingAnchorClient {
         _bucket_id: [u8; 32],
         _object_key_id: [u8; 32],
         _swarm_ref: String,
+        _expected_bucket_generation: u64,
+        _expected_bucket_state_epoch: u64,
+        _expected_encryption_version: u32,
         expected_bucket_manifest_root: String,
         bucket_manifest_root: String,
         _size: u64,
@@ -274,6 +286,8 @@ async fn public_put_failed_anchor_leaves_staged_bee_writes_out_of_chain_visible_
     let chain_bucket = ChainBucketRecord {
         owner,
         is_private: false,
+        bucket_generation: 1,
+        bucket_state_epoch: 1,
         encryption_version: 0,
         creation_date: 0,
         bucket_manifest_root: Vec::new(),

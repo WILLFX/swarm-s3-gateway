@@ -36,6 +36,8 @@ pub struct EncryptionKeyRecord {
 pub struct BucketRecord {
     pub owner: AccountId32,
     pub is_private: bool,
+    pub bucket_generation: u64,
+    pub bucket_state_epoch: u64,
     pub encryption_version: u32,
     pub creation_date: u64,
     pub bucket_manifest_root: Vec<u8>,
@@ -130,6 +132,16 @@ pub enum BucketError {
     Error11,
     #[codec(index = 12)]
     Error12,
+    #[codec(index = 13)]
+    Error13,
+    #[codec(index = 14)]
+    Error14,
+    #[codec(index = 15)]
+    Error15,
+    #[codec(index = 16)]
+    Error16,
+    #[codec(index = 17)]
+    Error17,
 }
 
 pub const IDENTITY_REGISTER_IDENTITY_SELECTOR: [u8; 4] = [0x87, 0xeb, 0xe7, 0xfb];
@@ -148,14 +160,9 @@ pub const BUCKET_GET_BUCKET_SELECTOR: [u8; 4] = [0x6c, 0x5d, 0xca, 0xd3];
 pub const BUCKET_GET_BUCKET_TYPE_SELECTOR: [u8; 4] = [0x82, 0xc3, 0xd9, 0x39];
 pub const BUCKET_GET_OWNER_NONCE_SELECTOR: [u8; 4] = [0x7a, 0x1c, 0x13, 0x7b];
 pub const BUCKET_GET_OWNER_CATALOG_ROOT_SELECTOR: [u8; 4] = [0x41, 0xe6, 0xc9, 0x81];
-pub const BUCKET_CREATE_BUCKET_SELECTOR: [u8; 4] = [0xbb, 0xb9, 0xf7, 0x40];
-pub const BUCKET_DELETE_BUCKET_SELECTOR: [u8; 4] = [0x36, 0x5e, 0x58, 0xd9];
 pub const BUCKET_CREATE_BUCKET_CAS_SELECTOR: [u8; 4] = [0x7d, 0xe5, 0x66, 0x94];
 pub const BUCKET_CREATE_TRUSTLESS_BUCKET_CAS_SELECTOR: [u8; 4] = [0x0e, 0xe0, 0x6e, 0x35];
 pub const BUCKET_DELETE_BUCKET_CAS_SELECTOR: [u8; 4] = [0x35, 0x3d, 0x92, 0xb3];
-pub const BUCKET_UPDATE_BUCKET_MANIFEST_ROOT_FOR_PUT_SELECTOR: [u8; 4] = [0x5c, 0x0b, 0x7e, 0xab];
-pub const BUCKET_UPDATE_BUCKET_MANIFEST_ROOT_FOR_DELETE_SELECTOR: [u8; 4] =
-    [0x94, 0xbc, 0x4c, 0x0d];
 
 pub const BUCKET_UPDATE_BUCKET_MANIFEST_ROOT_FOR_PUT_CAS_SELECTOR: [u8; 4] =
     [0x1c, 0x30, 0x3f, 0x1f];
@@ -248,34 +255,6 @@ pub fn encode_identity_revoke_delegation(delegate: AccountId32) -> Vec<u8> {
     data
 }
 
-pub fn encode_bucket_create_bucket(
-    owner: AccountId32,
-    bucket_name_hash: BucketNameHash,
-    is_private: bool,
-    owner_signature: [u8; 64],
-    owner_catalog_root: Vec<u8>,
-) -> Vec<u8> {
-    let mut data = BUCKET_CREATE_BUCKET_SELECTOR.to_vec();
-    owner.encode_to(&mut data);
-    bucket_name_hash.encode_to(&mut data);
-    is_private.encode_to(&mut data);
-    owner_signature.encode_to(&mut data);
-    owner_catalog_root.encode_to(&mut data);
-    data
-}
-
-pub fn encode_bucket_delete_bucket(
-    bucket_name_hash: BucketNameHash,
-    owner_signature: [u8; 64],
-    owner_catalog_root: Vec<u8>,
-) -> Vec<u8> {
-    let mut data = BUCKET_DELETE_BUCKET_SELECTOR.to_vec();
-    bucket_name_hash.encode_to(&mut data);
-    owner_signature.encode_to(&mut data);
-    owner_catalog_root.encode_to(&mut data);
-    data
-}
-
 pub fn encode_bucket_create_bucket_cas(
     owner: AccountId32,
     bucket_name_hash: BucketNameHash,
@@ -314,12 +293,18 @@ pub fn encode_bucket_delete_bucket_cas(
     bucket_name_hash: BucketNameHash,
     owner_signature: [u8; 64],
     expected_owner_catalog_root: Vec<u8>,
+    expected_bucket_generation: u64,
+    expected_bucket_state_epoch: u64,
+    expected_bucket_manifest_root: Vec<u8>,
     owner_catalog_root: Vec<u8>,
 ) -> Vec<u8> {
     let mut data = BUCKET_DELETE_BUCKET_CAS_SELECTOR.to_vec();
     bucket_name_hash.encode_to(&mut data);
     owner_signature.encode_to(&mut data);
     expected_owner_catalog_root.encode_to(&mut data);
+    expected_bucket_generation.encode_to(&mut data);
+    expected_bucket_state_epoch.encode_to(&mut data);
+    expected_bucket_manifest_root.encode_to(&mut data);
     owner_catalog_root.encode_to(&mut data);
     data
 }
@@ -348,33 +333,19 @@ pub fn encode_bucket_get_owner_catalog_root(owner: AccountId32) -> Vec<u8> {
     data
 }
 
-pub fn encode_bucket_update_bucket_manifest_root_for_put(
-    bucket_name_hash: BucketNameHash,
-    bucket_manifest_root: Vec<u8>,
-) -> Vec<u8> {
-    let mut data = BUCKET_UPDATE_BUCKET_MANIFEST_ROOT_FOR_PUT_SELECTOR.to_vec();
-    bucket_name_hash.encode_to(&mut data);
-    bucket_manifest_root.encode_to(&mut data);
-    data
-}
-
-pub fn encode_bucket_update_bucket_manifest_root_for_delete(
-    bucket_name_hash: BucketNameHash,
-    bucket_manifest_root: Vec<u8>,
-) -> Vec<u8> {
-    let mut data = BUCKET_UPDATE_BUCKET_MANIFEST_ROOT_FOR_DELETE_SELECTOR.to_vec();
-    bucket_name_hash.encode_to(&mut data);
-    bucket_manifest_root.encode_to(&mut data);
-    data
-}
-
 pub fn encode_bucket_update_bucket_manifest_root_for_put_cas(
     bucket_name_hash: BucketNameHash,
+    expected_bucket_generation: u64,
+    expected_bucket_state_epoch: u64,
+    expected_encryption_version: u32,
     expected_bucket_manifest_root: Vec<u8>,
     bucket_manifest_root: Vec<u8>,
 ) -> Vec<u8> {
     let mut data = BUCKET_UPDATE_BUCKET_MANIFEST_ROOT_FOR_PUT_CAS_SELECTOR.to_vec();
     bucket_name_hash.encode_to(&mut data);
+    expected_bucket_generation.encode_to(&mut data);
+    expected_bucket_state_epoch.encode_to(&mut data);
+    expected_encryption_version.encode_to(&mut data);
     expected_bucket_manifest_root.encode_to(&mut data);
     bucket_manifest_root.encode_to(&mut data);
     data
@@ -382,11 +353,17 @@ pub fn encode_bucket_update_bucket_manifest_root_for_put_cas(
 
 pub fn encode_bucket_update_bucket_manifest_root_for_delete_cas(
     bucket_name_hash: BucketNameHash,
+    expected_bucket_generation: u64,
+    expected_bucket_state_epoch: u64,
+    expected_encryption_version: u32,
     expected_bucket_manifest_root: Vec<u8>,
     bucket_manifest_root: Vec<u8>,
 ) -> Vec<u8> {
     let mut data = BUCKET_UPDATE_BUCKET_MANIFEST_ROOT_FOR_DELETE_CAS_SELECTOR.to_vec();
     bucket_name_hash.encode_to(&mut data);
+    expected_bucket_generation.encode_to(&mut data);
+    expected_bucket_state_epoch.encode_to(&mut data);
+    expected_encryption_version.encode_to(&mut data);
     expected_bucket_manifest_root.encode_to(&mut data);
     bucket_manifest_root.encode_to(&mut data);
     data

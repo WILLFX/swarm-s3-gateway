@@ -146,6 +146,9 @@ pub async fn handle(
     match anchor_delete_object_manifest_root(
         state.anchor_client.as_ref(),
         bucket_id,
+        chain_bucket.bucket_generation,
+        chain_bucket.bucket_state_epoch,
+        chain_bucket.encryption_version,
         hex::encode(&chain_bucket.bucket_manifest_root),
         new_bucket_record.manifest_reference,
     )
@@ -276,6 +279,9 @@ async fn handle_private_delete_object(
     match anchor_delete_object_manifest_root(
         state.anchor_client.as_ref(),
         bucket_id,
+        chain_bucket.bucket_generation,
+        chain_bucket.bucket_state_epoch,
+        chain_bucket.encryption_version,
         hex::encode(&chain_bucket.bucket_manifest_root),
         new_bucket_record.manifest_reference,
     )
@@ -305,12 +311,18 @@ async fn handle_private_delete_object(
 async fn anchor_delete_object_manifest_root(
     anchor_client: &dyn AnchorClient,
     bucket_id: [u8; 32],
+    expected_bucket_generation: u64,
+    expected_bucket_state_epoch: u64,
+    expected_encryption_version: u32,
     expected_bucket_manifest_root: String,
     bucket_manifest_root: String,
 ) -> anyhow::Result<String> {
     anchor_client
         .update_bucket_manifest_root_for_delete_anchor(
             bucket_id,
+            expected_bucket_generation,
+            expected_bucket_state_epoch,
+            expected_encryption_version,
             expected_bucket_manifest_root,
             bucket_manifest_root,
         )
@@ -389,6 +401,9 @@ mod tests {
             _bucket_id: [u8; 32],
             _owner_signature: [u8; 64],
             _expected_owner_catalog_root: String,
+            _expected_bucket_generation: u64,
+            _expected_bucket_state_epoch: u64,
+            _expected_bucket_manifest_root: String,
             _owner_catalog_root: String,
         ) -> anyhow::Result<String> {
             Ok("delete-bucket".to_string())
@@ -397,6 +412,9 @@ mod tests {
         async fn update_bucket_manifest_root_for_put_anchor(
             &self,
             _bucket_id: [u8; 32],
+            _expected_bucket_generation: u64,
+            _expected_bucket_state_epoch: u64,
+            _expected_encryption_version: u32,
             _expected_bucket_manifest_root: String,
             _bucket_manifest_root: String,
         ) -> anyhow::Result<String> {
@@ -407,6 +425,9 @@ mod tests {
         async fn update_bucket_manifest_root_for_delete_anchor(
             &self,
             _bucket_id: [u8; 32],
+            _expected_bucket_generation: u64,
+            _expected_bucket_state_epoch: u64,
+            _expected_encryption_version: u32,
             _expected_bucket_manifest_root: String,
             _bucket_manifest_root: String,
         ) -> anyhow::Result<String> {
@@ -420,6 +441,9 @@ mod tests {
             _bucket_id: [u8; 32],
             _object_key_id: [u8; 32],
             _swarm_ref: String,
+            _expected_bucket_generation: u64,
+            _expected_bucket_state_epoch: u64,
+            _expected_encryption_version: u32,
             _expected_bucket_manifest_root: String,
             _bucket_manifest_root: String,
             _size: u64,
@@ -436,6 +460,9 @@ mod tests {
         let tx = anchor_delete_object_manifest_root(
             &client,
             [1u8; 32],
+            1,
+            1,
+            1,
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         )

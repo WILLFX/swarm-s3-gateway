@@ -166,6 +166,9 @@ impl AnchorClient for MockAnchorClient {
         _bucket_id: [u8; 32],
         _owner_signature: [u8; 64],
         _expected_owner_catalog_root: String,
+        _expected_bucket_generation: u64,
+        _expected_bucket_state_epoch: u64,
+        _expected_bucket_manifest_root: String,
         _owner_catalog_root: String,
     ) -> Result<String> {
         bail!("delete_bucket_anchor should not be used by private route behavior tests")
@@ -174,6 +177,9 @@ impl AnchorClient for MockAnchorClient {
     async fn update_bucket_manifest_root_for_put_anchor(
         &self,
         _bucket_id: [u8; 32],
+        _expected_bucket_generation: u64,
+        _expected_bucket_state_epoch: u64,
+        _expected_encryption_version: u32,
         _expected_bucket_manifest_root: String,
         _bucket_manifest_root: String,
     ) -> Result<String> {
@@ -183,6 +189,9 @@ impl AnchorClient for MockAnchorClient {
     async fn update_bucket_manifest_root_for_delete_anchor(
         &self,
         _bucket_id: [u8; 32],
+        _expected_bucket_generation: u64,
+        _expected_bucket_state_epoch: u64,
+        _expected_encryption_version: u32,
         _expected_bucket_manifest_root: String,
         _bucket_manifest_root: String,
     ) -> Result<String> {
@@ -195,6 +204,9 @@ impl AnchorClient for MockAnchorClient {
         _bucket_id: [u8; 32],
         _object_key_id: [u8; 32],
         _swarm_ref: String,
+        _expected_bucket_generation: u64,
+        _expected_bucket_state_epoch: u64,
+        _expected_encryption_version: u32,
         _expected_bucket_manifest_root: String,
         _bucket_manifest_root: String,
         _size: u64,
@@ -302,6 +314,8 @@ async fn private_fixture() -> Result<PrivateFixture> {
     let chain_bucket = ChainBucketRecord {
         owner,
         is_private: true,
+        bucket_generation: 1,
+        bucket_state_epoch: 1,
         encryption_version,
         creation_date: 0,
         bucket_manifest_root,
@@ -389,6 +403,8 @@ async fn trustless_private_head_fails_before_gateway_manifest_or_payload_reads()
     let chain_bucket = ChainBucketRecord {
         owner: fixture.principal.owner,
         is_private: true,
+        bucket_generation: 1,
+        bucket_state_epoch: 1,
         encryption_version: fixture.encryption_version,
         creation_date: 0,
         bucket_manifest_root: vec![9u8; 32],
@@ -454,6 +470,8 @@ async fn trustless_private_list_fails_before_gateway_manifest_reads() -> Result<
     let chain_bucket = ChainBucketRecord {
         owner: fixture.principal.owner,
         is_private: true,
+        bucket_generation: 1,
+        bucket_state_epoch: 1,
         encryption_version: fixture.encryption_version,
         creation_date: 0,
         bucket_manifest_root: vec![9u8; 32],
@@ -538,6 +556,8 @@ async fn trustless_private_get_fails_before_gateway_manifest_or_payload_reads() 
     let chain_bucket = ChainBucketRecord {
         owner: fixture.principal.owner,
         is_private: true,
+        bucket_generation: 1,
+        bucket_state_epoch: 1,
         encryption_version: fixture.encryption_version,
         creation_date: 0,
         bucket_manifest_root: vec![9u8; 32],

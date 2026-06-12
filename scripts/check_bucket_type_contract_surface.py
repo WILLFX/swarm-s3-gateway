@@ -20,7 +20,7 @@ required_bucket = [
     "verify_create_trustless_signature",
     "create_trustless_bucket_cas_records_trustless_type",
     "trustless_create_rejects_legacy_create_signature",
-    "legacy_private_create_bucket_records_trusted_gateway_private_type",
+    "private_create_bucket_cas_records_trusted_gateway_private_type",
     "delete_bucket_removes_bucket_type",
 ]
 

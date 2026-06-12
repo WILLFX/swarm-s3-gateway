@@ -2,7 +2,7 @@
 
 ## Current model
 
-Private bucket records contain an `encryption_version`.
+Private bucket records contain an `encryption_version`, a `bucket_generation`, and a `bucket_state_epoch`.
 
 Private PUT uses the current bucket `encryption_version` when deriving:
 
@@ -15,6 +15,8 @@ Private PUT uses the current bucket `encryption_version` when deriving:
 Private bucket manifests contain object entries. Each private object entry stores the `encryption_version` that was active when that object was written.
 
 This means object-level metadata is versioned per entry. A reader must use the object entry's stored version to derive the object key ID and read the private object manifest.
+
+Manifest-root mutations must be contract-level CAS operations over the bucket record that was observed by the writer. The caller must provide the expected `bucket_generation`, `bucket_state_epoch`, `encryption_version`, and `bucket_manifest_root`. The contract rejects stale generation, stale state epoch, stale encryption version, or stale root before anchoring a new manifest root.
 
 ## Important limitation
 
@@ -52,6 +54,8 @@ The gateway operator signing helper must not sign increment operations, and the 
 The bucket contract rejects `increment_encryption_version` once `bucket_manifest_root` is non-empty. This is a fail-closed guard for the unsafe populated-bucket case, not a full rotation workflow.
 
 An empty-root version increment is still only a low-level contract primitive. It must not be presented as production rotation because it does not migrate or re-encrypt existing manifests or objects.
+
+When an empty bucket version increment succeeds, the contract first checks the caller's expected generation, state epoch, encryption version, and empty root, then increments `bucket_state_epoch`. A stale first writer that observed the old empty root and old encryption version must fail even if the root is still empty. This closes the empty-root rotation race without treating encryption version as the only bucket-state precondition.
 
 ## Required future smoke test
 

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use axum::{
     extract::{Extension, Path, Query, State},
     response::Response,
@@ -12,11 +12,11 @@ use crate::{
     app_state::AppState,
     crypto::bucket_name_hash,
     manifest::{
-        BucketManifest, ObjectManifest, PrivateBucketManifestV2, read_private_bucket_manifest_v2,
+        read_private_bucket_manifest_v2, BucketManifest, ObjectManifest, PrivateBucketManifestV2,
     },
     s3_response::{
-        ListObjectsV2Entry, S3ErrorKind, S3ErrorResponse, chain_error_response,
-        list_objects_v2_response, omit_swarm_ref_for_private_response,
+        chain_error_response, list_objects_v2_response, omit_swarm_ref_for_private_response,
+        ListObjectsV2Entry, S3ErrorKind, S3ErrorResponse,
     },
 };
 
@@ -582,6 +582,8 @@ mod tests {
         let chain_bucket = ChainBucketRecord {
             owner: [1u8; 32],
             is_private: false,
+            bucket_generation: 1,
+            bucket_state_epoch: 1,
             encryption_version: 3,
             creation_date: 42,
             bucket_manifest_root: vec![4u8; 32],
@@ -626,6 +628,8 @@ mod tests {
         let chain_bucket = ChainBucketRecord {
             owner: [1u8; 32],
             is_private: false,
+            bucket_generation: 1,
+            bucket_state_epoch: 1,
             encryption_version: 1,
             creation_date: 1,
             bucket_manifest_root: vec![4u8; 32],

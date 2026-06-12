@@ -12,15 +12,30 @@ abi = Path("gateway/src/contracts_abi.rs").read_text()
 
 required = [
     (traits, "expected_bucket_manifest_root"),
+    (traits, "expected_bucket_generation"),
+    (traits, "expected_bucket_state_epoch"),
+    (traits, "expected_encryption_version"),
     (anchor, "encode_bucket_update_bucket_manifest_root_for_put_cas"),
     (anchor, "encode_bucket_update_bucket_manifest_root_for_delete_cas"),
     (anchor, "bucket::update_bucket_manifest_root_for_put_cas"),
     (anchor, "bucket::update_bucket_manifest_root_for_delete_cas"),
+    (anchor, "expected_bucket_generation"),
+    (anchor, "expected_bucket_state_epoch"),
+    (anchor, "expected_encryption_version"),
     (abi, "BUCKET_UPDATE_BUCKET_MANIFEST_ROOT_FOR_PUT_CAS_SELECTOR"),
     (abi, "BUCKET_UPDATE_BUCKET_MANIFEST_ROOT_FOR_DELETE_CAS_SELECTOR"),
     (abi, "encode_bucket_update_bucket_manifest_root_for_put_cas"),
     (abi, "encode_bucket_update_bucket_manifest_root_for_delete_cas"),
+    (abi, "expected_bucket_generation"),
+    (abi, "expected_bucket_state_epoch"),
+    (abi, "expected_encryption_version"),
+    (put, "chain_bucket.bucket_generation"),
+    (put, "chain_bucket.bucket_state_epoch"),
+    (put, "chain_bucket.encryption_version"),
     (put, "hex::encode(&chain_bucket.bucket_manifest_root)"),
+    (delete, "chain_bucket.bucket_generation"),
+    (delete, "chain_bucket.bucket_state_epoch"),
+    (delete, "chain_bucket.encryption_version"),
     (delete, "hex::encode(&chain_bucket.bucket_manifest_root)"),
 ]
 
@@ -38,5 +53,7 @@ legacy_forbidden = [
 for token in legacy_forbidden:
     if token in anchor:
         fail(f"anchor client still uses legacy non-CAS token: {token}")
+    if token in abi:
+        fail(f"contract ABI still exposes legacy non-CAS token: {token}")
 
 print("Gateway CAS anchor surface guard passed.")

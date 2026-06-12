@@ -4,9 +4,8 @@
 mod s3_bucket_contract {
     use ink::{
         env::{
-            DefaultEnvironment,
-            call::{ExecutionInput, Selector, build_call},
-            sr25519_verify,
+            call::{build_call, ExecutionInput, Selector},
+            sr25519_verify, DefaultEnvironment,
         },
         prelude::vec::Vec,
         storage::Mapping,
@@ -33,6 +32,11 @@ mod s3_bucket_contract {
         StaleOwnerCatalogRoot,
         BucketTypeAlreadyExists,
         BucketManifestRootNotEmpty,
+        BucketGenerationOverflow,
+        BucketStateEpochOverflow,
+        StaleBucketGeneration,
+        StaleBucketStateEpoch,
+        StaleEncryptionVersion,
     }
 
     pub type Result<T> = core::result::Result<T, Error>;
@@ -77,10 +81,21 @@ mod s3_bucket_contract {
         owner_catalog_root: Vec<u8>,
     }
 
+    #[derive(scale::Encode, scale::Decode, scale_info::TypeInfo, Debug, Clone, PartialEq, Eq)]
+    #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
+    pub struct BucketScopedDelegationEntry {
+        delegate: AccountId32,
+        allowed_operations: u32,
+        expires_at: u64,
+    }
+
     #[ink(storage)]
     pub struct S3BucketContract {
         bucket_map: Mapping<[u8; 32], BucketRecord>,
         bucket_type_map: Mapping<[u8; 32], BucketType>,
+        bucket_generation_counters: Mapping<[u8; 32], u64>,
+        trustless_bucket_delegations:
+            Mapping<([u8; 32], u64, AccountId32), BucketScopedDelegationEntry>,
         owner_nonces: Mapping<AccountId32, u64>,
         owner_catalog_roots: Mapping<AccountId32, Vec<u8>>,
         identity_contract: AccountId,
@@ -93,66 +108,13 @@ mod s3_bucket_contract {
             Self {
                 bucket_map: Mapping::default(),
                 bucket_type_map: Mapping::default(),
+                bucket_generation_counters: Mapping::default(),
+                trustless_bucket_delegations: Mapping::default(),
                 owner_nonces: Mapping::default(),
                 owner_catalog_roots: Mapping::default(),
                 identity_contract,
                 governance,
             }
-        }
-
-        #[ink(message)]
-        pub fn create_bucket(
-            &mut self,
-            owner: AccountId,
-            bucket_name_hash: [u8; 32],
-            is_private: bool,
-            owner_signature: [u8; 64],
-            owner_catalog_root: Vec<u8>,
-        ) -> Result<()> {
-            if self.bucket_map.get(bucket_name_hash).is_some() {
-                return Err(Error::BucketAlreadyExists);
-            }
-
-            let owner_bytes = Self::account_to_bytes(owner);
-            let nonce = self.get_owner_nonce(owner_bytes);
-
-            self.verify_create_signature(
-                owner_bytes,
-                bucket_name_hash,
-                is_private,
-                nonce,
-                owner_signature,
-            )?;
-
-            self.ensure_create_authorized(owner_bytes, self.env().caller())?;
-
-            let record = BucketRecord {
-                owner: owner_bytes,
-                is_private,
-                encryption_version: 1,
-                creation_date: self.env().block_timestamp(),
-                bucket_manifest_root: Vec::new(),
-            };
-
-            self.bucket_map.insert(bucket_name_hash, &record);
-            let bucket_type = Self::bucket_type_from_legacy_privacy(is_private);
-            self.bucket_type_map.insert(bucket_name_hash, &bucket_type);
-            self.owner_catalog_roots
-                .insert(owner_bytes, &owner_catalog_root);
-            self.bump_owner_nonce(owner_bytes)?;
-
-            self.env().emit_event(OwnerCatalogRootUpdated {
-                owner: owner_bytes,
-                owner_catalog_root,
-            });
-
-            self.env().emit_event(BucketCreated {
-                hash: bucket_name_hash,
-                owner,
-                is_private,
-            });
-
-            Ok(())
         }
 
         #[ink(message)]
@@ -182,10 +144,13 @@ mod s3_bucket_contract {
 
             self.ensure_create_authorized(owner_bytes, self.env().caller())?;
             self.ensure_owner_catalog_root_matches(owner_bytes, Some(expected_owner_catalog_root))?;
+            let bucket_generation = self.next_bucket_generation(bucket_name_hash)?;
 
             let record = BucketRecord {
                 owner: owner_bytes,
                 is_private,
+                bucket_generation,
+                bucket_state_epoch: 1,
                 encryption_version: 1,
                 creation_date: self.env().block_timestamp(),
                 bucket_manifest_root: Vec::new(),
@@ -241,10 +206,13 @@ mod s3_bucket_contract {
 
             self.ensure_create_authorized(owner_bytes, self.env().caller())?;
             self.ensure_owner_catalog_root_matches(owner_bytes, Some(expected_owner_catalog_root))?;
+            let bucket_generation = self.next_bucket_generation(bucket_name_hash)?;
 
             let record = BucketRecord {
                 owner: owner_bytes,
                 is_private: true,
+                bucket_generation,
+                bucket_state_epoch: 1,
                 encryption_version: 1,
                 creation_date: self.env().block_timestamp(),
                 bucket_manifest_root: Vec::new(),
@@ -273,47 +241,14 @@ mod s3_bucket_contract {
         }
 
         #[ink(message)]
-        pub fn delete_bucket(
-            &mut self,
-            bucket_name_hash: [u8; 32],
-            owner_signature: [u8; 64],
-            owner_catalog_root: Vec<u8>,
-        ) -> Result<()> {
-            let record = match self.bucket_map.get(bucket_name_hash) {
-                Some(record) => record,
-                None => return Err(Error::BucketNotFound),
-            };
-
-            let owner = record.owner;
-            let nonce = self.get_owner_nonce(owner);
-
-            self.verify_delete_signature(owner, bucket_name_hash, nonce, owner_signature)?;
-            self.ensure_delete_authorized(owner, self.env().caller())?;
-
-            self.bucket_map.remove(bucket_name_hash);
-            self.bucket_type_map.remove(bucket_name_hash);
-            self.owner_catalog_roots.insert(owner, &owner_catalog_root);
-            self.bump_owner_nonce(owner)?;
-
-            self.env().emit_event(OwnerCatalogRootUpdated {
-                owner,
-                owner_catalog_root,
-            });
-
-            self.env().emit_event(BucketDeleted {
-                hash: bucket_name_hash,
-                owner,
-            });
-
-            Ok(())
-        }
-
-        #[ink(message)]
         pub fn delete_bucket_cas(
             &mut self,
             bucket_name_hash: [u8; 32],
             owner_signature: [u8; 64],
             expected_owner_catalog_root: Vec<u8>,
+            expected_bucket_generation: u64,
+            expected_bucket_state_epoch: u64,
+            expected_bucket_manifest_root: Vec<u8>,
             owner_catalog_root: Vec<u8>,
         ) -> Result<()> {
             let record = match self.bucket_map.get(bucket_name_hash) {
@@ -327,6 +262,16 @@ mod s3_bucket_contract {
             self.verify_delete_signature(owner, bucket_name_hash, nonce, owner_signature)?;
             self.ensure_delete_authorized(owner, self.env().caller())?;
             self.ensure_owner_catalog_root_matches(owner, Some(expected_owner_catalog_root))?;
+            self.ensure_bucket_state_matches(
+                &record,
+                expected_bucket_generation,
+                expected_bucket_state_epoch,
+                record.encryption_version,
+                &expected_bucket_manifest_root,
+            )?;
+            if !record.bucket_manifest_root.is_empty() {
+                return Err(Error::BucketManifestRootNotEmpty);
+            }
 
             self.bucket_map.remove(bucket_name_hash);
             self.bucket_type_map.remove(bucket_name_hash);
@@ -351,6 +296,10 @@ mod s3_bucket_contract {
             &mut self,
             bucket_name_hash: [u8; 32],
             owner_signature: [u8; 64],
+            expected_bucket_generation: u64,
+            expected_bucket_state_epoch: u64,
+            expected_encryption_version: u32,
+            expected_bucket_manifest_root: Vec<u8>,
         ) -> Result<()> {
             let mut record = match self.bucket_map.get(bucket_name_hash) {
                 Some(record) => record,
@@ -362,6 +311,13 @@ mod s3_bucket_contract {
 
             self.verify_increment_signature(owner, bucket_name_hash, nonce, owner_signature)?;
             self.ensure_increment_authorized(owner, self.env().caller())?;
+            self.ensure_bucket_state_matches(
+                &record,
+                expected_bucket_generation,
+                expected_bucket_state_epoch,
+                expected_encryption_version,
+                &expected_bucket_manifest_root,
+            )?;
 
             if !record.bucket_manifest_root.is_empty() {
                 return Err(Error::BucketManifestRootNotEmpty);
@@ -371,8 +327,8 @@ mod s3_bucket_contract {
                 Some(v) => v,
                 None => return Err(Error::EncryptionVersionOverflow),
             };
-
             record.encryption_version = new_version;
+            Self::bump_bucket_state_epoch(&mut record)?;
             self.bucket_map.insert(bucket_name_hash, &record);
             self.bump_owner_nonce(owner)?;
 
@@ -385,43 +341,21 @@ mod s3_bucket_contract {
         }
 
         #[ink(message)]
-        pub fn update_bucket_manifest_root_for_put(
-            &mut self,
-            bucket_name_hash: [u8; 32],
-            bucket_manifest_root: Vec<u8>,
-        ) -> Result<()> {
-            self.update_bucket_manifest_root_with_scope(
-                bucket_name_hash,
-                None,
-                bucket_manifest_root,
-                OP_PUT_OBJECT,
-            )
-        }
-
-        #[ink(message)]
-        pub fn update_bucket_manifest_root_for_delete(
-            &mut self,
-            bucket_name_hash: [u8; 32],
-            bucket_manifest_root: Vec<u8>,
-        ) -> Result<()> {
-            self.update_bucket_manifest_root_with_scope(
-                bucket_name_hash,
-                None,
-                bucket_manifest_root,
-                OP_DELETE_OBJECT,
-            )
-        }
-
-        #[ink(message)]
         pub fn update_bucket_manifest_root_for_put_cas(
             &mut self,
             bucket_name_hash: [u8; 32],
+            expected_bucket_generation: u64,
+            expected_bucket_state_epoch: u64,
+            expected_encryption_version: u32,
             expected_bucket_manifest_root: Vec<u8>,
             bucket_manifest_root: Vec<u8>,
         ) -> Result<()> {
             self.update_bucket_manifest_root_with_scope(
                 bucket_name_hash,
-                Some(expected_bucket_manifest_root),
+                expected_bucket_generation,
+                expected_bucket_state_epoch,
+                expected_encryption_version,
+                expected_bucket_manifest_root,
                 bucket_manifest_root,
                 OP_PUT_OBJECT,
             )
@@ -431,12 +365,18 @@ mod s3_bucket_contract {
         pub fn update_bucket_manifest_root_for_delete_cas(
             &mut self,
             bucket_name_hash: [u8; 32],
+            expected_bucket_generation: u64,
+            expected_bucket_state_epoch: u64,
+            expected_encryption_version: u32,
             expected_bucket_manifest_root: Vec<u8>,
             bucket_manifest_root: Vec<u8>,
         ) -> Result<()> {
             self.update_bucket_manifest_root_with_scope(
                 bucket_name_hash,
-                Some(expected_bucket_manifest_root),
+                expected_bucket_generation,
+                expected_bucket_state_epoch,
+                expected_encryption_version,
+                expected_bucket_manifest_root,
                 bucket_manifest_root,
                 OP_DELETE_OBJECT,
             )
@@ -455,6 +395,96 @@ mod s3_bucket_contract {
         #[ink(message)]
         pub fn get_bucket_type(&self, bucket_name_hash: [u8; 32]) -> Option<BucketType> {
             self.bucket_type_map.get(bucket_name_hash)
+        }
+
+        #[ink(message)]
+        pub fn grant_trustless_bucket_delegation(
+            &mut self,
+            bucket_name_hash: [u8; 32],
+            expected_bucket_generation: u64,
+            expected_bucket_state_epoch: u64,
+            expected_encryption_version: u32,
+            expected_bucket_manifest_root: Vec<u8>,
+            delegate: AccountId,
+            allowed_operations: u32,
+            expires_at: u64,
+        ) -> Result<()> {
+            let mut record = self
+                .bucket_map
+                .get(bucket_name_hash)
+                .ok_or(Error::BucketNotFound)?;
+
+            if self.bucket_type_map.get(bucket_name_hash) != Some(BucketType::TrustlessPrivate) {
+                return Err(Error::NotAuthorized);
+            }
+
+            if Self::account_to_bytes(self.env().caller()) != record.owner {
+                return Err(Error::NotAuthorized);
+            }
+            self.ensure_bucket_state_matches(
+                &record,
+                expected_bucket_generation,
+                expected_bucket_state_epoch,
+                expected_encryption_version,
+                &expected_bucket_manifest_root,
+            )?;
+
+            let delegate = Self::account_to_bytes(delegate);
+            let entry = BucketScopedDelegationEntry {
+                delegate,
+                allowed_operations,
+                expires_at,
+            };
+
+            self.trustless_bucket_delegations.insert(
+                (bucket_name_hash, record.bucket_generation, delegate),
+                &entry,
+            );
+            Self::bump_bucket_state_epoch(&mut record)?;
+            self.bucket_map.insert(bucket_name_hash, &record);
+
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn revoke_trustless_bucket_delegation(
+            &mut self,
+            bucket_name_hash: [u8; 32],
+            expected_bucket_generation: u64,
+            expected_bucket_state_epoch: u64,
+            expected_encryption_version: u32,
+            expected_bucket_manifest_root: Vec<u8>,
+            delegate: AccountId,
+        ) -> Result<()> {
+            let mut record = self
+                .bucket_map
+                .get(bucket_name_hash)
+                .ok_or(Error::BucketNotFound)?;
+
+            if self.bucket_type_map.get(bucket_name_hash) != Some(BucketType::TrustlessPrivate) {
+                return Err(Error::NotAuthorized);
+            }
+
+            if Self::account_to_bytes(self.env().caller()) != record.owner {
+                return Err(Error::NotAuthorized);
+            }
+            self.ensure_bucket_state_matches(
+                &record,
+                expected_bucket_generation,
+                expected_bucket_state_epoch,
+                expected_encryption_version,
+                &expected_bucket_manifest_root,
+            )?;
+
+            self.trustless_bucket_delegations.remove((
+                bucket_name_hash,
+                record.bucket_generation,
+                Self::account_to_bytes(delegate),
+            ));
+            Self::bump_bucket_state_epoch(&mut record)?;
+            self.bucket_map.insert(bucket_name_hash, &record);
+
+            Ok(())
         }
 
         #[ink(message)]
@@ -547,22 +577,40 @@ mod s3_bucket_contract {
 
         fn ensure_object_operation_authorized(
             &self,
+            bucket_name_hash: [u8; 32],
+            record: &BucketRecord,
             owner: AccountId32,
             caller: AccountId,
             required_scope: u32,
         ) -> Result<()> {
-            if Self::account_to_bytes(caller) == owner {
+            let caller = Self::account_to_bytes(caller);
+            if caller == owner {
                 return Ok(());
             }
 
-            let entry = self.fetch_delegation(owner, Self::account_to_bytes(caller))?;
+            if self.bucket_type_map.get(bucket_name_hash) == Some(BucketType::TrustlessPrivate) {
+                let entry = self
+                    .trustless_bucket_delegations
+                    .get((bucket_name_hash, record.bucket_generation, caller))
+                    .ok_or(Error::NotAuthorized)?;
+                return Self::evaluate_bucket_scoped_delegation(
+                    &entry,
+                    self.env().block_timestamp(),
+                    required_scope,
+                );
+            }
+
+            let entry = self.fetch_delegation(owner, caller)?;
             Self::evaluate_delegation(&entry, self.env().block_timestamp(), required_scope)
         }
 
         fn update_bucket_manifest_root_with_scope(
             &mut self,
             bucket_name_hash: [u8; 32],
-            expected_bucket_manifest_root: Option<Vec<u8>>,
+            expected_bucket_generation: u64,
+            expected_bucket_state_epoch: u64,
+            expected_encryption_version: u32,
+            expected_bucket_manifest_root: Vec<u8>,
             bucket_manifest_root: Vec<u8>,
             required_scope: u32,
         ) -> Result<()> {
@@ -573,13 +621,20 @@ mod s3_bucket_contract {
 
             let owner = record.owner;
 
-            self.ensure_object_operation_authorized(owner, self.env().caller(), required_scope)?;
-
-            if let Some(expected_root) = expected_bucket_manifest_root {
-                if record.bucket_manifest_root != expected_root {
-                    return Err(Error::StaleBucketManifestRoot);
-                }
-            }
+            self.ensure_object_operation_authorized(
+                bucket_name_hash,
+                &record,
+                owner,
+                self.env().caller(),
+                required_scope,
+            )?;
+            self.ensure_bucket_state_matches(
+                &record,
+                expected_bucket_generation,
+                expected_bucket_state_epoch,
+                expected_encryption_version,
+                &expected_bucket_manifest_root,
+            )?;
 
             record.bucket_manifest_root = bucket_manifest_root.clone();
             self.bucket_map.insert(bucket_name_hash, &record);
@@ -628,6 +683,71 @@ mod s3_bucket_contract {
                 return Err(Error::InsufficientScope);
             }
 
+            Ok(())
+        }
+
+        fn evaluate_bucket_scoped_delegation(
+            entry: &BucketScopedDelegationEntry,
+            now: u64,
+            required_scope: u32,
+        ) -> Result<()> {
+            if now > entry.expires_at {
+                return Err(Error::DelegationExpired);
+            }
+
+            if (entry.allowed_operations & required_scope) != required_scope {
+                return Err(Error::InsufficientScope);
+            }
+
+            Ok(())
+        }
+
+        fn ensure_bucket_state_matches(
+            &self,
+            record: &BucketRecord,
+            expected_bucket_generation: u64,
+            expected_bucket_state_epoch: u64,
+            expected_encryption_version: u32,
+            expected_bucket_manifest_root: &[u8],
+        ) -> Result<()> {
+            if record.bucket_generation != expected_bucket_generation {
+                return Err(Error::StaleBucketGeneration);
+            }
+
+            if record.bucket_state_epoch != expected_bucket_state_epoch {
+                return Err(Error::StaleBucketStateEpoch);
+            }
+
+            if record.encryption_version != expected_encryption_version {
+                return Err(Error::StaleEncryptionVersion);
+            }
+
+            if record.bucket_manifest_root.as_slice() != expected_bucket_manifest_root {
+                return Err(Error::StaleBucketManifestRoot);
+            }
+
+            Ok(())
+        }
+
+        fn next_bucket_generation(&mut self, bucket_name_hash: [u8; 32]) -> Result<u64> {
+            let current = self
+                .bucket_generation_counters
+                .get(bucket_name_hash)
+                .unwrap_or(0);
+            let next = match current.checked_add(1) {
+                Some(v) => v,
+                None => return Err(Error::BucketGenerationOverflow),
+            };
+            self.bucket_generation_counters
+                .insert(bucket_name_hash, &next);
+            Ok(next)
+        }
+
+        fn bump_bucket_state_epoch(record: &mut BucketRecord) -> Result<()> {
+            record.bucket_state_epoch = match record.bucket_state_epoch.checked_add(1) {
+                Some(v) => v,
+                None => return Err(Error::BucketStateEpochOverflow),
+            };
             Ok(())
         }
 
@@ -724,8 +844,8 @@ mod s3_bucket_contract {
     mod tests {
         use super::*;
         use ink::env::{self, test};
-        use sp_core::Pair;
         use sp_core::sr25519;
+        use sp_core::Pair;
 
         fn set_caller(caller: AccountId) {
             test::set_caller::<env::DefaultEnvironment>(caller);
@@ -799,48 +919,165 @@ mod s3_bucket_contract {
             payload
         }
 
+        fn increment_version_with_observed(
+            c: &mut S3BucketContract,
+            pair: &sr25519::Pair,
+            bucket_name_hash: [u8; 32],
+            expected: &BucketRecord,
+        ) -> Result<()> {
+            let owner_bytes = account_bytes_from_pair(pair);
+            let nonce = c.get_owner_nonce(owner_bytes);
+            let sig = pair.sign(&increment_payload(c, bucket_name_hash, nonce));
+            c.increment_encryption_version(
+                bucket_name_hash,
+                sig.0,
+                expected.bucket_generation,
+                expected.bucket_state_epoch,
+                expected.encryption_version,
+                expected.bucket_manifest_root.clone(),
+            )
+        }
+
+        fn create_bucket_via_cas(
+            c: &mut S3BucketContract,
+            pair: &sr25519::Pair,
+            bucket_name_hash: [u8; 32],
+            is_private: bool,
+        ) {
+            let owner = account_from_pair(pair);
+            let owner_bytes = account_bytes_from_pair(pair);
+            let nonce = c.get_owner_nonce(owner_bytes);
+            let sig = pair.sign(&create_payload(c, bucket_name_hash, is_private, nonce));
+            assert_eq!(
+                c.create_bucket_cas(
+                    owner,
+                    bucket_name_hash,
+                    is_private,
+                    sig.0,
+                    c.get_owner_catalog_root(owner_bytes),
+                    Vec::new()
+                ),
+                Ok(())
+            );
+        }
+
+        fn delete_bucket_via_cas(
+            c: &mut S3BucketContract,
+            pair: &sr25519::Pair,
+            bucket_name_hash: [u8; 32],
+            owner_catalog_root: Vec<u8>,
+        ) -> Result<()> {
+            let owner_bytes = account_bytes_from_pair(pair);
+            let record = c
+                .get_bucket(bucket_name_hash)
+                .expect("bucket must exist before delete");
+            let nonce = c.get_owner_nonce(owner_bytes);
+            let sig = pair.sign(&delete_payload(c, bucket_name_hash, nonce));
+            c.delete_bucket_cas(
+                bucket_name_hash,
+                sig.0,
+                c.get_owner_catalog_root(owner_bytes),
+                record.bucket_generation,
+                record.bucket_state_epoch,
+                record.bucket_manifest_root,
+                owner_catalog_root,
+            )
+        }
+
+        fn put_root_cas(
+            c: &mut S3BucketContract,
+            bucket_name_hash: [u8; 32],
+            expected: &BucketRecord,
+            root: Vec<u8>,
+        ) -> Result<()> {
+            c.update_bucket_manifest_root_for_put_cas(
+                bucket_name_hash,
+                expected.bucket_generation,
+                expected.bucket_state_epoch,
+                expected.encryption_version,
+                expected.bucket_manifest_root.clone(),
+                root,
+            )
+        }
+
+        fn delete_root_cas(
+            c: &mut S3BucketContract,
+            bucket_name_hash: [u8; 32],
+            expected: &BucketRecord,
+            root: Vec<u8>,
+        ) -> Result<()> {
+            c.update_bucket_manifest_root_for_delete_cas(
+                bucket_name_hash,
+                expected.bucket_generation,
+                expected.bucket_state_epoch,
+                expected.encryption_version,
+                expected.bucket_manifest_root.clone(),
+                root,
+            )
+        }
+
+        fn grant_trustless_bucket_delegation_with_observed(
+            c: &mut S3BucketContract,
+            bucket_name_hash: [u8; 32],
+            expected: &BucketRecord,
+            delegate: AccountId,
+            allowed_operations: u32,
+            expires_at: u64,
+        ) -> Result<()> {
+            c.grant_trustless_bucket_delegation(
+                bucket_name_hash,
+                expected.bucket_generation,
+                expected.bucket_state_epoch,
+                expected.encryption_version,
+                expected.bucket_manifest_root.clone(),
+                delegate,
+                allowed_operations,
+                expires_at,
+            )
+        }
+
+        fn revoke_trustless_bucket_delegation_with_observed(
+            c: &mut S3BucketContract,
+            bucket_name_hash: [u8; 32],
+            expected: &BucketRecord,
+            delegate: AccountId,
+        ) -> Result<()> {
+            c.revoke_trustless_bucket_delegation(
+                bucket_name_hash,
+                expected.bucket_generation,
+                expected.bucket_state_epoch,
+                expected.encryption_version,
+                expected.bucket_manifest_root.clone(),
+                delegate,
+            )
+        }
+
         #[ink::test]
-        fn legacy_create_bucket_records_public_bucket_type() {
+        fn create_bucket_cas_records_public_bucket_type() {
             let governance = account(9);
             let identity = account(8);
             let mut c = S3BucketContract::new(governance, identity);
 
             let pair = sr25519::Pair::from_seed(&[1u8; 32]);
             let owner = account_from_pair(&pair);
-            let owner_bytes = account_bytes_from_pair(&pair);
 
             set_caller(owner);
-
-            let nonce = c.get_owner_nonce(owner_bytes);
-            let sig = pair.sign(&create_payload(&c, hash(1), false, nonce));
-
-            assert_eq!(
-                c.create_bucket(owner, hash(1), false, sig.0, Vec::new()),
-                Ok(())
-            );
+            create_bucket_via_cas(&mut c, &pair, hash(1), false);
 
             assert_eq!(c.get_bucket_type(hash(1)), Some(BucketType::Public));
         }
 
         #[ink::test]
-        fn legacy_private_create_bucket_records_trusted_gateway_private_type() {
+        fn private_create_bucket_cas_records_trusted_gateway_private_type() {
             let governance = account(9);
             let identity = account(8);
             let mut c = S3BucketContract::new(governance, identity);
 
             let pair = sr25519::Pair::from_seed(&[1u8; 32]);
             let owner = account_from_pair(&pair);
-            let owner_bytes = account_bytes_from_pair(&pair);
 
             set_caller(owner);
-
-            let nonce = c.get_owner_nonce(owner_bytes);
-            let sig = pair.sign(&create_payload(&c, hash(1), true, nonce));
-
-            assert_eq!(
-                c.create_bucket(owner, hash(1), true, sig.0, Vec::new()),
-                Ok(())
-            );
+            create_bucket_via_cas(&mut c, &pair, hash(1), true);
 
             assert_eq!(
                 c.get_bucket_type(hash(1)),
@@ -880,6 +1117,8 @@ mod s3_bucket_contract {
             if let Some(record) = got {
                 assert_eq!(record.owner, owner_bytes);
                 assert!(record.is_private);
+                assert_eq!(record.bucket_generation, 1);
+                assert_eq!(record.bucket_state_epoch, 1);
                 assert_eq!(record.encryption_version, 1);
             }
 
@@ -928,26 +1167,18 @@ mod s3_bucket_contract {
 
             let pair = sr25519::Pair::from_seed(&[1u8; 32]);
             let owner = account_from_pair(&pair);
-            let owner_bytes = account_bytes_from_pair(&pair);
 
             set_caller(owner);
-
-            let create_nonce = c.get_owner_nonce(owner_bytes);
-            let create_sig = pair.sign(&create_payload(&c, hash(1), true, create_nonce));
-
-            assert_eq!(
-                c.create_bucket(owner, hash(1), true, create_sig.0, Vec::new()),
-                Ok(())
-            );
+            create_bucket_via_cas(&mut c, &pair, hash(1), true);
             assert_eq!(
                 c.get_bucket_type(hash(1)),
                 Some(BucketType::TrustedGatewayPrivate)
             );
 
-            let delete_nonce = c.get_owner_nonce(owner_bytes);
-            let delete_sig = pair.sign(&delete_payload(&c, hash(1), delete_nonce));
-
-            assert_eq!(c.delete_bucket(hash(1), delete_sig.0, Vec::new()), Ok(()));
+            assert_eq!(
+                delete_bucket_via_cas(&mut c, &pair, hash(1), Vec::new()),
+                Ok(())
+            );
             assert_eq!(c.get_bucket_type(hash(1)), None);
         }
 
@@ -964,7 +1195,7 @@ mod s3_bucket_contract {
 
             let bad_sig = [0u8; 64];
             assert_eq!(
-                c.create_bucket(owner, hash(1), true, bad_sig, Vec::new()),
+                c.create_bucket_cas(owner, hash(1), true, bad_sig, Vec::new(), Vec::new()),
                 Err(Error::InvalidSignature)
             );
         }
@@ -986,7 +1217,7 @@ mod s3_bucket_contract {
             let sig = pair.sign(&payload);
 
             assert_eq!(
-                c.create_bucket(owner, hash(1), true, sig.0, Vec::new()),
+                c.create_bucket_cas(owner, hash(1), true, sig.0, Vec::new(), Vec::new()),
                 Ok(())
             );
 
@@ -995,6 +1226,8 @@ mod s3_bucket_contract {
             if let Some(record) = got {
                 assert_eq!(record.owner, owner_bytes);
                 assert!(record.is_private);
+                assert_eq!(record.bucket_generation, 1);
+                assert_eq!(record.bucket_state_epoch, 1);
                 assert_eq!(record.encryption_version, 1);
             }
         }
@@ -1011,19 +1244,34 @@ mod s3_bucket_contract {
 
             set_caller(owner);
 
-            let create_nonce = c.get_owner_nonce(owner_bytes);
-            let create_sig = pair.sign(&create_payload(&c, hash(1), false, create_nonce));
-            assert_eq!(
-                c.create_bucket(owner, hash(1), false, create_sig.0, Vec::new()),
-                Ok(())
-            );
+            create_bucket_via_cas(&mut c, &pair, hash(1), false);
 
             let delete_nonce = c.get_owner_nonce(owner_bytes);
             let delete_sig = pair.sign(&delete_payload(&c, hash(1), delete_nonce));
-            assert_eq!(c.delete_bucket(hash(1), delete_sig.0, Vec::new()), Ok(()));
+            let record = c.get_bucket(hash(1)).expect("bucket must exist");
+            assert_eq!(
+                c.delete_bucket_cas(
+                    hash(1),
+                    delete_sig.0,
+                    c.get_owner_catalog_root(owner_bytes),
+                    record.bucket_generation,
+                    record.bucket_state_epoch,
+                    record.bucket_manifest_root,
+                    Vec::new()
+                ),
+                Ok(())
+            );
 
             assert_eq!(
-                c.delete_bucket(hash(1), delete_sig.0, Vec::new()),
+                c.delete_bucket_cas(
+                    hash(1),
+                    delete_sig.0,
+                    Vec::new(),
+                    record.bucket_generation,
+                    record.bucket_state_epoch,
+                    Vec::new(),
+                    Vec::new()
+                ),
                 Err(Error::BucketNotFound)
             );
         }
@@ -1140,8 +1388,17 @@ mod s3_bucket_contract {
             let stale_expected_root = vec![9u8; 32];
             let new_catalog_root = vec![2u8; 32];
 
+            let record = c.get_bucket(hash(1)).expect("bucket must exist");
             assert_eq!(
-                c.delete_bucket_cas(hash(1), delete_sig.0, stale_expected_root, new_catalog_root),
+                c.delete_bucket_cas(
+                    hash(1),
+                    delete_sig.0,
+                    stale_expected_root,
+                    record.bucket_generation,
+                    record.bucket_state_epoch,
+                    record.bucket_manifest_root,
+                    new_catalog_root
+                ),
                 Err(Error::StaleOwnerCatalogRoot)
             );
 
@@ -1186,6 +1443,7 @@ mod s3_bucket_contract {
 
             let delete_nonce = c.get_owner_nonce(owner_bytes);
             let delete_sig = pair.sign(&delete_payload(&c, hash(1), delete_nonce));
+            let record = c.get_bucket(hash(1)).expect("bucket must exist");
 
             let new_catalog_root = vec![2u8; 32];
 
@@ -1194,6 +1452,9 @@ mod s3_bucket_contract {
                     hash(1),
                     delete_sig.0,
                     initial_catalog_root,
+                    record.bucket_generation,
+                    record.bucket_state_epoch,
+                    record.bucket_manifest_root,
                     new_catalog_root.clone()
                 ),
                 Ok(())
@@ -1217,18 +1478,25 @@ mod s3_bucket_contract {
             let owner_bytes = account_bytes_from_pair(&pair);
 
             set_caller(owner);
-            let create_nonce = c.get_owner_nonce(owner_bytes);
-            let create_sig = pair.sign(&create_payload(&c, hash(1), false, create_nonce));
-            assert_eq!(
-                c.create_bucket(owner, hash(1), false, create_sig.0, Vec::new()),
-                Ok(())
-            );
+            create_bucket_via_cas(&mut c, &pair, hash(1), false);
+            let record = c.get_bucket(hash(1)).expect("bucket must exist");
 
             let delete_nonce = c.get_owner_nonce(owner_bytes);
             let delete_sig = pair.sign(&delete_payload(&c, hash(1), delete_nonce));
 
             set_caller(governance);
-            assert_eq!(c.delete_bucket(hash(1), delete_sig.0, Vec::new()), Ok(()));
+            assert_eq!(
+                c.delete_bucket_cas(
+                    hash(1),
+                    delete_sig.0,
+                    c.get_owner_catalog_root(owner_bytes),
+                    record.bucket_generation,
+                    record.bucket_state_epoch,
+                    record.bucket_manifest_root,
+                    Vec::new()
+                ),
+                Ok(())
+            );
         }
 
         #[ink::test]
@@ -1242,19 +1510,33 @@ mod s3_bucket_contract {
             let owner_bytes = account_bytes_from_pair(&pair);
 
             set_caller(owner);
-            let create_nonce = c.get_owner_nonce(owner_bytes);
-            let create_sig = pair.sign(&create_payload(&c, hash(1), false, create_nonce));
-            assert_eq!(
-                c.create_bucket(owner, hash(1), false, create_sig.0, Vec::new()),
-                Ok(())
-            );
+            create_bucket_via_cas(&mut c, &pair, hash(1), false);
+            let observed = c.get_bucket(hash(1)).expect("bucket must exist");
 
             let nonce = c.get_owner_nonce(owner_bytes);
             let sig = pair.sign(&increment_payload(&c, hash(1), nonce));
-            assert_eq!(c.increment_encryption_version(hash(1), sig.0), Ok(()));
-
             assert_eq!(
-                c.increment_encryption_version(hash(1), sig.0),
+                c.increment_encryption_version(
+                    hash(1),
+                    sig.0,
+                    observed.bucket_generation,
+                    observed.bucket_state_epoch,
+                    observed.encryption_version,
+                    observed.bucket_manifest_root,
+                ),
+                Ok(())
+            );
+
+            let current = c.get_bucket(hash(1)).expect("bucket must still exist");
+            assert_eq!(
+                c.increment_encryption_version(
+                    hash(1),
+                    sig.0,
+                    current.bucket_generation,
+                    current.bucket_state_epoch,
+                    current.encryption_version,
+                    current.bucket_manifest_root,
+                ),
                 Err(Error::InvalidSignature)
             );
         }
@@ -1270,24 +1552,28 @@ mod s3_bucket_contract {
             let owner_bytes = account_bytes_from_pair(&pair);
 
             set_caller(owner);
-            let create_nonce = c.get_owner_nonce(owner_bytes);
-            let create_sig = pair.sign(&create_payload(&c, hash(1), true, create_nonce));
-            assert_eq!(
-                c.create_bucket(owner, hash(1), true, create_sig.0, Vec::new()),
-                Ok(())
-            );
+            create_bucket_via_cas(&mut c, &pair, hash(1), true);
 
             let manifest_root = vec![7u8; 32];
+            let before_put = c.get_bucket(hash(1)).expect("bucket must exist");
             assert_eq!(
-                c.update_bucket_manifest_root_for_put(hash(1), manifest_root.clone()),
+                put_root_cas(&mut c, hash(1), &before_put, manifest_root.clone()),
                 Ok(())
             );
+            let after_put = c.get_bucket(hash(1)).expect("bucket must exist after put");
 
             let nonce = c.get_owner_nonce(owner_bytes);
             let sig = pair.sign(&increment_payload(&c, hash(1), nonce));
 
             assert_eq!(
-                c.increment_encryption_version(hash(1), sig.0),
+                c.increment_encryption_version(
+                    hash(1),
+                    sig.0,
+                    after_put.bucket_generation,
+                    after_put.bucket_state_epoch,
+                    after_put.encryption_version,
+                    after_put.bucket_manifest_root,
+                ),
                 Err(Error::BucketManifestRootNotEmpty)
             );
 
@@ -1295,11 +1581,263 @@ mod s3_bucket_contract {
                 .get_bucket(hash(1))
                 .expect("bucket must still exist after rejected increment");
             assert_eq!(record.encryption_version, 1);
+            assert_eq!(record.bucket_state_epoch, before_put.bucket_state_epoch);
             assert_eq!(record.bucket_manifest_root, manifest_root);
             assert_eq!(
                 c.get_owner_nonce(owner_bytes),
                 nonce,
                 "rejected increment must not consume the owner nonce"
+            );
+        }
+
+        #[ink::test]
+        fn stale_first_write_after_empty_rotation_fails_epoch_cas() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner = account_from_pair(&pair);
+
+            set_caller(owner);
+            create_bucket_via_cas(&mut c, &pair, hash(1), true);
+            let stale_observed = c.get_bucket(hash(1)).expect("bucket must exist");
+
+            assert_eq!(
+                increment_version_with_observed(&mut c, &pair, hash(1), &stale_observed),
+                Ok(())
+            );
+
+            assert_eq!(
+                put_root_cas(&mut c, hash(1), &stale_observed, vec![7u8; 32]),
+                Err(Error::StaleBucketStateEpoch)
+            );
+
+            let current = c.get_bucket(hash(1)).expect("bucket must still exist");
+            assert_eq!(current.encryption_version, 2);
+            assert_eq!(
+                current.bucket_state_epoch,
+                stale_observed.bucket_state_epoch + 1
+            );
+            assert!(current.bucket_manifest_root.is_empty());
+        }
+
+        #[ink::test]
+        fn manifest_root_cas_rejects_stale_encryption_version_even_when_epoch_matches() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner = account_from_pair(&pair);
+
+            set_caller(owner);
+            create_bucket_via_cas(&mut c, &pair, hash(1), true);
+            let observed = c.get_bucket(hash(1)).expect("bucket must exist");
+
+            assert_eq!(
+                increment_version_with_observed(&mut c, &pair, hash(1), &observed),
+                Ok(())
+            );
+
+            let current = c.get_bucket(hash(1)).expect("bucket must still exist");
+            assert_eq!(
+                c.update_bucket_manifest_root_for_put_cas(
+                    hash(1),
+                    current.bucket_generation,
+                    current.bucket_state_epoch,
+                    observed.encryption_version,
+                    current.bucket_manifest_root,
+                    vec![8u8; 32],
+                ),
+                Err(Error::StaleEncryptionVersion)
+            );
+        }
+
+        #[ink::test]
+        fn delete_recreate_aba_stale_writer_fails_generation_cas() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner = account_from_pair(&pair);
+
+            set_caller(owner);
+            create_bucket_via_cas(&mut c, &pair, hash(1), false);
+            let stale_observed = c.get_bucket(hash(1)).expect("bucket must exist");
+            assert_eq!(
+                delete_bucket_via_cas(&mut c, &pair, hash(1), Vec::new()),
+                Ok(())
+            );
+
+            create_bucket_via_cas(&mut c, &pair, hash(1), false);
+            let recreated = c.get_bucket(hash(1)).expect("bucket must be recreated");
+            assert_ne!(
+                recreated.bucket_generation,
+                stale_observed.bucket_generation
+            );
+
+            assert_eq!(
+                put_root_cas(&mut c, hash(1), &stale_observed, vec![9u8; 32]),
+                Err(Error::StaleBucketGeneration)
+            );
+            assert!(recreated.bucket_manifest_root.is_empty());
+        }
+
+        #[ink::test]
+        fn delete_bucket_cas_rejects_bucket_root_changed_after_delete_was_planned() {
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner = account_from_pair(&pair);
+            let owner_bytes = account_bytes_from_pair(&pair);
+
+            set_caller(owner);
+            create_bucket_via_cas(&mut c, &pair, hash(1), false);
+            let planned_delete = c.get_bucket(hash(1)).expect("bucket must exist");
+            assert_eq!(
+                put_root_cas(&mut c, hash(1), &planned_delete, vec![10u8; 32]),
+                Ok(())
+            );
+
+            let nonce = c.get_owner_nonce(owner_bytes);
+            let sig = pair.sign(&delete_payload(&c, hash(1), nonce));
+            assert_eq!(
+                c.delete_bucket_cas(
+                    hash(1),
+                    sig.0,
+                    c.get_owner_catalog_root(owner_bytes),
+                    planned_delete.bucket_generation,
+                    planned_delete.bucket_state_epoch,
+                    planned_delete.bucket_manifest_root,
+                    Vec::new()
+                ),
+                Err(Error::StaleBucketManifestRoot)
+            );
+            assert!(c.get_bucket(hash(1)).is_some());
+        }
+
+        #[ink::test]
+        fn trustless_private_root_update_requires_bucket_scoped_delegation_for_non_owner() {
+            set_timestamp(50);
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner = account_from_pair(&pair);
+            let owner_bytes = account_bytes_from_pair(&pair);
+            let delegate = account(2);
+
+            set_caller(owner);
+            let nonce = c.get_owner_nonce(owner_bytes);
+            let sig = pair.sign(&create_trustless_payload(&c, hash(1), nonce));
+            assert_eq!(
+                c.create_trustless_bucket_cas(owner, hash(1), sig.0, Vec::new(), Vec::new()),
+                Ok(())
+            );
+            let observed = c.get_bucket(hash(1)).expect("bucket must exist");
+
+            set_caller(delegate);
+            assert_eq!(
+                put_root_cas(&mut c, hash(1), &observed, vec![11u8; 32]),
+                Err(Error::NotAuthorized)
+            );
+
+            set_caller(owner);
+            assert_eq!(
+                grant_trustless_bucket_delegation_with_observed(
+                    &mut c,
+                    hash(1),
+                    &observed,
+                    delegate,
+                    OP_PUT_OBJECT,
+                    100
+                ),
+                Ok(())
+            );
+
+            set_caller(delegate);
+            assert_eq!(
+                put_root_cas(&mut c, hash(1), &observed, vec![11u8; 32]),
+                Err(Error::StaleBucketStateEpoch)
+            );
+
+            let after_grant = c
+                .get_bucket(hash(1))
+                .expect("bucket must exist after grant");
+            assert_eq!(
+                after_grant.bucket_state_epoch,
+                observed.bucket_state_epoch + 1
+            );
+            assert_eq!(
+                put_root_cas(&mut c, hash(1), &after_grant, vec![11u8; 32]),
+                Ok(())
+            );
+        }
+
+        #[ink::test]
+        fn trustless_bucket_delegation_revoke_bumps_state_epoch() {
+            set_timestamp(50);
+            let governance = account(9);
+            let identity = account(8);
+            let mut c = S3BucketContract::new(governance, identity);
+
+            let pair = sr25519::Pair::from_seed(&[1u8; 32]);
+            let owner = account_from_pair(&pair);
+            let owner_bytes = account_bytes_from_pair(&pair);
+            let delegate = account(2);
+
+            set_caller(owner);
+            let nonce = c.get_owner_nonce(owner_bytes);
+            let sig = pair.sign(&create_trustless_payload(&c, hash(1), nonce));
+            assert_eq!(
+                c.create_trustless_bucket_cas(owner, hash(1), sig.0, Vec::new(), Vec::new()),
+                Ok(())
+            );
+            let before_grant = c.get_bucket(hash(1)).expect("bucket must exist");
+            assert_eq!(
+                grant_trustless_bucket_delegation_with_observed(
+                    &mut c,
+                    hash(1),
+                    &before_grant,
+                    delegate,
+                    OP_PUT_OBJECT,
+                    100
+                ),
+                Ok(())
+            );
+            let before_revoke = c
+                .get_bucket(hash(1))
+                .expect("bucket must exist after grant");
+            assert_eq!(
+                before_revoke.bucket_state_epoch,
+                before_grant.bucket_state_epoch + 1
+            );
+
+            assert_eq!(
+                revoke_trustless_bucket_delegation_with_observed(
+                    &mut c,
+                    hash(1),
+                    &before_revoke,
+                    delegate
+                ),
+                Ok(())
+            );
+            let after_revoke = c
+                .get_bucket(hash(1))
+                .expect("bucket must exist after revoke");
+            assert_eq!(
+                after_revoke.bucket_state_epoch,
+                before_revoke.bucket_state_epoch + 1
+            );
+
+            assert_eq!(
+                put_root_cas(&mut c, hash(1), &before_revoke, vec![12u8; 32]),
+                Err(Error::StaleBucketStateEpoch)
             );
         }
 
@@ -1412,21 +1950,14 @@ mod s3_bucket_contract {
 
             let pair = sr25519::Pair::from_seed(&[1u8; 32]);
             let owner = account_from_pair(&pair);
-            let owner_bytes = account_bytes_from_pair(&pair);
 
             set_caller(owner);
-
-            let create_nonce = c.get_owner_nonce(owner_bytes);
-            let create_sig = pair.sign(&create_payload(&c, hash(1), false, create_nonce));
-
-            assert_eq!(
-                c.create_bucket(owner, hash(1), false, create_sig.0, Vec::new()),
-                Ok(())
-            );
+            create_bucket_via_cas(&mut c, &pair, hash(1), false);
 
             let put_root = vec![1u8; 32];
+            let before_put = c.get_bucket(hash(1)).expect("bucket must exist");
             assert_eq!(
-                c.update_bucket_manifest_root_for_put(hash(1), put_root.clone()),
+                put_root_cas(&mut c, hash(1), &before_put, put_root.clone()),
                 Ok(())
             );
 
@@ -1436,8 +1967,9 @@ mod s3_bucket_contract {
             assert_eq!(after_put.bucket_manifest_root, put_root);
 
             let delete_root = vec![2u8; 32];
+            let before_delete = c.get_bucket(hash(1)).expect("bucket must exist");
             assert_eq!(
-                c.update_bucket_manifest_root_for_delete(hash(1), delete_root.clone()),
+                delete_root_cas(&mut c, hash(1), &before_delete, delete_root.clone()),
                 Ok(())
             );
 
@@ -1455,33 +1987,21 @@ mod s3_bucket_contract {
 
             let pair = sr25519::Pair::from_seed(&[1u8; 32]);
             let owner = account_from_pair(&pair);
-            let owner_bytes = account_bytes_from_pair(&pair);
 
             set_caller(owner);
+            create_bucket_via_cas(&mut c, &pair, hash(1), false);
 
-            let create_nonce = c.get_owner_nonce(owner_bytes);
-            let create_sig = pair.sign(&create_payload(&c, hash(1), false, create_nonce));
-
-            assert_eq!(
-                c.create_bucket(owner, hash(1), false, create_sig.0, Vec::new()),
-                Ok(())
-            );
-
-            let initial_root = Vec::new();
+            let initial = c.get_bucket(hash(1)).expect("bucket must exist");
             let first_root = vec![1u8; 32];
             let stale_loser_root = vec![2u8; 32];
 
             assert_eq!(
-                c.update_bucket_manifest_root_for_put_cas(
-                    hash(1),
-                    initial_root.clone(),
-                    first_root.clone()
-                ),
+                put_root_cas(&mut c, hash(1), &initial, first_root.clone()),
                 Ok(())
             );
 
             assert_eq!(
-                c.update_bucket_manifest_root_for_put_cas(hash(1), initial_root, stale_loser_root),
+                put_root_cas(&mut c, hash(1), &initial, stale_loser_root),
                 Err(Error::StaleBucketManifestRoot)
             );
 
@@ -1503,37 +2023,21 @@ mod s3_bucket_contract {
 
             let pair = sr25519::Pair::from_seed(&[1u8; 32]);
             let owner = account_from_pair(&pair);
-            let owner_bytes = account_bytes_from_pair(&pair);
 
             set_caller(owner);
+            create_bucket_via_cas(&mut c, &pair, hash(1), false);
 
-            let create_nonce = c.get_owner_nonce(owner_bytes);
-            let create_sig = pair.sign(&create_payload(&c, hash(1), false, create_nonce));
-
-            assert_eq!(
-                c.create_bucket(owner, hash(1), false, create_sig.0, Vec::new()),
-                Ok(())
-            );
-
-            let initial_root = Vec::new();
+            let initial = c.get_bucket(hash(1)).expect("bucket must exist");
             let delete_root = vec![3u8; 32];
             let stale_loser_root = vec![4u8; 32];
 
             assert_eq!(
-                c.update_bucket_manifest_root_for_delete_cas(
-                    hash(1),
-                    initial_root.clone(),
-                    delete_root.clone()
-                ),
+                delete_root_cas(&mut c, hash(1), &initial, delete_root.clone()),
                 Ok(())
             );
 
             assert_eq!(
-                c.update_bucket_manifest_root_for_delete_cas(
-                    hash(1),
-                    initial_root,
-                    stale_loser_root
-                ),
+                delete_root_cas(&mut c, hash(1), &initial, stale_loser_root),
                 Err(Error::StaleBucketManifestRoot)
             );
 

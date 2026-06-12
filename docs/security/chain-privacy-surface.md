@@ -22,12 +22,16 @@ The bucket contract intentionally exposes public state metadata:
 | Owner account | Account that owns or updates bucket state | Reveals that an account uses the system |
 | Bucket hash | `bucket_name_hash` | Hides plaintext bucket name, but may be guessable if the bucket name is low entropy |
 | Visibility flag | `is_private` | Reveals whether a bucket is marked private |
+| Bucket generation | `bucket_generation` | Reveals delete/recreate incarnation changes for the same bucket hash |
+| Bucket state epoch | `bucket_state_epoch` | Reveals bucket-level semantic changes such as encryption-version updates |
 | Encryption version | `encryption_version` | Reveals version changes and rotation activity |
 | Owner catalog root | `owner_catalog_root` | Public pointer to encrypted owner catalog bytes |
 | Bucket manifest root | `bucket_manifest_root` | Public pointer to encrypted private bucket manifest bytes |
 | Events | root updates, create/delete, version increments | Reveals update timing and activity patterns |
 
 This is not zero-metadata privacy. A public chain can reveal when an owner updates private state, how often roots change, and which bucket hash changed.
+
+`bucket_generation` and `bucket_state_epoch` are intentional correctness metadata. They make stale manifest-root writers and delete/recreate ABA races fail at the contract boundary, but they also make bucket incarnation and bucket-state changes explicit to chain observers.
 
 ## What the chain must not expose
 

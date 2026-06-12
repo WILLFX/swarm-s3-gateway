@@ -120,6 +120,8 @@ The gateway and unauthorized users see only ciphertext and encrypted data-key en
 
 The remote trustless gateway is owner-only in the current implementation. Current identity-contract delegation is owner-wide, not bucket-scoped, so it is not used to authorize remote trustless gateway access.
 
+At the contract boundary, trustless-private manifest-root mutation must not fall back to owner-wide identity delegation. A configured anchor signer may update a trustless bucket root only through bucket-scoped trustless anchor delegation for the current bucket generation and required operation scope. Granting or revoking that delegation requires the caller's expected generation, state epoch, encryption version, and manifest root, then increments `bucket_state_epoch`, so stale manifest writers fail across trustless bucket policy changes. This delegation is not end-user read/write authorization and does not allow the remote gateway to serve non-owner trustless requests.
+
 The owner or authorized writer creates envelopes for:
 
 - The owner
@@ -177,7 +179,9 @@ The remote trustless gateway is owner-only in the current implementation.
 
 Current identity-contract delegation is owner-wide, not bucket-scoped. A direct gateway check against that delegation model would make a delegate authorization apply too broadly across an owner's trustless buckets. Do not wire owner-wide delegation into the trustless remote gateway path.
 
-Delegate-aware trustless authorization must first introduce bucket-scoped or policy-scoped delegation, then enable the remote gateway to authorize non-owner callers against that exact scope.
+The bucket contract supports bucket-scoped trustless anchor delegation for manifest-root mutation by the configured anchor signer. That contract delegation is generation-bound, scope-checked, CAS-preconditioned against the current bucket record, and bumps `bucket_state_epoch` on grant or revoke. It exists to prevent direct contract calls from bypassing the owner-only remote gateway rule with owner-wide identity delegation.
+
+Delegate-aware trustless end-user authorization is still separate. It must use bucket-scoped or policy-scoped delegation, recipient key envelopes, and local-proxy authorization before the remote gateway can authorize non-owner callers against that exact scope.
 
 The future delegation path is:
 
@@ -278,4 +282,4 @@ Trustless object DELETE requests must carry the encrypted manifest reference tha
 
 Trustless object PUT requests must not send plaintext object keys or caller-supplied object key IDs to the remote gateway. The local proxy generates a fresh opaque object context ID per object version, encrypts object bytes locally under that context, sends only ciphertext bytes to the remote gateway, receives an immutable ciphertext reference, and then stores the plaintext key to ciphertext reference mapping only inside the encrypted manifest.
 
-Trustless remote gateway access is owner-only until bucket-scoped or policy-scoped delegation exists. The existing owner-wide identity delegation model must not be used as the trustless remote gateway authorization check.
+Trustless remote gateway access is owner-only. Bucket-scoped anchor delegation does not grant remote user access. The existing owner-wide identity delegation model must not be used as the trustless remote gateway authorization check or as the contract authorization path for trustless-private manifest-root mutation.
