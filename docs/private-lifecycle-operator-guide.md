@@ -262,9 +262,9 @@ cargo run -p gateway --bin reconcile_orphans -- \
 
 The worker does not globally enumerate chain buckets. It only checks buckets named in the gateway's own journal and verifies each candidate against `get_bucket(bucket_id)` plus the current chain-root manifest state the gateway can read.
 
-Journal entries with no anchor result are reported but not automatically unpinned. A missing result may mean the gateway request is still in flight, so automatic cleanup is only allowed after an explicit failed anchor result and a current-chain reachability check.
+Journal entries with no anchor result are reported with `report_status=report_only` and are not automatically unpinned. A missing result may mean the gateway request is still in flight, so automatic cleanup is only allowed after an explicit failed anchor result and a current-chain reachability check.
 
-Trustless private ciphertext payload references are report-only for this worker. The remote gateway cannot decrypt trustless manifests, so it cannot prove whether a ciphertext payload reference is still reachable from the current encrypted manifest. Trustless ciphertext payload cleanup must be driven by the local trustless proxy or another component that has the manifest plaintext/recipient context. The worker may unpin failed trustless encrypted manifest roots only when they are not the current chain bucket manifest root.
+Trustless private ciphertext payload references are not treated as safe orphans by this worker. They are emitted with `report_status=manifest_holder_proof_required` and `proof_required=manifest_holder_reachability_proof`. The remote gateway cannot decrypt trustless manifests, so it cannot prove whether a ciphertext payload reference is still reachable from the current encrypted manifest. Trustless ciphertext payload cleanup must be driven by the local trustless proxy or another component that has the manifest plaintext/recipient context. The worker may unpin failed trustless encrypted manifest roots only when they are not the current chain bucket manifest root.
 
 ## Operator signer environment variables
 

@@ -254,6 +254,22 @@ pub enum GatewayBeeReferenceKind {
     TrustlessCiphertextPayload,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconciliationReportStatus {
+    AutoUnpinCandidate,
+    ReportOnly,
+    NotProvenUnreachable,
+    ManifestHolderProofRequired,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconciliationProofRequirement {
+    ChainReachabilityCheck,
+    ManifestHolderReachabilityProof,
+}
+
 pub async fn record_anchor_attempt(
     journal: Option<&Arc<GatewayWriteJournal>>,
     event: AnchorAttemptEvent,
@@ -386,6 +402,8 @@ pub struct ReconciliationCandidateSeed {
     pub bucket_type: JournalBucketType,
     pub reference: GatewayBeeReference,
     pub auto_unpin_allowed: bool,
+    pub report_status: ReconciliationReportStatus,
+    pub proof_required: Option<ReconciliationProofRequirement>,
     pub policy_reason: String,
 }
 
@@ -434,7 +452,7 @@ pub fn collect_anchor_attempt_candidates(
                     let attempt_event_id = attempt_event_id.clone();
                     let successful_references = successful_references.clone();
                     move |reference| {
-                        let (auto_unpin_allowed, policy_reason) = reference_policy(
+                        let policy = reference_policy(
                             reference.kind,
                             &reference.reference_hex,
                             failed,
@@ -448,8 +466,10 @@ pub fn collect_anchor_attempt_candidates(
                             bucket_id_hex: attempt.bucket_id_hex.clone(),
                             bucket_type: attempt.bucket_type,
                             reference,
-                            auto_unpin_allowed,
-                            policy_reason,
+                            auto_unpin_allowed: policy.auto_unpin_allowed,
+                            report_status: policy.report_status,
+                            proof_required: policy.proof_required,
+                            policy_reason: policy.reason,
                         }
                     }
                 })
@@ -481,44 +501,62 @@ pub fn collect_reference_usage(
     usage
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReferencePolicy {
+    auto_unpin_allowed: bool,
+    report_status: ReconciliationReportStatus,
+    proof_required: Option<ReconciliationProofRequirement>,
+    reason: String,
+}
+
 fn reference_policy(
     kind: GatewayBeeReferenceKind,
     reference_hex: &str,
     failed: bool,
     successful_references: &HashSet<String>,
-) -> (bool, String) {
+) -> ReferencePolicy {
     if !failed {
-        return (
-            false,
-            "anchor result is pending; automatic unpin is unsafe while a request may still be in flight"
+        return ReferencePolicy {
+            auto_unpin_allowed: false,
+            report_status: ReconciliationReportStatus::ReportOnly,
+            proof_required: None,
+            reason: "anchor result is pending; automatic unpin is unsafe while a request may still be in flight"
                 .to_string(),
-        );
+        };
     }
 
     if successful_references.contains(reference_hex) {
-        return (
-            false,
-            "reference also appears in a successful anchor attempt".to_string(),
-        );
+        return ReferencePolicy {
+            auto_unpin_allowed: false,
+            report_status: ReconciliationReportStatus::NotProvenUnreachable,
+            proof_required: None,
+            reason: "reference also appears in a successful anchor attempt".to_string(),
+        };
     }
 
     match kind {
-        GatewayBeeReferenceKind::TrustlessCiphertextPayload => (
-            false,
-            "gateway cannot decrypt trustless manifests to prove ciphertext payload reachability"
+        GatewayBeeReferenceKind::TrustlessCiphertextPayload => ReferencePolicy {
+            auto_unpin_allowed: false,
+            report_status: ReconciliationReportStatus::ManifestHolderProofRequired,
+            proof_required: Some(ReconciliationProofRequirement::ManifestHolderReachabilityProof),
+            reason: "trustless ciphertext payload is report_only: gateway cannot decrypt trustless manifests to prove reachability; manifest-holder proof is required before deletion"
                 .to_string(),
-        ),
+        },
         GatewayBeeReferenceKind::FeedManifest
         | GatewayBeeReferenceKind::SocPointer
         | GatewayBeeReferenceKind::UnknownBytes
-        | GatewayBeeReferenceKind::PointerPayload => (
-            false,
-            "reference is not tied to a typed failed chain anchor attempt".to_string(),
-        ),
-        _ => (
-            true,
-            "reference belongs to a failed or pending typed chain anchor attempt".to_string(),
-        ),
+        | GatewayBeeReferenceKind::PointerPayload => ReferencePolicy {
+            auto_unpin_allowed: false,
+            report_status: ReconciliationReportStatus::ReportOnly,
+            proof_required: None,
+            reason: "reference is not tied to a typed failed chain anchor attempt".to_string(),
+        },
+        _ => ReferencePolicy {
+            auto_unpin_allowed: true,
+            report_status: ReconciliationReportStatus::AutoUnpinCandidate,
+            proof_required: Some(ReconciliationProofRequirement::ChainReachabilityCheck),
+            reason: "reference belongs to a failed typed chain anchor attempt and still requires per-bucket chain reachability verification before unpin".to_string(),
+        },
     }
 }
 
@@ -573,6 +611,14 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert!(candidates[0].auto_unpin_allowed);
+        assert_eq!(
+            candidates[0].report_status,
+            ReconciliationReportStatus::AutoUnpinCandidate
+        );
+        assert_eq!(
+            candidates[0].proof_required,
+            Some(ReconciliationProofRequirement::ChainReachabilityCheck)
+        );
     }
 
     #[test]
@@ -613,6 +659,10 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert!(!candidates[0].auto_unpin_allowed);
+        assert_eq!(
+            candidates[0].report_status,
+            ReconciliationReportStatus::ReportOnly
+        );
         assert!(candidates[0].policy_reason.contains("pending"));
     }
 
@@ -630,6 +680,10 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert!(!candidates[0].auto_unpin_allowed);
+        assert_eq!(
+            candidates[0].report_status,
+            ReconciliationReportStatus::ReportOnly
+        );
         assert!(candidates[0].policy_reason.contains("pending"));
     }
 
@@ -658,6 +712,17 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert!(!candidates[0].auto_unpin_allowed);
+        assert_eq!(
+            candidates[0].report_status,
+            ReconciliationReportStatus::ManifestHolderProofRequired
+        );
+        assert_eq!(
+            candidates[0].proof_required,
+            Some(ReconciliationProofRequirement::ManifestHolderReachabilityProof)
+        );
         assert!(candidates[0].policy_reason.contains("cannot decrypt"));
+        assert!(candidates[0]
+            .policy_reason
+            .contains("manifest-holder proof"));
     }
 }

@@ -8,7 +8,8 @@ use gateway::{
     },
     orphan_reconciliation::{
         collect_anchor_attempt_candidates, GatewayBeeReferenceKind, GatewayWriteJournal,
-        JournalBucketType, ReconciliationCandidateSeed,
+        JournalBucketType, ReconciliationCandidateSeed, ReconciliationProofRequirement,
+        ReconciliationReportStatus,
     },
 };
 use serde::Serialize;
@@ -103,6 +104,8 @@ struct ReconciliationCandidateReport {
     reference_kind: String,
     pinned: bool,
     auto_unpin_allowed: bool,
+    report_status: ReconciliationReportStatus,
+    proof_required: Option<ReconciliationProofRequirement>,
     reason: String,
     applied_unpin: bool,
 }
@@ -122,14 +125,19 @@ async fn evaluate_candidate(
     let pinned = bee.is_pinned(&candidate.reference.reference_hex).await?;
 
     let mut auto_unpin_allowed = candidate.auto_unpin_allowed;
+    let mut report_status = candidate.report_status;
+    let mut proof_required = candidate.proof_required;
     let mut reason = candidate.policy_reason.clone();
 
     if let Some(chain_bucket) = chain_bucket {
         let current_root_hex = hex::encode(&chain_bucket.bucket_manifest_root);
         if !current_root_hex.is_empty() && current_root_hex == candidate.reference.reference_hex {
             auto_unpin_allowed = false;
+            report_status = ReconciliationReportStatus::NotProvenUnreachable;
+            proof_required = None;
             reason = "reference is the current chain bucket manifest root".to_string();
-        } else {
+        } else if candidate.report_status != ReconciliationReportStatus::ManifestHolderProofRequired
+        {
             match reachable_refs_for_bucket(
                 bee,
                 master_key,
@@ -141,11 +149,15 @@ async fn evaluate_candidate(
             {
                 Ok(reachable) if reachable.contains(&candidate.reference.reference_hex) => {
                     auto_unpin_allowed = false;
+                    report_status = ReconciliationReportStatus::NotProvenUnreachable;
+                    proof_required = None;
                     reason = "reference is reachable from current chain bucket state".to_string();
                 }
                 Ok(_) => {}
                 Err(err) => {
                     auto_unpin_allowed = false;
+                    report_status = ReconciliationReportStatus::NotProvenUnreachable;
+                    proof_required = Some(ReconciliationProofRequirement::ChainReachabilityCheck);
                     reason = format!("could not prove reference unreachable: {err}");
                 }
             }
@@ -169,6 +181,8 @@ async fn evaluate_candidate(
         reference_kind: format!("{:?}", candidate.reference.kind),
         pinned,
         auto_unpin_allowed,
+        report_status,
+        proof_required,
         reason,
         applied_unpin,
     })

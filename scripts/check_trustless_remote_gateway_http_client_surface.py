@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import re
 from pathlib import Path
 
 source = Path("trustless-proxy/src/remote_gateway_http.rs").read_text()
@@ -58,6 +59,7 @@ required_tests = [
     "http_client_does_not_log_or_debug_secret_access_key",
     "http_client_sends_x_amz_content_sha256_matching_body",
     "http_client_sends_sigv4_authorization_when_credentials_configured",
+    "assert_remote_body_excludes_object_keys_and_ids",
 ]
 
 required_lib = [
@@ -84,6 +86,28 @@ for forbidden in [
 ]:
     if forbidden in source:
         raise SystemExit(f"FAILED: forbidden remote gateway HTTP client token: {forbidden}")
+
+request_envelope = re.search(
+    r"struct RemoteGatewayHttpRequestEnvelope\s*\{(?P<body>.*?)\n\}",
+    source,
+    re.S,
+)
+if not request_envelope:
+    raise SystemExit("FAILED: missing RemoteGatewayHttpRequestEnvelope struct body")
+
+for forbidden in [
+    "object_key",
+    "objectKey",
+    "object_key_id",
+    "objectKeyId",
+    "caller_object_id",
+    "callerSuppliedObjectId",
+    "key:",
+]:
+    if forbidden in request_envelope.group("body"):
+        raise SystemExit(
+            f"FAILED: remote gateway HTTP envelope leaks local/private field: {forbidden}"
+        )
 
 for token in required_tests:
     if token not in source:
