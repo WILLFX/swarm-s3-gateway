@@ -14,6 +14,10 @@ For local startup and live demo commands, see:
 
     docs/runbooks/trustless-local-dev.md
 
+For gateway mutation retry semantics, see:
+
+    docs/security/gateway-idempotency.md
+
 ## Bucket types
 
 The system has three conceptual bucket modes:

@@ -21,6 +21,7 @@ pub enum S3ErrorKind {
     InvalidRequest,
     InternalError,
     EntityTooLarge,
+    IdempotencyConflict,
     NotImplemented,
     ServiceUnavailable,
     SignatureDoesNotMatch,
@@ -42,6 +43,7 @@ impl S3ErrorKind {
             Self::InvalidRequest => "InvalidRequest",
             Self::InternalError => "InternalError",
             Self::EntityTooLarge => "EntityTooLarge",
+            Self::IdempotencyConflict => "IdempotencyConflict",
             Self::NotImplemented => "NotImplemented",
             Self::ServiceUnavailable => "ServiceUnavailable",
             Self::SignatureDoesNotMatch => "SignatureDoesNotMatch",
@@ -65,6 +67,9 @@ impl S3ErrorKind {
             Self::InvalidRequest => "Invalid Request",
             Self::InternalError => "We encountered an internal error. Please try again.",
             Self::EntityTooLarge => "Your proposed upload exceeds the maximum allowed size",
+            Self::IdempotencyConflict => {
+                "The idempotency key is already bound to another request or in-flight operation"
+            }
             Self::NotImplemented => {
                 "A header or feature you provided implies functionality that is not implemented"
             }
@@ -94,7 +99,7 @@ impl S3ErrorKind {
             | Self::SignatureDoesNotMatch
             | Self::InvalidAccessKeyId => StatusCode::BAD_REQUEST,
             Self::PreconditionFailed => StatusCode::PRECONDITION_FAILED,
-            Self::BucketNotEmpty => StatusCode::CONFLICT,
+            Self::BucketNotEmpty | Self::IdempotencyConflict => StatusCode::CONFLICT,
             Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
             Self::NotImplemented => StatusCode::NOT_IMPLEMENTED,
             Self::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,

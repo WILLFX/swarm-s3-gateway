@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 use axum::{
     extract::{Extension, Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
 };
 use bytes::Bytes;
 use common::types::{
@@ -375,6 +375,7 @@ async fn private_delete_fixture() -> Result<PrivateDeleteFixture> {
         bee_client,
         anchor_client,
         orphan_journal: None,
+        idempotency_store: None,
         master_service_key,
         max_request_body_bytes: 64 * 1024 * 1024,
         identity_contract_address: None,
@@ -413,6 +414,7 @@ async fn private_delete_removes_entry_writes_manifest_and_uses_delete_anchor() -
         Path((fixture.bucket.clone(), fixture.delete_key.clone())),
         Extension(fixture.principal.clone()),
         State(fixture.state.clone()),
+        HeaderMap::new(),
     )
     .await;
 
@@ -489,6 +491,7 @@ async fn private_delete_failed_anchor_leaves_replacement_manifest_unanchored() -
         Path((fixture.bucket.clone(), fixture.delete_key.clone())),
         Extension(fixture.principal.clone()),
         State(fixture.state.clone()),
+        HeaderMap::new(),
     )
     .await;
 
@@ -581,6 +584,7 @@ async fn trustless_private_delete_fails_before_gateway_manifest_or_anchor_writes
         Path((fixture.bucket.clone(), fixture.delete_key.clone())),
         Extension(fixture.principal.clone()),
         State(fixture.state.clone()),
+        HeaderMap::new(),
     )
     .await;
 
@@ -620,6 +624,7 @@ async fn private_delete_does_not_write_or_anchor_when_bucket_manifest_cannot_dec
         Path((fixture.bucket.clone(), fixture.delete_key.clone())),
         Extension(fixture.principal.clone()),
         State(fixture.state.clone()),
+        HeaderMap::new(),
     )
     .await;
 

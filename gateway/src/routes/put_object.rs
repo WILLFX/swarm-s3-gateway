@@ -5,6 +5,12 @@ use crate::{
         bucket_name_hash, derive_private_object_index_key, derive_private_object_payload_key,
         encrypt_blob_random, private_object_key_id,
     },
+    idempotency::{
+        begin_from_headers, persist_stored_success, replay_http_response, request_digest_hex,
+        s3_idempotency_error_response, s3_idempotency_persist_error_response, s3_record_failure,
+        stored_empty_response, stored_header_response, DigestPart, IdempotencyDecision,
+        IdempotencyReservation, StoredHeader,
+    },
     manifest::{
         read_private_bucket_manifest_v2, write_bucket_manifest, write_object_manifest,
         write_private_bucket_manifest_v2, write_private_object_manifest_v2, BucketManifest,
@@ -23,7 +29,7 @@ use anyhow::{Context, Error as AnyhowError, Result};
 use axum::{
     body::Bytes,
     extract::{Extension, Path, State},
-    http::{header, HeaderMap},
+    http::{header, HeaderMap, StatusCode},
     response::Response,
 };
 use common::types::{AwsPrincipal, ChainBucketRecord, ChainBucketType};
@@ -100,6 +106,24 @@ pub async fn handle(
                     .into_response();
             }
             Some(ChainBucketType::TrustedGatewayPrivate) | None => {
+                let idempotency = match begin_object_put_idempotency(
+                    &state,
+                    &headers,
+                    &principal,
+                    bucket_id,
+                    &bucket,
+                    &key,
+                    size,
+                    etag_bytes,
+                    &content_type,
+                    "trusted-gateway-private",
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(response) => return response,
+                };
+
                 return handle_private_put_object(
                     &state,
                     &principal,
@@ -113,18 +137,43 @@ pub async fn handle(
                     etag,
                     etag_bytes,
                     bucket_id,
+                    idempotency,
                 )
                 .await;
             }
         }
     }
 
+    let idempotency = match begin_object_put_idempotency(
+        &state,
+        &headers,
+        &principal,
+        bucket_id,
+        &bucket,
+        &key,
+        size,
+        etag_bytes,
+        &content_type,
+        "public",
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+
     let object_key_id = sha256_32(key.as_bytes());
 
     let payload_put = match state.bee_client.put_bytes(body).await {
         Ok(result) => result,
-        Err(err) if is_bee_unreachable(&err) => return bee_unavailable_response(err),
-        Err(err) => return bee_error_response(err),
+        Err(err) if is_bee_unreachable(&err) => {
+            s3_record_failure(idempotency, format!("Bee unavailable: {err}")).await;
+            return bee_unavailable_response(err);
+        }
+        Err(err) => {
+            s3_record_failure(idempotency, format!("Bee error: {err}")).await;
+            return bee_error_response(err);
+        }
     };
 
     let metadata = ObjectMetadata {
@@ -148,8 +197,10 @@ pub async fn handle(
     {
         Ok(manifest_write) => manifest_write,
         Err(err) => {
+            let message = format!("failed to write public bucket manifest: {err}");
+            s3_record_failure(idempotency, message.clone()).await;
             return S3ErrorResponse::new(S3ErrorKind::InternalError)
-                .with_message(format!("failed to write public bucket manifest: {err}"))
+                .with_message(message)
                 .with_resource(format!("/{bucket}/{key}"))
                 .into_response();
         }
@@ -185,8 +236,14 @@ pub async fn handle(
     {
         Ok(attempt_event_id) => attempt_event_id,
         Err(err) => {
+            let message = format!("failed to record public PUT anchor attempt: {err}");
+            s3_record_failure(
+                idempotency,
+                format!("failed to record public PUT anchor attempt: {err}"),
+            )
+            .await;
             return S3ErrorResponse::new(S3ErrorKind::InternalError)
-                .with_message(format!("failed to record public PUT anchor attempt: {err}"))
+                .with_message(message)
                 .with_resource(format!("/{bucket}/{key}"))
                 .into_response();
         }
@@ -223,11 +280,60 @@ pub async fn handle(
             {
                 warn!("failed to record public PUT anchor failure: {journal_err}");
             }
+            s3_record_failure(idempotency, format!("public PUT anchor failed: {err}")).await;
             return chain_error_response(err);
         }
     }
 
+    let stored = stored_header_response(
+        StatusCode::OK,
+        vec![StoredHeader {
+            name: "x-amz-meta-swarm-ref".to_string(),
+            value: payload_put.reference.clone(),
+        }],
+    );
+    if let Err(err) = persist_stored_success(idempotency, stored).await {
+        return s3_idempotency_persist_error_response(err, format!("/{bucket}/{key}"));
+    }
+
     put_object_response(&payload_put.reference)
+}
+
+async fn begin_object_put_idempotency(
+    state: &AppState,
+    headers: &HeaderMap,
+    principal: &AwsPrincipal,
+    bucket_id: [u8; 32],
+    bucket: &str,
+    key: &str,
+    size: u64,
+    etag_bytes: [u8; 32],
+    content_type: &str,
+    bucket_type: &str,
+) -> Result<Option<IdempotencyReservation>, Response> {
+    let key_hash = sha256_32(key.as_bytes());
+    let digest = request_digest_hex(
+        "s3gw/idempotency/v1/put-object",
+        &[
+            DigestPart::Bytes(&principal.owner),
+            DigestPart::Bytes(&bucket_id),
+            DigestPart::String(bucket_type),
+            DigestPart::Bytes(&key_hash),
+            DigestPart::U64(size),
+            DigestPart::Bytes(&etag_bytes),
+            DigestPart::String(content_type),
+        ],
+    );
+
+    match begin_from_headers(state.idempotency_store.as_ref(), headers, digest).await {
+        Ok(Some(IdempotencyDecision::Fresh(reservation))) => Ok(Some(reservation)),
+        Ok(Some(IdempotencyDecision::Replay(stored))) => Err(replay_http_response(stored)),
+        Ok(None) => Ok(None),
+        Err(err) => Err(s3_idempotency_error_response(
+            err,
+            format!("/{bucket}/{key}"),
+        )),
+    }
 }
 
 #[derive(Debug)]
@@ -306,6 +412,7 @@ async fn handle_private_put_object(
     etag: String,
     etag_bytes: [u8; 32],
     bucket_id: [u8; 32],
+    idempotency: Option<IdempotencyReservation>,
 ) -> Response {
     let encryption_version = chain_bucket.encryption_version;
 
@@ -331,8 +438,10 @@ async fn handle_private_put_object(
     let encrypted_payload = match encrypt_blob_random(&payload_key, &payload_aad, &body) {
         Ok(bytes) => bytes,
         Err(err) => {
+            let message = format!("failed to encrypt private object payload: {err}");
+            s3_record_failure(idempotency, message.clone()).await;
             return S3ErrorResponse::new(S3ErrorKind::InternalError)
-                .with_message(format!("failed to encrypt private object payload: {err}"))
+                .with_message(message)
                 .with_resource(format!("/{bucket}/{key}"))
                 .into_response();
         }
@@ -344,8 +453,14 @@ async fn handle_private_put_object(
         .await
     {
         Ok(result) => result,
-        Err(err) if is_bee_unreachable(&err) => return bee_unavailable_response(err),
-        Err(err) => return bee_error_response(err),
+        Err(err) if is_bee_unreachable(&err) => {
+            s3_record_failure(idempotency, format!("Bee unavailable: {err}")).await;
+            return bee_unavailable_response(err);
+        }
+        Err(err) => {
+            s3_record_failure(idempotency, format!("Bee error: {err}")).await;
+            return bee_error_response(err);
+        }
     };
 
     let private_object_manifest = PrivateObjectManifestV2 {
@@ -371,8 +486,10 @@ async fn handle_private_put_object(
     {
         Ok(record) => record,
         Err(err) => {
+            let message = format!("failed to write private object manifest v2: {err}");
+            s3_record_failure(idempotency, message.clone()).await;
             return S3ErrorResponse::new(S3ErrorKind::InternalError)
-                .with_message(format!("failed to write private object manifest v2: {err}"))
+                .with_message(message)
                 .with_resource(format!("/{bucket}/{key}"))
                 .into_response();
         }
@@ -391,8 +508,10 @@ async fn handle_private_put_object(
         Ok(Some(record)) => record.manifest,
         Ok(None) => PrivateBucketManifestV2::default(),
         Err(err) => {
+            let message = format!("failed to read private bucket manifest v2: {err}");
+            s3_record_failure(idempotency, message.clone()).await;
             return S3ErrorResponse::new(S3ErrorKind::InternalError)
-                .with_message(format!("failed to read private bucket manifest v2: {err}"))
+                .with_message(message)
                 .with_resource(format!("/{bucket}/{key}"))
                 .into_response();
         }
@@ -424,8 +543,10 @@ async fn handle_private_put_object(
     {
         Ok(record) => record,
         Err(err) => {
+            let message = format!("failed to write private bucket manifest v2: {err}");
+            s3_record_failure(idempotency, message.clone()).await;
             return S3ErrorResponse::new(S3ErrorKind::InternalError)
-                .with_message(format!("failed to write private bucket manifest v2: {err}"))
+                .with_message(message)
                 .with_resource(format!("/{bucket}/{key}"))
                 .into_response();
         }
@@ -461,10 +582,10 @@ async fn handle_private_put_object(
     {
         Ok(attempt_event_id) => attempt_event_id,
         Err(err) => {
+            let message = format!("failed to record private PUT anchor attempt: {err}");
+            s3_record_failure(idempotency, message.clone()).await;
             return S3ErrorResponse::new(S3ErrorKind::InternalError)
-                .with_message(format!(
-                    "failed to record private PUT anchor attempt: {err}"
-                ))
+                .with_message(message)
                 .with_resource(format!("/{bucket}/{key}"))
                 .into_response();
         }
@@ -501,8 +622,15 @@ async fn handle_private_put_object(
             {
                 warn!("failed to record private PUT anchor failure: {journal_err}");
             }
+            s3_record_failure(idempotency, format!("private PUT anchor failed: {err}")).await;
             return chain_error_response(err);
         }
+    }
+
+    if let Err(err) =
+        persist_stored_success(idempotency, stored_empty_response(StatusCode::OK)).await
+    {
+        return s3_idempotency_persist_error_response(err, format!("/{bucket}/{key}"));
     }
 
     omit_swarm_ref_for_private_response(put_object_response(&encrypted_put.reference), true)

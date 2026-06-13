@@ -1,6 +1,6 @@
 use axum::{
     extract::{Extension, Path, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::Response,
 };
 use common::types::AwsPrincipal;
@@ -8,9 +8,16 @@ use common::types::AwsPrincipal;
 use crate::{
     app_state::AppState,
     crypto::bucket_name_hash,
+    idempotency::{
+        begin_from_headers, persist_stored_success, replay_http_response, request_digest_hex,
+        s3_idempotency_error_response, s3_idempotency_persist_error_response, s3_record_failure,
+        stored_empty_response, stored_header_response, DigestPart, IdempotencyDecision,
+        IdempotencyReservation, StoredHeader,
+    },
     manifest::{read_owner_catalog_manifest, write_owner_catalog_manifest},
     s3_response::{chain_error_response, create_bucket_response, S3ErrorKind, S3ErrorResponse},
 };
+use sha2::{Digest, Sha256};
 
 const OWNER_SIGNATURE_HEADER: &str = "x-s3gw-owner-signature";
 const BUCKET_VISIBILITY_HEADER: &str = "x-s3gw-bucket-visibility";
@@ -62,14 +69,47 @@ pub async fn handle(
         }
     };
 
+    let trustless_roots = match mode {
+        CreateBucketMode::TrustlessPrivate => match parse_trustless_owner_catalog_roots(&headers) {
+            Ok(roots) => Some(roots),
+            Err(message) => {
+                return S3ErrorResponse::new(S3ErrorKind::InvalidRequest)
+                    .with_message(message)
+                    .with_resource(format!("/{bucket}"))
+                    .into_response();
+            }
+        },
+        CreateBucketMode::Legacy { .. } => None,
+    };
+
+    let idempotency = match begin_create_bucket_idempotency(
+        &state,
+        &headers,
+        &principal,
+        bucket_id,
+        &bucket,
+        owner_signature,
+        mode,
+        trustless_roots.as_ref(),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+
     match state.registry_client.fetch_bucket(bucket_id).await {
         Ok(Some(_)) => {
+            s3_record_failure(idempotency, "create bucket found existing bucket").await;
             return S3ErrorResponse::new(S3ErrorKind::BucketAlreadyOwnedByYou)
                 .with_resource(format!("/{bucket}"))
                 .into_response();
         }
         Ok(None) => {}
-        Err(err) => return chain_error_response(err),
+        Err(err) => {
+            s3_record_failure(idempotency, format!("create bucket fetch failed: {err}")).await;
+            return chain_error_response(err);
+        }
     }
 
     match mode {
@@ -78,8 +118,10 @@ pub async fn handle(
                 match write_owner_catalog_with_bucket(&state, principal.owner, &bucket).await {
                     Ok(roots) => roots,
                     Err(err) => {
+                        let message = format!("failed to write owner bucket catalog: {err}");
+                        s3_record_failure(idempotency, message.clone()).await;
                         return S3ErrorResponse::new(S3ErrorKind::InternalError)
-                            .with_message(format!("failed to write owner bucket catalog: {err}"))
+                            .with_message(message)
                             .with_resource(format!("/{bucket}"))
                             .into_response();
                     }
@@ -97,20 +139,17 @@ pub async fn handle(
                 )
                 .await
             {
-                Ok(_) => create_bucket_response(&bucket),
-                Err(err) => chain_error_response(err),
+                Ok(_) => complete_create_bucket_idempotency(idempotency, &bucket, mode).await,
+                Err(err) => {
+                    s3_record_failure(idempotency, format!("create bucket anchor failed: {err}"))
+                        .await;
+                    chain_error_response(err)
+                }
             }
         }
         CreateBucketMode::TrustlessPrivate => {
-            let roots = match parse_trustless_owner_catalog_roots(&headers) {
-                Ok(roots) => roots,
-                Err(message) => {
-                    return S3ErrorResponse::new(S3ErrorKind::InvalidRequest)
-                        .with_message(message)
-                        .with_resource(format!("/{bucket}"))
-                        .into_response();
-                }
-            };
+            let roots = trustless_roots
+                .expect("trustless owner catalog roots are parsed before idempotency reservation");
 
             match state
                 .anchor_client
@@ -123,16 +162,91 @@ pub async fn handle(
                 )
                 .await
             {
-                Ok(_) => create_bucket_response(&bucket),
-                Err(err) => chain_error_response(err),
+                Ok(_) => complete_create_bucket_idempotency(idempotency, &bucket, mode).await,
+                Err(err) => {
+                    s3_record_failure(
+                        idempotency,
+                        format!("create trustless bucket anchor failed: {err}"),
+                    )
+                    .await;
+                    chain_error_response(err)
+                }
             }
         }
     }
 }
 
+async fn complete_create_bucket_idempotency(
+    idempotency: Option<IdempotencyReservation>,
+    bucket: &str,
+    mode: CreateBucketMode,
+) -> Response {
+    let stored = match mode {
+        CreateBucketMode::TrustlessPrivate => stored_empty_response(StatusCode::OK),
+        CreateBucketMode::Legacy { .. } => {
+            let location = format!("/{bucket}");
+            stored_header_response(
+                StatusCode::OK,
+                vec![StoredHeader {
+                    name: "location".to_string(),
+                    value: location,
+                }],
+            )
+        }
+    };
+    if let Err(err) = persist_stored_success(idempotency, stored).await {
+        return s3_idempotency_persist_error_response(err, format!("/{bucket}"));
+    }
+
+    create_bucket_response(bucket)
+}
+
+#[derive(Debug, Clone, Copy)]
 enum CreateBucketMode {
     Legacy { is_private: bool },
     TrustlessPrivate,
+}
+
+async fn begin_create_bucket_idempotency(
+    state: &AppState,
+    headers: &HeaderMap,
+    principal: &AwsPrincipal,
+    bucket_id: [u8; 32],
+    bucket: &str,
+    owner_signature: [u8; 64],
+    mode: CreateBucketMode,
+    trustless_roots: Option<&TrustlessOwnerCatalogRoots>,
+) -> Result<Option<IdempotencyReservation>, Response> {
+    let bucket_name_hash = sha256_32(bucket.as_bytes());
+    let (mode_name, is_private) = match mode {
+        CreateBucketMode::Legacy { is_private } if is_private => ("trusted-gateway-private", true),
+        CreateBucketMode::Legacy { .. } => ("public", false),
+        CreateBucketMode::TrustlessPrivate => ("trustless-private", true),
+    };
+    let digest = request_digest_hex(
+        "s3gw/idempotency/v1/create-bucket",
+        &[
+            DigestPart::Bytes(&principal.owner),
+            DigestPart::Bytes(&bucket_id),
+            DigestPart::Bytes(&bucket_name_hash),
+            DigestPart::String(mode_name),
+            DigestPart::Bool(is_private),
+            DigestPart::Bytes(&owner_signature),
+            DigestPart::OptionalString(
+                trustless_roots.map(|roots| roots.expected_owner_catalog_root.as_str()),
+            ),
+            DigestPart::OptionalString(
+                trustless_roots.map(|roots| roots.owner_catalog_root.as_str()),
+            ),
+        ],
+    );
+
+    match begin_from_headers(state.idempotency_store.as_ref(), headers, digest).await {
+        Ok(Some(IdempotencyDecision::Fresh(reservation))) => Ok(Some(reservation)),
+        Ok(Some(IdempotencyDecision::Replay(stored))) => Err(replay_http_response(stored)),
+        Ok(None) => Ok(None),
+        Err(err) => Err(s3_idempotency_error_response(err, format!("/{bucket}"))),
+    }
 }
 
 fn bucket_id_for_create_mode(
@@ -354,4 +468,11 @@ async fn write_owner_catalog_with_bucket(
     .await?;
 
     Ok((hex::encode(root), record.manifest_reference))
+}
+
+fn sha256_32(bytes: &[u8]) -> [u8; 32] {
+    let digest = Sha256::digest(bytes);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
 }

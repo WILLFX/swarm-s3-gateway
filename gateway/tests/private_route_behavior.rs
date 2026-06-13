@@ -344,6 +344,7 @@ async fn private_fixture() -> Result<PrivateFixture> {
         bee_client,
         anchor_client,
         orphan_journal: None,
+        idempotency_store: None,
         master_service_key,
         max_request_body_bytes: 64 * 1024 * 1024,
         identity_contract_address: None,
