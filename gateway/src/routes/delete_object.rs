@@ -1,14 +1,21 @@
 use anyhow::{Context, Result};
 use axum::{
     extract::{Extension, Path, State},
+    http::{HeaderMap, StatusCode},
     response::Response,
 };
 use common::types::{AwsPrincipal, ChainBucketRecord, ChainBucketType};
+use sha2::{Digest, Sha256};
 use tracing::warn;
 
 use crate::{
     app_state::AppState,
     crypto::bucket_name_hash,
+    idempotency::{
+        begin_from_headers, persist_stored_success, replay_http_response, request_digest_hex,
+        s3_idempotency_error_response, s3_idempotency_persist_error_response, s3_record_failure,
+        stored_empty_response, DigestPart, IdempotencyDecision, IdempotencyReservation,
+    },
     manifest::{read_private_bucket_manifest_v2, write_private_bucket_manifest_v2, BucketManifest},
     orphan_reconciliation::{
         record_anchor_attempt, record_anchor_failure, record_anchor_success, AnchorAttemptEvent,
@@ -22,6 +29,7 @@ pub async fn handle(
     Path((bucket, key)): Path<(String, String)>,
     Extension(principal): Extension<AwsPrincipal>,
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Response {
     if key.is_empty() {
         return S3ErrorResponse::new(S3ErrorKind::InvalidRequest)
@@ -64,6 +72,21 @@ pub async fn handle(
                     .into_response();
             }
             Some(ChainBucketType::TrustedGatewayPrivate) | None => {
+                let idempotency = match begin_object_delete_idempotency(
+                    &state,
+                    &headers,
+                    &principal,
+                    bucket_id,
+                    &bucket,
+                    &key,
+                    "trusted-gateway-private",
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(response) => return response,
+                };
+
                 return handle_private_delete_object(
                     &state,
                     &principal,
@@ -71,28 +94,42 @@ pub async fn handle(
                     bucket_id,
                     &bucket,
                     &key,
+                    idempotency,
                 )
                 .await;
             }
         }
     }
 
+    let idempotency = match begin_object_delete_idempotency(
+        &state, &headers, &principal, bucket_id, &bucket, &key, "public",
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+
     let mut bucket_manifest = match read_bucket_manifest_from_root(&state, &chain_bucket).await {
         Ok(Some(manifest)) => manifest,
         Ok(None) => {
+            s3_record_failure(idempotency, "public DELETE found no bucket manifest").await;
             return S3ErrorResponse::new(S3ErrorKind::NoSuchKey)
                 .with_resource(format!("/{bucket}/{key}"))
                 .into_response();
         }
         Err(err) => {
+            let message = format!("failed to read anchored bucket manifest: {err}");
+            s3_record_failure(idempotency, message.clone()).await;
             return S3ErrorResponse::new(S3ErrorKind::InternalError)
-                .with_message(format!("failed to read anchored bucket manifest: {err}"))
+                .with_message(message)
                 .with_resource(format!("/{bucket}/{key}"))
                 .into_response();
         }
     };
 
     if bucket_manifest.objects.remove(&key).is_none() {
+        s3_record_failure(idempotency, "public DELETE found no object key").await;
         return S3ErrorResponse::new(S3ErrorKind::NoSuchKey)
             .with_resource(format!("/{bucket}/{key}"))
             .into_response();
@@ -107,8 +144,10 @@ pub async fn handle(
     {
         Ok(record) => record,
         Err(err) => {
+            let message = format!("failed to write updated bucket manifest: {err}");
+            s3_record_failure(idempotency, message.clone()).await;
             return S3ErrorResponse::new(S3ErrorKind::InternalError)
-                .with_message(format!("failed to write updated bucket manifest: {err}"))
+                .with_message(message)
                 .with_resource(format!("/{bucket}/{key}"))
                 .into_response();
         }
@@ -134,10 +173,10 @@ pub async fn handle(
     {
         Ok(attempt_event_id) => attempt_event_id,
         Err(err) => {
+            let message = format!("failed to record public DELETE anchor attempt: {err}");
+            s3_record_failure(idempotency, message.clone()).await;
             return S3ErrorResponse::new(S3ErrorKind::InternalError)
-                .with_message(format!(
-                    "failed to record public DELETE anchor attempt: {err}"
-                ))
+                .with_message(message)
                 .with_resource(format!("/{bucket}/{key}"))
                 .into_response();
         }
@@ -168,11 +207,49 @@ pub async fn handle(
             {
                 warn!("failed to record public DELETE anchor failure: {journal_err}");
             }
+            s3_record_failure(idempotency, format!("public DELETE anchor failed: {err}")).await;
             return chain_error_response(err);
         }
     }
 
+    if let Err(err) =
+        persist_stored_success(idempotency, stored_empty_response(StatusCode::NO_CONTENT)).await
+    {
+        return s3_idempotency_persist_error_response(err, format!("/{bucket}/{key}"));
+    }
+
     no_content_response()
+}
+
+async fn begin_object_delete_idempotency(
+    state: &AppState,
+    headers: &HeaderMap,
+    principal: &AwsPrincipal,
+    bucket_id: [u8; 32],
+    bucket: &str,
+    key: &str,
+    bucket_type: &str,
+) -> Result<Option<IdempotencyReservation>, Response> {
+    let key_hash = sha256_32(key.as_bytes());
+    let digest = request_digest_hex(
+        "s3gw/idempotency/v1/delete-object",
+        &[
+            DigestPart::Bytes(&principal.owner),
+            DigestPart::Bytes(&bucket_id),
+            DigestPart::String(bucket_type),
+            DigestPart::Bytes(&key_hash),
+        ],
+    );
+
+    match begin_from_headers(state.idempotency_store.as_ref(), headers, digest).await {
+        Ok(Some(IdempotencyDecision::Fresh(reservation))) => Ok(Some(reservation)),
+        Ok(Some(IdempotencyDecision::Replay(stored))) => Err(replay_http_response(stored)),
+        Ok(None) => Ok(None),
+        Err(err) => Err(s3_idempotency_error_response(
+            err,
+            format!("/{bucket}/{key}"),
+        )),
+    }
 }
 
 async fn handle_private_delete_object(
@@ -182,8 +259,14 @@ async fn handle_private_delete_object(
     bucket_id: [u8; 32],
     bucket: &str,
     key: &str,
+    idempotency: Option<IdempotencyReservation>,
 ) -> Response {
     if chain_bucket.bucket_manifest_root.is_empty() {
+        s3_record_failure(
+            idempotency,
+            "private DELETE found empty bucket manifest root",
+        )
+        .await;
         return S3ErrorResponse::new(S3ErrorKind::NoSuchKey)
             .with_resource(format!("/{bucket}/{key}"))
             .into_response();
@@ -201,13 +284,16 @@ async fn handle_private_delete_object(
     {
         Ok(Some(record)) => record.manifest,
         Ok(None) => {
+            s3_record_failure(idempotency, "private DELETE found no bucket manifest").await;
             return S3ErrorResponse::new(S3ErrorKind::NoSuchKey)
                 .with_resource(format!("/{bucket}/{key}"))
                 .into_response();
         }
         Err(err) => {
+            let message = format!("failed to read private bucket manifest: {err}");
+            s3_record_failure(idempotency, message.clone()).await;
             return S3ErrorResponse::new(S3ErrorKind::InternalError)
-                .with_message(format!("failed to read private bucket manifest: {err}"))
+                .with_message(message)
                 .with_resource(format!("/{bucket}/{key}"))
                 .into_response();
         }
@@ -219,6 +305,7 @@ async fn handle_private_delete_object(
         .find(|(_, entry)| entry.object_key == key)
         .map(|(manifest_key, _)| manifest_key.clone())
     else {
+        s3_record_failure(idempotency, "private DELETE found no object key").await;
         return S3ErrorResponse::new(S3ErrorKind::NoSuchKey)
             .with_resource(format!("/{bucket}/{key}"))
             .into_response();
@@ -238,10 +325,10 @@ async fn handle_private_delete_object(
     {
         Ok(record) => record,
         Err(err) => {
+            let message = format!("failed to write updated private bucket manifest: {err}");
+            s3_record_failure(idempotency, message.clone()).await;
             return S3ErrorResponse::new(S3ErrorKind::InternalError)
-                .with_message(format!(
-                    "failed to write updated private bucket manifest: {err}"
-                ))
+                .with_message(message)
                 .with_resource(format!("/{bucket}/{key}"))
                 .into_response();
         }
@@ -267,10 +354,10 @@ async fn handle_private_delete_object(
     {
         Ok(attempt_event_id) => attempt_event_id,
         Err(err) => {
+            let message = format!("failed to record private DELETE anchor attempt: {err}");
+            s3_record_failure(idempotency, message.clone()).await;
             return S3ErrorResponse::new(S3ErrorKind::InternalError)
-                .with_message(format!(
-                    "failed to record private DELETE anchor attempt: {err}"
-                ))
+                .with_message(message)
                 .with_resource(format!("/{bucket}/{key}"))
                 .into_response();
         }
@@ -301,8 +388,15 @@ async fn handle_private_delete_object(
             {
                 warn!("failed to record private DELETE anchor failure: {journal_err}");
             }
+            s3_record_failure(idempotency, format!("private DELETE anchor failed: {err}")).await;
             return chain_error_response(err);
         }
+    }
+
+    if let Err(err) =
+        persist_stored_success(idempotency, stored_empty_response(StatusCode::NO_CONTENT)).await
+    {
+        return s3_idempotency_persist_error_response(err, format!("/{bucket}/{key}"));
     }
 
     no_content_response()
@@ -356,6 +450,13 @@ async fn read_bucket_manifest_from_root(
         serde_json::from_slice(&manifest_bytes).context("failed to decode bucket manifest JSON")?;
 
     Ok(Some(manifest))
+}
+
+fn sha256_32(bytes: &[u8]) -> [u8; 32] {
+    let digest = Sha256::digest(bytes);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
 }
 
 #[cfg(test)]

@@ -1,6 +1,10 @@
 use crate::{
     app_state::AppState,
     bee::client::BeeStorage,
+    idempotency::{
+        begin_from_headers, persist_failure, persist_json_success, request_digest_hex, DigestPart,
+        IdempotencyDecision, IdempotencyError, IdempotencyReservation, StoredIdempotencyResponse,
+    },
     orphan_reconciliation::{
         record_anchor_attempt, record_anchor_failure, record_anchor_success, AnchorAttemptEvent,
         AnchorJournalAction, GatewayBeeReference, GatewayBeeReferenceKind, GatewayWriteJournal,
@@ -10,7 +14,7 @@ use crate::{
 };
 use axum::{
     extract::{Extension, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     Json,
 };
 use bytes::Bytes;
@@ -58,6 +62,13 @@ impl CiphertextGatewayAction {
             Self::DeleteCiphertextObject => "delete_ciphertext_object",
             Self::CreateTrustlessBucket => "create_trustless_bucket",
         }
+    }
+
+    fn requires_idempotency(self) -> bool {
+        matches!(
+            self,
+            Self::PutCiphertextObject | Self::PutEncryptedManifest | Self::DeleteCiphertextObject
+        )
     }
 }
 
@@ -175,6 +186,7 @@ struct AuthorizedTrustlessBucket {
 pub async fn handle(
     Extension(principal): Extension<AwsPrincipal>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<CiphertextGatewayRequest>,
 ) -> Result<Json<CiphertextGatewayResponse>, (StatusCode, String)> {
     validate_common_request(&request).map_err(RouteError::into_response)?;
@@ -184,7 +196,21 @@ pub async fn handle(
         .await
         .map_err(RouteError::into_response)?;
 
-    execute_ciphertext_gateway_request(
+    let idempotency = if action.requires_idempotency() {
+        let digest = ciphertext_gateway_idempotency_digest(&authorized, action, &request);
+        match begin_from_headers(state.idempotency_store.as_ref(), &headers, digest).await {
+            Ok(Some(IdempotencyDecision::Fresh(reservation))) => Some(reservation),
+            Ok(Some(IdempotencyDecision::Replay(stored))) => {
+                return replay_ciphertext_gateway_response(stored).map(Json);
+            }
+            Ok(None) => None,
+            Err(error) => return Err(idempotency_route_error(error).into_response()),
+        }
+    } else {
+        None
+    };
+
+    let result = execute_ciphertext_gateway_request(
         state.bee_client.as_ref(),
         state.anchor_client.as_ref(),
         state.orphan_journal.as_ref(),
@@ -192,8 +218,75 @@ pub async fn handle(
         action,
         request,
     )
-    .await
-    .map(Json)
+    .await;
+
+    match result {
+        Ok(response) => {
+            persist_json_success(idempotency, StatusCode::OK, &response)
+                .await
+                .map_err(|_| RouteError::storage_failure().into_response())?;
+            Ok(Json(response))
+        }
+        Err(error) => {
+            record_trustless_idempotency_failure(idempotency, format!("{} {}", error.0, error.1))
+                .await;
+            Err(error)
+        }
+    }
+}
+
+fn ciphertext_gateway_idempotency_digest(
+    authorized: &AuthorizedTrustlessBucket,
+    action: CiphertextGatewayAction,
+    request: &CiphertextGatewayRequest,
+) -> String {
+    request_digest_hex(
+        "s3gw/idempotency/v1/trustless-ciphertext-gateway",
+        &[
+            DigestPart::String(action.as_wire_str()),
+            DigestPart::Bytes(&authorized.bucket_id),
+            DigestPart::String(&authorized.bucket_id_hex),
+            DigestPart::U64(authorized.chain_bucket.bucket_generation),
+            DigestPart::U64(authorized.chain_bucket.bucket_state_epoch),
+            DigestPart::U32(authorized.chain_bucket.encryption_version),
+            DigestPart::OptionalString(request.ciphertext_hex.as_deref()),
+            DigestPart::OptionalString(request.ciphertext_reference_hex.as_deref()),
+            DigestPart::OptionalString(request.encrypted_manifest_hex.as_deref()),
+            DigestPart::OptionalString(request.expected_manifest_reference_hex.as_deref()),
+            DigestPart::Bool(request.metadata_only.unwrap_or(false)),
+        ],
+    )
+}
+
+fn replay_ciphertext_gateway_response(
+    stored: StoredIdempotencyResponse,
+) -> Result<CiphertextGatewayResponse, (StatusCode, String)> {
+    let Some(body) = stored.json_body else {
+        return Err(RouteError::storage_failure().into_response());
+    };
+
+    serde_json::from_value(body).map_err(|_| RouteError::storage_failure().into_response())
+}
+
+fn idempotency_route_error(error: IdempotencyError) -> RouteError {
+    match error {
+        IdempotencyError::InvalidKey | IdempotencyError::StoreNotConfigured => {
+            RouteError::bad_request("invalid idempotency request")
+        }
+        IdempotencyError::StoreUnavailable(_) => RouteError::storage_failure(),
+        IdempotencyError::InProgress | IdempotencyError::Conflict => {
+            RouteError::conflict("idempotency key is already in use")
+        }
+    }
+}
+
+async fn record_trustless_idempotency_failure(
+    reservation: Option<IdempotencyReservation>,
+    error: String,
+) {
+    if let Err(err) = persist_failure(reservation, error).await {
+        warn!("failed to persist trustless idempotency failure: {err}");
+    }
 }
 
 async fn authorize_trustless_bucket(

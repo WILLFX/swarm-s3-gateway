@@ -5,6 +5,7 @@ pub mod chain;
 pub mod config;
 pub mod contracts_abi;
 pub mod crypto;
+pub mod idempotency;
 pub mod manifest;
 pub mod orphan_reconciliation;
 pub mod request_limits;

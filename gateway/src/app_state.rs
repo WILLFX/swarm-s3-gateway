@@ -2,6 +2,7 @@ use crate::auth::sigv4::RegistryBackedSigV4Validator;
 use crate::auth::unwrap::EnvKeyUnwrapper;
 use crate::bee::client::{BeeClient, BeeStorage};
 use crate::chain::{anchor_client::ContractAnchorClient, registry::ChainRegistryClient};
+use crate::idempotency::GatewayIdempotencyStore;
 use crate::orphan_reconciliation::{GatewayWriteJournal, JournaledBeeStorage};
 use crate::request_limits::max_request_body_bytes_from_env;
 use crate::traits::{AnchorClient, RegistryClient, SecretUnwrapper};
@@ -31,6 +32,7 @@ pub struct AppState {
     pub bee_client: Arc<dyn BeeStorage>,
     pub anchor_client: Arc<dyn AnchorClient>,
     pub orphan_journal: Option<Arc<GatewayWriteJournal>>,
+    pub idempotency_store: Option<Arc<GatewayIdempotencyStore>>,
     pub master_service_key: [u8; 32],
     pub max_request_body_bytes: usize,
     pub identity_contract_address: Option<SubstrateAddress32>,
@@ -51,6 +53,13 @@ impl fmt::Debug for AppState {
                     .orphan_journal
                     .as_ref()
                     .map(|journal| journal.path().display().to_string()),
+            )
+            .field(
+                "idempotency_store",
+                &self
+                    .idempotency_store
+                    .as_ref()
+                    .map(|store| store.path().display().to_string()),
             )
             .field("master_service_key", &"<redacted>")
             .field("max_request_body_bytes", &self.max_request_body_bytes)
@@ -86,6 +95,14 @@ pub async fn build_production_state() -> Result<AppState> {
             .with_context(|| format!("failed to build Bee client for {bee_api_url}"))?,
     );
     let orphan_journal = GatewayWriteJournal::from_env()?;
+    let idempotency_store = GatewayIdempotencyStore::from_env()?;
+    if let Some(store) = &idempotency_store {
+        info!(
+            path = %store.path().display(),
+            "enabled gateway idempotency journal"
+        );
+    }
+
     let bee_client: Arc<dyn BeeStorage> = match &orphan_journal {
         Some(journal) => {
             info!(
@@ -152,6 +169,7 @@ pub async fn build_production_state() -> Result<AppState> {
         bee_client,
         anchor_client,
         orphan_journal,
+        idempotency_store,
         master_service_key,
         max_request_body_bytes,
         identity_contract_address,
