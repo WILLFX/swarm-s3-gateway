@@ -21,7 +21,6 @@ use std::sync::Arc;
 use tracing::warn;
 
 const WIRE_VERSION: u32 = 1;
-const TRUSTLESS_MANIFEST_KEY: &str = "__s3w_trustless_manifest";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CiphertextGatewayAction {
@@ -171,7 +170,6 @@ fn error_chain_contains_stale_bucket_manifest_root(err: &anyhow::Error) -> bool 
 struct AuthorizedTrustlessBucket {
     bucket_id: [u8; 32],
     bucket: String,
-    storage_bucket: String,
     chain_bucket: ChainBucketRecord,
 }
 
@@ -229,7 +227,6 @@ async fn authorize_trustless_bucket(
     Ok(AuthorizedTrustlessBucket {
         bucket_id,
         bucket: bucket.to_string(),
-        storage_bucket: hex::encode(bucket_id),
         chain_bucket,
     })
 }
@@ -481,11 +478,7 @@ async fn write_encrypted_manifest_with_anchor(
     )?;
 
     let put = bee_client
-        .put_object_and_update_pointer(
-            &authorized.storage_bucket,
-            TRUSTLESS_MANIFEST_KEY,
-            Bytes::from(encrypted_manifest),
-        )
+        .put_bytes(Bytes::from(encrypted_manifest))
         .await
         .map_err(|_| RouteError::storage_failure())?;
 
@@ -509,9 +502,9 @@ async fn write_encrypted_manifest_with_anchor(
             bucket_id_hex: hex::encode(authorized.bucket_id),
             bucket_type: JournalBucketType::TrustlessPrivate,
             expected_bucket_manifest_root_hex: expected_root.clone(),
-            new_bucket_manifest_root_hex: put.swarm_reference.clone(),
+            new_bucket_manifest_root_hex: put.reference.clone(),
             references: vec![GatewayBeeReference::new(
-                put.swarm_reference.clone(),
+                put.reference.clone(),
                 GatewayBeeReferenceKind::TrustlessEncryptedManifest,
             )],
         },
@@ -528,7 +521,7 @@ async fn write_encrypted_manifest_with_anchor(
                     authorized.chain_bucket.bucket_state_epoch,
                     authorized.chain_bucket.encryption_version,
                     expected_root,
-                    put.swarm_reference.clone(),
+                    put.reference.clone(),
                 )
                 .await
         }
@@ -540,7 +533,7 @@ async fn write_encrypted_manifest_with_anchor(
                     authorized.chain_bucket.bucket_state_epoch,
                     authorized.chain_bucket.encryption_version,
                     expected_root,
-                    put.swarm_reference.clone(),
+                    put.reference.clone(),
                 )
                 .await
         }
@@ -566,7 +559,7 @@ async fn write_encrypted_manifest_with_anchor(
         }
     }
 
-    Ok(put.swarm_reference)
+    Ok(put.reference)
 }
 
 fn validate_manifest_precondition(
@@ -759,7 +752,6 @@ fn invalid_reference_message(field_name: &'static str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bee::client::BeeClient;
 
     fn request(action: &str) -> CiphertextGatewayRequest {
         CiphertextGatewayRequest {
@@ -780,7 +772,6 @@ mod tests {
         AuthorizedTrustlessBucket {
             bucket_id,
             bucket: "bucket-a".to_string(),
-            storage_bucket: hex::encode(bucket_id),
             chain_bucket: ChainBucketRecord {
                 owner: [9u8; 32],
                 is_private: true,
@@ -985,7 +976,6 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct SmokeBeeState {
-        pointers: std::collections::BTreeMap<[u8; 32], Vec<u8>>,
         objects: std::collections::BTreeMap<String, Vec<u8>>,
         put_count: usize,
     }
@@ -995,11 +985,9 @@ mod tests {
             self.inner.lock().unwrap().put_count
         }
 
-        fn pointed_object_bytes(&self, bucket: &str, key: &str) -> Option<Vec<u8>> {
-            let topic = BeeClient::derive_topic(bucket, key);
+        fn object_bytes(&self, reference: &str) -> Option<Vec<u8>> {
             let inner = self.inner.lock().unwrap();
-            let reference = hex::encode(inner.pointers.get(&topic)?);
-            inner.objects.get(&reference).cloned()
+            inner.objects.get(reference).cloned()
         }
     }
 
@@ -1151,33 +1139,17 @@ mod tests {
             Ok(crate::bee::client::BeePutBytesResult { reference })
         }
 
-        async fn get_pointer_bytes(&self, topic: [u8; 32]) -> anyhow::Result<Option<Vec<u8>>> {
-            Ok(self.inner.lock().unwrap().pointers.get(&topic).cloned())
+        async fn get_pointer_bytes(&self, _topic: [u8; 32]) -> anyhow::Result<Option<Vec<u8>>> {
+            anyhow::bail!("canonical ciphertext endpoint must not read Bee pointers")
         }
 
         async fn put_object_and_update_pointer(
             &self,
-            bucket: &str,
-            key: &str,
-            data: Bytes,
+            _bucket: &str,
+            _key: &str,
+            _data: Bytes,
         ) -> anyhow::Result<crate::bee::client::FeedPointerResult> {
-            let topic = BeeClient::derive_topic(bucket, key);
-            let mut inner = self.inner.lock().unwrap();
-            inner.put_count += 1;
-
-            let reference = format!("{:064x}", inner.put_count);
-            let reference_bytes = hex::decode(&reference).unwrap();
-
-            inner.objects.insert(reference.clone(), data.to_vec());
-            inner.pointers.insert(topic, reference_bytes);
-
-            Ok(crate::bee::client::FeedPointerResult {
-                owner: "smoke-owner".to_owned(),
-                topic_hex: hex::encode(topic),
-                swarm_reference: reference,
-                manifest_reference: "smoke-manifest".to_owned(),
-                soc_reference: "smoke-soc".to_owned(),
-            })
+            anyhow::bail!("canonical ciphertext endpoint must not publish Bee pointers")
         }
     }
 
@@ -1251,7 +1223,7 @@ mod tests {
             .clone()
             .unwrap();
         assert_eq!(
-            bee.pointed_object_bytes(&authorized.storage_bucket, TRUSTLESS_MANIFEST_KEY),
+            bee.object_bytes(&manifest_reference),
             Some(encrypted_manifest.to_vec())
         );
         assert_eq!(
@@ -1297,8 +1269,9 @@ mod tests {
 
         assert_eq!(err.0, StatusCode::CONFLICT);
         assert_eq!(err.1, "encrypted manifest precondition failed");
+        let manifest_reference = anchor.put_updates()[0].1.clone();
         assert_eq!(
-            bee.pointed_object_bytes(&authorized.storage_bucket, TRUSTLESS_MANIFEST_KEY),
+            bee.object_bytes(&manifest_reference),
             Some(encrypted_manifest.to_vec()),
             "failed CAS may leave encrypted manifest bytes in Bee, but the chain root is unchanged"
         );
@@ -1344,20 +1317,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_bee_smoke_get_requires_direct_ciphertext_reference_before_pointer_lookup() {
+    async fn gateway_bee_smoke_get_requires_direct_ciphertext_reference_before_storage_lookup() {
         let bee = SmokeBeeStorage::default();
         let anchor = SmokeAnchorClient::default();
         let authorized = authorized_bucket(Vec::new());
-
-        {
-            let topic =
-                BeeClient::derive_topic(&authorized.storage_bucket, "docs/missing-payload.txt");
-            bee.inner
-                .lock()
-                .unwrap()
-                .pointers
-                .insert(topic, hex::decode(format!("{:064x}", 99)).unwrap());
-        }
 
         let get = request("get_ciphertext_object");
 

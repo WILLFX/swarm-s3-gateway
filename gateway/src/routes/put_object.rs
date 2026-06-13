@@ -121,18 +121,14 @@ pub async fn handle(
 
     let object_key_id = sha256_32(key.as_bytes());
 
-    let put = match state
-        .bee_client
-        .put_object_and_update_pointer(&bucket, &key, body)
-        .await
-    {
+    let payload_put = match state.bee_client.put_bytes(body).await {
         Ok(result) => result,
         Err(err) if is_bee_unreachable(&err) => return bee_unavailable_response(err),
         Err(err) => return bee_error_response(err),
     };
 
     let metadata = ObjectMetadata {
-        swarm_reference: put.swarm_reference.clone(),
+        swarm_reference: payload_put.reference.clone(),
         size,
         etag,
         content_type,
@@ -171,7 +167,7 @@ pub async fn handle(
             new_bucket_manifest_root_hex: manifest_write.bucket_manifest_reference.clone(),
             references: vec![
                 GatewayBeeReference::new(
-                    put.swarm_reference.clone(),
+                    payload_put.reference.clone(),
                     GatewayBeeReferenceKind::PublicObjectPayload,
                 ),
                 GatewayBeeReference::new(
@@ -202,7 +198,7 @@ pub async fn handle(
             principal.owner,
             bucket_id,
             object_key_id,
-            put.swarm_reference.clone(),
+            payload_put.reference.clone(),
             chain_bucket.bucket_generation,
             chain_bucket.bucket_state_epoch,
             chain_bucket.encryption_version,
@@ -231,7 +227,7 @@ pub async fn handle(
         }
     }
 
-    put_object_response(&put.swarm_reference)
+    put_object_response(&payload_put.reference)
 }
 
 #[derive(Debug)]

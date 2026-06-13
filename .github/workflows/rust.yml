@@ -215,6 +215,9 @@ jobs:
       - name: Check gateway orphan reconciliation surface
         run: ./scripts/check_gateway_orphan_reconciliation_surface.py
 
+      - name: Check gateway pointer canonical-state surface
+        run: ./scripts/check_gateway_pointer_canonical_state_surface.py
+
       - name: Install trustless proxy native build dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake nasm
 
