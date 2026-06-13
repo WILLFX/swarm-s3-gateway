@@ -217,15 +217,18 @@ mod tests {
     }
 
     fn put_preflight() -> TrustlessPutPreflight {
+        let envelope_context = envelope_context();
         TrustlessPutPreflight {
+            bucket_id: envelope_context.bucket_id.clone(),
             route_plan: route_plan(TrustlessProxyOperation::PutObject),
-            envelope_context: envelope_context(),
+            envelope_context,
             local_private_key: local_private_key(),
         }
     }
 
     fn decrypt_preflight() -> TrustlessLocalDecryptPreflight {
         TrustlessLocalDecryptPreflight {
+            bucket_id: envelope_context().bucket_id,
             route_plan: route_plan(TrustlessProxyOperation::GetObject),
             local_private_key: local_private_key(),
         }

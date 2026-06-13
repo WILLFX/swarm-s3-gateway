@@ -1256,11 +1256,13 @@ mod tests {
         let (client, transport) =
             client_with_transport(response(RemoteGatewayAction::GetCiphertextObject));
 
-        let mut request = request(RemoteGatewayAction::GetCiphertextObject);
-        request.bucket_id_hex = " ".to_owned();
-        request.ciphertext_reference_hex = Some("ab".repeat(32));
+        let mut missing_bucket_request = request(RemoteGatewayAction::GetCiphertextObject);
+        missing_bucket_request.bucket_id_hex = " ".to_owned();
+        missing_bucket_request.ciphertext_reference_hex = Some("ab".repeat(32));
 
-        let err = client.execute_ciphertext_request(request).unwrap_err();
+        let err = client
+            .execute_ciphertext_request(missing_bucket_request)
+            .unwrap_err();
 
         assert_eq!(err, RemoteGatewayClientError::MissingBucketId);
         assert!(transport.no_body_was_sent());
@@ -1268,11 +1270,13 @@ mod tests {
         let (client, transport) =
             client_with_transport(response(RemoteGatewayAction::GetCiphertextObject));
 
-        let mut request = request(RemoteGatewayAction::GetCiphertextObject);
-        request.bucket_id_hex = "not-hex".to_owned();
-        request.ciphertext_reference_hex = Some("ab".repeat(32));
+        let mut malformed_bucket_request = request(RemoteGatewayAction::GetCiphertextObject);
+        malformed_bucket_request.bucket_id_hex = "not-hex".to_owned();
+        malformed_bucket_request.ciphertext_reference_hex = Some("ab".repeat(32));
 
-        let err = client.execute_ciphertext_request(request).unwrap_err();
+        let err = client
+            .execute_ciphertext_request(malformed_bucket_request)
+            .unwrap_err();
 
         assert_eq!(err, RemoteGatewayClientError::InvalidBucketId);
         assert!(transport.no_body_was_sent());
