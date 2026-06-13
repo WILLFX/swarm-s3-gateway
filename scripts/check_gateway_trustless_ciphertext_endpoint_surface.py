@@ -46,7 +46,6 @@ def extract_match_arm(label: str, next_label: str) -> str:
 
 required_endpoint_tokens = [
     'const WIRE_VERSION: u32 = 1',
-    'const TRUSTLESS_MANIFEST_KEY: &str = "__s3w_trustless_manifest"',
     '#[serde(deny_unknown_fields)]',
     'put_ciphertext_object',
     'get_ciphertext_object',
@@ -61,7 +60,6 @@ required_endpoint_tokens = [
     'expected_manifest_reference_hex',
     'gateway_plaintext_access',
     'put_bytes',
-    'put_object_and_update_pointer',
     'update_bucket_manifest_root_for_put_anchor',
     'update_bucket_manifest_root_for_delete_anchor',
     'gateway plaintext access is forbidden',
@@ -71,6 +69,18 @@ required_endpoint_tokens = [
 ]
 
 require_tokens("endpoint", endpoint_text, required_endpoint_tokens)
+
+forbid_tokens(
+    "production endpoint",
+    production_endpoint_text,
+    [
+        'put_object_and_update_pointer',
+        'get_pointer_bytes',
+        'BeeClient::derive_topic',
+        'TRUSTLESS_MANIFEST_KEY',
+        'storage_bucket',
+    ],
+)
 
 get_arm_text = extract_match_arm("GetCiphertextObject", "HeadCiphertextObject")
 head_arm_text = extract_match_arm("HeadCiphertextObject", "ListCiphertextManifest")

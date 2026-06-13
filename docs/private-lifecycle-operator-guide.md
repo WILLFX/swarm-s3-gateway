@@ -235,6 +235,8 @@ Public bucket responses may still expose the Swarm reference header.
 
 Bee/Swarm writes are staged before chain compare-and-swap root updates. If a chain CAS fails after Bee accepts encrypted payload or manifest bytes, those bytes may remain in Bee as unanchored orphans. They are not authoritative bucket state: gateway reads, heads, lists, and deletes must resolve from the current chain-anchored roots, not from staged Bee pointer state. Operators may treat unanchored Bee references as storage-accounting or garbage-collection candidates once a reconciliation process exists.
 
+Canonical gateway writes do not publish mutable Bee pointers. Public object payloads, public manifests, trusted-private encrypted payloads/manifests, and trustless encrypted manifests are uploaded as content-addressed Bee bytes and become visible only through successful chain-root CAS. Bee SOC/feed pointer helpers are compatibility tooling outside the canonical read/write path.
+
 ## Bee orphan reconciliation
 
 The gateway can keep a local JSONL write journal for Bee references it creates:
