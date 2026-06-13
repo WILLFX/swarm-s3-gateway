@@ -153,6 +153,9 @@ jobs:
       - name: Check trustless owner-only auth surface
         run: ./scripts/check_trustless_owner_only_auth_surface.py
 
+      - name: Check trustless bucket id privacy surface
+        run: ./scripts/check_trustless_bucket_id_privacy_surface.py
+
 
 
 

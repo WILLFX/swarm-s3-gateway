@@ -1,4 +1,4 @@
-use aes_gcm::aead::{OsRng, rand_core::RngCore};
+use aes_gcm::aead::{rand_core::RngCore, OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -230,6 +230,7 @@ where
                         object_key.clone(),
                         Some(&object_context),
                     )?,
+                    &input.envelope_context.bucket_id,
                     encrypted_object,
                 )?;
 
@@ -273,7 +274,7 @@ where
                 }
 
                 let manifest_request = CiphertextGatewayBoundary::put_encrypted_manifest_request(
-                    runtime_prepared_bucket(runtime_prepared),
+                    input.envelope_context.bucket_id.clone(),
                     manifest_write.encrypted_manifest.ciphertext,
                     current_manifest.encrypted_manifest_reference_hex,
                 )?;
@@ -448,6 +449,7 @@ where
                     .encrypt_manifest_locally(manifest_mutation.manifest, manifest_context)?;
                 let request = CiphertextGatewayBoundary::delete_ciphertext_request(
                     &preflight.route_plan,
+                    &input.envelope_context.bucket_id,
                     manifest_write.encrypted_manifest.ciphertext,
                     current_manifest.encrypted_manifest_reference_hex.clone(),
                 )?;
@@ -490,7 +492,10 @@ where
     ) -> Result<CurrentTrustlessManifest, LocalTrustlessExecutionEngineError> {
         let bucket = runtime_prepared_bucket(runtime_prepared);
         let route_plan = TrustlessRoutePlanner::plan_list_objects_v2(bucket)?;
-        let list_request = CiphertextGatewayBoundary::list_encrypted_manifest_request(&route_plan)?;
+        let list_request = CiphertextGatewayBoundary::list_encrypted_manifest_request(
+            &route_plan,
+            &envelope_context.bucket_id,
+        )?;
 
         let list_response = self.remote_gateway_executor.execute(list_request)?;
 
@@ -1516,10 +1521,8 @@ mod tests {
         let ciphertext = requests[1].ciphertext_payload.clone().unwrap();
         assert!(!ciphertext.is_empty());
         assert_ne!(ciphertext, plaintext);
-        assert!(
-            !String::from_utf8_lossy(&ciphertext)
-                .contains("engine PUT plaintext must not leave local boundary")
-        );
+        assert!(!String::from_utf8_lossy(&ciphertext)
+            .contains("engine PUT plaintext must not leave local boundary"));
 
         assert_eq!(
             requests[2].action,
@@ -1577,8 +1580,8 @@ mod tests {
             ]
         );
 
-        assert_eq!(requests[0].bucket, "bucket");
-        assert_eq!(requests[2].bucket, "bucket");
+        assert_eq!(requests[0].bucket_id_hex, hex::encode([1u8; 32]));
+        assert_eq!(requests[2].bucket_id_hex, hex::encode([1u8; 32]));
         assert!(requests[2].encrypted_manifest_payload.is_some());
         assert_eq!(
             requests[2].expected_manifest_reference_hex,

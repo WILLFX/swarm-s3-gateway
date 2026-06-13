@@ -109,14 +109,18 @@ where
         input: TrustlessPutOperationInput,
     ) -> Result<TrustlessPutOperationPlan, TrustlessOperationError> {
         let route_plan = input.preflight.route_plan.clone();
+        let bucket_id = input.preflight.bucket_id.clone();
 
         let encrypted_object = self.encryption.encrypt_for_put(TrustlessEncryptRequest {
             plaintext: input.plaintext,
             preflight: input.preflight,
         })?;
 
-        let object_request =
-            CiphertextGatewayBoundary::put_ciphertext_request(&route_plan, encrypted_object)?;
+        let object_request = CiphertextGatewayBoundary::put_ciphertext_request(
+            &route_plan,
+            &bucket_id,
+            encrypted_object,
+        )?;
 
         let manifest_mutation = self
             .manifest
@@ -142,6 +146,7 @@ where
     ) -> Result<CiphertextGatewayRequest, TrustlessOperationError> {
         Ok(CiphertextGatewayBoundary::get_ciphertext_request(
             &preflight.route_plan,
+            &preflight.bucket_id,
             ciphertext_reference_hex,
         )?)
     }
@@ -153,6 +158,7 @@ where
     ) -> Result<CiphertextGatewayRequest, TrustlessOperationError> {
         Ok(CiphertextGatewayBoundary::head_ciphertext_request(
             &preflight.route_plan,
+            &preflight.bucket_id,
             ciphertext_reference_hex,
         )?)
     }
@@ -182,6 +188,7 @@ where
     ) -> Result<CiphertextGatewayRequest, TrustlessOperationError> {
         Ok(CiphertextGatewayBoundary::list_encrypted_manifest_request(
             &preflight.route_plan,
+            &preflight.bucket_id,
         )?)
     }
 
@@ -225,6 +232,7 @@ where
 
         let delete_request = CiphertextGatewayBoundary::delete_ciphertext_request(
             &input.preflight.route_plan,
+            &input.preflight.bucket_id,
             manifest_write.encrypted_manifest.ciphertext.clone(),
             input.expected_manifest_reference_hex,
         )?;
@@ -353,6 +361,7 @@ mod tests {
 
     fn put_preflight() -> TrustlessPutPreflight {
         TrustlessPutPreflight {
+            bucket_id: envelope_context().bucket_id,
             route_plan: route_plan(
                 TrustlessProxyOperation::PutObject,
                 RemoteGatewayAction::PutCiphertextObject,
@@ -364,6 +373,7 @@ mod tests {
 
     fn get_preflight() -> TrustlessLocalDecryptPreflight {
         TrustlessLocalDecryptPreflight {
+            bucket_id: envelope_context().bucket_id,
             route_plan: route_plan(
                 TrustlessProxyOperation::GetObject,
                 RemoteGatewayAction::GetCiphertextObject,
@@ -374,6 +384,7 @@ mod tests {
 
     fn head_preflight() -> TrustlessLocalDecryptPreflight {
         TrustlessLocalDecryptPreflight {
+            bucket_id: envelope_context().bucket_id,
             route_plan: route_plan(
                 TrustlessProxyOperation::HeadObject,
                 RemoteGatewayAction::HeadCiphertextObject,
@@ -390,6 +401,7 @@ mod tests {
         plan.key = None;
 
         TrustlessLocalDecryptPreflight {
+            bucket_id: envelope_context().bucket_id,
             route_plan: plan,
             local_private_key: local_private_key(),
         }
@@ -397,6 +409,7 @@ mod tests {
 
     fn delete_preflight() -> TrustlessLocalDecryptPreflight {
         TrustlessLocalDecryptPreflight {
+            bucket_id: envelope_context().bucket_id,
             route_plan: route_plan(
                 TrustlessProxyOperation::DeleteObject,
                 RemoteGatewayAction::DeleteCiphertextObject,

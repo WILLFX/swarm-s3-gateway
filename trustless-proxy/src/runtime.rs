@@ -273,6 +273,7 @@ impl LocalTrustlessRuntime {
 
                 Ok(CiphertextGatewayBoundary::put_ciphertext_request(
                     &route_plan,
+                    &preflight_request.bucket_id,
                     TrustlessEncryptResult {
                         ciphertext,
                         envelope_context,
@@ -292,6 +293,7 @@ impl LocalTrustlessRuntime {
 
                 Ok(CiphertextGatewayBoundary::get_ciphertext_request(
                     &route_plan,
+                    &preflight_request.bucket_id,
                     Some(ciphertext_reference_hex),
                 )?)
             }
@@ -306,6 +308,7 @@ impl LocalTrustlessRuntime {
 
                 Ok(CiphertextGatewayBoundary::head_ciphertext_request(
                     &route_plan,
+                    &preflight_request.bucket_id,
                     Some(ciphertext_reference_hex),
                 )?)
             }
@@ -317,6 +320,7 @@ impl LocalTrustlessRuntime {
 
                 Ok(CiphertextGatewayBoundary::list_encrypted_manifest_request(
                     &route_plan,
+                    &preflight_request.bucket_id,
                 )?)
             }
             LocalS3Operation::DeleteObject => {
@@ -350,6 +354,7 @@ impl LocalTrustlessRuntime {
 
                 Ok(CiphertextGatewayBoundary::delete_ciphertext_request(
                     &route_plan,
+                    &preflight_request.bucket_id,
                     encrypted_manifest,
                     expected_manifest_reference_hex,
                 )?)
@@ -1301,7 +1306,7 @@ mod tests {
         let response = LocalTrustlessRuntime::execute_prepared_remote_request(
             &prepared,
             CiphertextGatewayRequest {
-                bucket: "bucket".to_owned(),
+                bucket_id_hex: hex::encode([1u8; 32]),
                 action: RemoteGatewayAction::GetCiphertextObject,
                 ciphertext_payload: None,
                 encrypted_manifest_payload: None,
@@ -1369,7 +1374,7 @@ mod tests {
         let err = LocalTrustlessRuntime::execute_prepared_remote_request(
             &prepared,
             CiphertextGatewayRequest {
-                bucket: "bucket".to_owned(),
+                bucket_id_hex: hex::encode([1u8; 32]),
                 action: RemoteGatewayAction::GetCiphertextObject,
                 ciphertext_payload: None,
                 encrypted_manifest_payload: None,
@@ -1439,7 +1444,7 @@ mod tests {
         let err = LocalTrustlessRuntime::execute_prepared_remote_request(
             &prepared,
             CiphertextGatewayRequest {
-                bucket: "bucket".to_owned(),
+                bucket_id_hex: hex::encode([1u8; 32]),
                 action: RemoteGatewayAction::CreateTrustlessBucket,
                 ciphertext_payload: None,
                 encrypted_manifest_payload: None,
@@ -1956,10 +1961,8 @@ mod tests {
 
         let encrypted_manifest = request.encrypted_manifest_payload.unwrap();
         assert!(!encrypted_manifest.is_empty());
-        assert!(
-            !String::from_utf8_lossy(&encrypted_manifest)
-                .contains("runtime configured GET plaintext stays local")
-        );
+        assert!(!String::from_utf8_lossy(&encrypted_manifest)
+            .contains("runtime configured GET plaintext stays local"));
     }
 
     #[test]
@@ -1978,7 +1981,7 @@ mod tests {
         let err = LocalTrustlessRuntime::execute_prepared_remote_http_request(
             &prepared,
             CiphertextGatewayRequest {
-                bucket: "bucket".to_owned(),
+                bucket_id_hex: hex::encode([1u8; 32]),
                 action: RemoteGatewayAction::GetCiphertextObject,
                 ciphertext_payload: None,
                 encrypted_manifest_payload: None,
@@ -2029,7 +2032,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(get_request.bucket, "bucket");
+        assert_eq!(get_request.bucket_id_hex, hex::encode([1u8; 32]));
         assert_eq!(get_request.action, RemoteGatewayAction::GetCiphertextObject);
         assert_eq!(get_request.ciphertext_reference_hex, Some("ab".repeat(32)));
         assert!(get_request.ciphertext_payload.is_none());
@@ -2067,7 +2070,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(head_request.bucket, "bucket");
+        assert_eq!(head_request.bucket_id_hex, hex::encode([1u8; 32]));
         assert_eq!(
             head_request.action,
             RemoteGatewayAction::HeadCiphertextObject
@@ -2102,7 +2105,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(list_request.bucket, "bucket");
+        assert_eq!(list_request.bucket_id_hex, hex::encode([1u8; 32]));
         assert_eq!(
             list_request.action,
             RemoteGatewayAction::ListCiphertextManifest
@@ -2128,7 +2131,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(put_request.bucket, "bucket");
+        assert_eq!(put_request.bucket_id_hex, hex::encode([1u8; 32]));
         assert_eq!(put_request.action, RemoteGatewayAction::PutCiphertextObject);
         assert_eq!(put_request.ciphertext_payload, Some(b"ciphertext".to_vec()));
         assert!(put_request.encrypted_manifest_payload.is_none());
@@ -2147,7 +2150,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(delete_request.bucket, "bucket");
+        assert_eq!(delete_request.bucket_id_hex, hex::encode([1u8; 32]));
         assert_eq!(
             delete_request.action,
             RemoteGatewayAction::DeleteCiphertextObject
@@ -2226,7 +2229,7 @@ mod tests {
             RemoteGatewayAction::GetCiphertextObject
         );
         assert_eq!(seen_request.ciphertext_reference_hex, Some("ab".repeat(32)));
-        assert_eq!(seen_request.bucket, "bucket");
+        assert_eq!(seen_request.bucket_id_hex, hex::encode([1u8; 32]));
         assert!(!seen_request.plaintext_payload_present);
     }
 
@@ -2323,7 +2326,7 @@ mod tests {
             &put_prepared,
             TrustlessPutOperationPlan {
                 object_request: CiphertextGatewayRequest {
-                    bucket: "bucket".to_owned(),
+                    bucket_id_hex: hex::encode([1u8; 32]),
                     action: RemoteGatewayAction::PutCiphertextObject,
                     ciphertext_payload: Some(b"real-ciphertext".to_vec()),
                     encrypted_manifest_payload: None,
@@ -2354,7 +2357,7 @@ mod tests {
             &delete_prepared,
             TrustlessDeleteOperationPlan {
                 delete_request: CiphertextGatewayRequest {
-                    bucket: "bucket".to_owned(),
+                    bucket_id_hex: hex::encode([1u8; 32]),
                     action: RemoteGatewayAction::DeleteCiphertextObject,
                     ciphertext_payload: None,
                     encrypted_manifest_payload: Some(b"real-encrypted-manifest".to_vec()),
@@ -2388,7 +2391,7 @@ mod tests {
             &delete_prepared,
             TrustlessDeleteOperationPlan {
                 delete_request: CiphertextGatewayRequest {
-                    bucket: "bucket".to_owned(),
+                    bucket_id_hex: hex::encode([1u8; 32]),
                     action: RemoteGatewayAction::DeleteCiphertextObject,
                     ciphertext_payload: None,
                     encrypted_manifest_payload: Some(b"real-encrypted-manifest".to_vec()),
@@ -2464,7 +2467,7 @@ mod tests {
             &prepared,
             TrustlessPutOperationPlan {
                 object_request: CiphertextGatewayRequest {
-                    bucket: "bucket".to_owned(),
+                    bucket_id_hex: hex::encode([1u8; 32]),
                     action: RemoteGatewayAction::PutCiphertextObject,
                     ciphertext_payload: Some(b"real-ciphertext".to_vec()),
                     encrypted_manifest_payload: None,
@@ -2540,7 +2543,7 @@ mod tests {
             &put_prepared,
             TrustlessPutOperationPlan {
                 object_request: CiphertextGatewayRequest {
-                    bucket: "bucket".to_owned(),
+                    bucket_id_hex: hex::encode([1u8; 32]),
                     action: RemoteGatewayAction::DeleteCiphertextObject,
                     ciphertext_payload: Some(b"real-ciphertext".to_vec()),
                     encrypted_manifest_payload: None,
@@ -2567,7 +2570,7 @@ mod tests {
             &put_prepared,
             TrustlessPutOperationPlan {
                 object_request: CiphertextGatewayRequest {
-                    bucket: "bucket".to_owned(),
+                    bucket_id_hex: hex::encode([1u8; 32]),
                     action: RemoteGatewayAction::PutCiphertextObject,
                     ciphertext_payload: Some(b"real-ciphertext".to_vec()),
                     encrypted_manifest_payload: None,
@@ -2595,7 +2598,7 @@ mod tests {
             &delete_prepared,
             TrustlessDeleteOperationPlan {
                 delete_request: CiphertextGatewayRequest {
-                    bucket: "bucket".to_owned(),
+                    bucket_id_hex: hex::encode([1u8; 32]),
                     action: RemoteGatewayAction::DeleteCiphertextObject,
                     ciphertext_payload: None,
                     encrypted_manifest_payload: Some(b"encrypted-manifest".to_vec()),
@@ -2761,8 +2764,8 @@ mod tests {
         )
     }
 
-    fn runtime_assembler()
-    -> TrustlessOperationAssembler<RuntimeMockKeyring, RuntimeMockManifestCipher> {
+    fn runtime_assembler(
+    ) -> TrustlessOperationAssembler<RuntimeMockKeyring, RuntimeMockManifestCipher> {
         TrustlessOperationAssembler::new(RuntimeMockKeyring, RuntimeMockManifestCipher)
     }
 
@@ -2854,12 +2857,10 @@ mod tests {
             RemoteGatewayAction::DeleteCiphertextObject
         );
         assert!(delete_plan.delete_request.ciphertext_payload.is_none());
-        assert!(
-            delete_plan
-                .delete_request
-                .encrypted_manifest_payload
-                .is_some()
-        );
+        assert!(delete_plan
+            .delete_request
+            .encrypted_manifest_payload
+            .is_some());
         assert_eq!(
             delete_plan.delete_request.expected_manifest_reference_hex,
             Some("ef".repeat(32))

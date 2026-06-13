@@ -6,9 +6,12 @@ test = Path("gateway/tests/private_bucket_catalog_behavior.rs").read_text()
 
 required_route = [
     "x-s3gw-bucket-type",
+    "x-s3w-bucket-id",
     "x-s3gw-expected-owner-catalog-root",
     "x-s3gw-owner-catalog-root",
     "CreateBucketMode::TrustlessPrivate",
+    "bucket_id_for_create_mode",
+    "parse_trustless_bucket_id_header",
     "parse_trustless_owner_catalog_roots",
     "create_trustless_bucket_anchor",
     "write_owner_catalog_with_bucket",
@@ -16,6 +19,8 @@ required_route = [
 
 required_test = [
     "trustless_create_bucket_uses_client_supplied_catalog_roots_without_bee_writes",
+    "trustless_create_bucket_requires_client_supplied_opaque_bucket_id",
+    "trustless_bucket_id",
     "trustless_create_headers",
     "trustless_create_call",
     "create_trustless_bucket_anchor",

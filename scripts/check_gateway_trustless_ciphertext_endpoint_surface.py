@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
+import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +48,9 @@ def extract_match_arm(label: str, next_label: str) -> str:
 required_endpoint_tokens = [
     'const WIRE_VERSION: u32 = 1',
     '#[serde(deny_unknown_fields)]',
+    'bucket_id_hex',
+    'decode_bucket_id_hex',
+    '.fetch_bucket(bucket_id)',
     'put_ciphertext_object',
     'get_ciphertext_object',
     'head_ciphertext_object',
@@ -79,6 +83,8 @@ forbid_tokens(
         'BeeClient::derive_topic',
         'TRUSTLESS_MANIFEST_KEY',
         'storage_bucket',
+        'bucket_name_hash',
+        'bucket: String',
     ],
 )
 
@@ -159,8 +165,21 @@ for forbidden in [
     if forbidden in endpoint_text:
         errors.append(f"endpoint contains forbidden trustless remote field/token: {forbidden}")
 
+require_tokens(
+    "endpoint tests",
+    endpoint_text,
+    [
+        "rejects_legacy_plaintext_bucket_wire_field",
+        "unknown field `bucket`",
+        "rejects_missing_or_malformed_bucket_id_hex",
+    ],
+)
+
 if "gateway_plaintext_access: true" in endpoint_text:
     errors.append("endpoint must never set gateway_plaintext_access true")
+
+if re.search(r"\brequest\.bucket\b(?!_id_hex)", production_endpoint_text):
+    errors.append("endpoint production code must not read plaintext request.bucket")
 
 if errors:
     for error in errors:

@@ -15,6 +15,12 @@ pub trait TrustlessRemoteGatewayClient {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RemoteGatewayClientError {
+    #[error("bucket id is required")]
+    MissingBucketId,
+
+    #[error("bucket id must be a 32-byte hex value")]
+    InvalidBucketId,
+
     #[error("plaintext payload must never be sent to the remote gateway")]
     PlaintextPayloadRejected,
 
@@ -91,6 +97,8 @@ where
 }
 
 fn validate_request(request: &CiphertextGatewayRequest) -> Result<(), RemoteGatewayClientError> {
+    validate_bucket_id_hex(&request.bucket_id_hex)?;
+
     if request.plaintext_payload_present {
         return Err(RemoteGatewayClientError::PlaintextPayloadRejected);
     }
@@ -249,6 +257,21 @@ fn validate_request(request: &CiphertextGatewayRequest) -> Result<(), RemoteGate
     Ok(())
 }
 
+fn validate_bucket_id_hex(bucket_id_hex: &str) -> Result<(), RemoteGatewayClientError> {
+    let bucket_id_hex = bucket_id_hex.trim().trim_start_matches("0x");
+    if bucket_id_hex.is_empty() {
+        return Err(RemoteGatewayClientError::MissingBucketId);
+    }
+
+    let bytes =
+        hex::decode(bucket_id_hex).map_err(|_| RemoteGatewayClientError::InvalidBucketId)?;
+    if bytes.len() != 32 {
+        return Err(RemoteGatewayClientError::InvalidBucketId);
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -286,7 +309,7 @@ mod tests {
 
     fn request(action: RemoteGatewayAction) -> CiphertextGatewayRequest {
         CiphertextGatewayRequest {
-            bucket: "bucket".to_owned(),
+            bucket_id_hex: hex::encode([1u8; 32]),
             action,
             ciphertext_payload: None,
             encrypted_manifest_payload: None,
@@ -382,14 +405,12 @@ mod tests {
                 .encrypted_manifest_payload,
             Some(b"encrypted-manifest".to_vec())
         );
-        assert!(
-            executor
-                .client
-                .seen_request()
-                .unwrap()
-                .ciphertext_payload
-                .is_none()
-        );
+        assert!(executor
+            .client
+            .seen_request()
+            .unwrap()
+            .ciphertext_payload
+            .is_none());
         assert_eq!(
             executor
                 .client
@@ -457,6 +478,35 @@ mod tests {
     }
 
     #[test]
+    fn remote_gateway_rejects_missing_or_malformed_bucket_id_before_client_call() {
+        let client =
+            MockRemoteGatewayClient::new(response(RemoteGatewayAction::GetCiphertextObject));
+        let executor = TrustlessRemoteGatewayExecutor::new(client);
+
+        let mut missing_bucket_request = request(RemoteGatewayAction::GetCiphertextObject);
+        missing_bucket_request.bucket_id_hex = " ".to_owned();
+        missing_bucket_request.ciphertext_reference_hex = Some("ab".repeat(32));
+
+        let err = executor.execute(missing_bucket_request).unwrap_err();
+
+        assert_eq!(err, RemoteGatewayClientError::MissingBucketId);
+        assert!(executor.client.seen_request().is_none());
+
+        let client =
+            MockRemoteGatewayClient::new(response(RemoteGatewayAction::GetCiphertextObject));
+        let executor = TrustlessRemoteGatewayExecutor::new(client);
+
+        let mut malformed_bucket_request = request(RemoteGatewayAction::GetCiphertextObject);
+        malformed_bucket_request.bucket_id_hex = "not-hex".to_owned();
+        malformed_bucket_request.ciphertext_reference_hex = Some("ab".repeat(32));
+
+        let err = executor.execute(malformed_bucket_request).unwrap_err();
+
+        assert_eq!(err, RemoteGatewayClientError::InvalidBucketId);
+        assert!(executor.client.seen_request().is_none());
+    }
+
+    #[test]
     fn remote_gateway_rejects_put_encrypted_manifest_with_ciphertext_payload() {
         let mut request = request(RemoteGatewayAction::PutEncryptedManifest);
         request.encrypted_manifest_payload = Some(b"encrypted-manifest".to_vec());
@@ -499,14 +549,12 @@ mod tests {
                 .encrypted_manifest_payload,
             Some(b"encrypted-manifest".to_vec())
         );
-        assert!(
-            executor
-                .client
-                .seen_request()
-                .unwrap()
-                .ciphertext_payload
-                .is_none()
-        );
+        assert!(executor
+            .client
+            .seen_request()
+            .unwrap()
+            .ciphertext_payload
+            .is_none());
         assert_eq!(
             executor
                 .client

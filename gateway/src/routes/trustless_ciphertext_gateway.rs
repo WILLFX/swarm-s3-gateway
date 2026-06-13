@@ -1,7 +1,6 @@
 use crate::{
     app_state::AppState,
     bee::client::BeeStorage,
-    crypto::bucket_name_hash,
     orphan_reconciliation::{
         record_anchor_attempt, record_anchor_failure, record_anchor_success, AnchorAttemptEvent,
         AnchorJournalAction, GatewayBeeReference, GatewayBeeReferenceKind, GatewayWriteJournal,
@@ -67,7 +66,7 @@ impl CiphertextGatewayAction {
 pub struct CiphertextGatewayRequest {
     version: u32,
     action: String,
-    bucket: String,
+    bucket_id_hex: String,
     ciphertext_hex: Option<String>,
     #[serde(default)]
     ciphertext_reference_hex: Option<String>,
@@ -169,7 +168,7 @@ fn error_chain_contains_stale_bucket_manifest_root(err: &anyhow::Error) -> bool 
 #[derive(Debug, Clone)]
 struct AuthorizedTrustlessBucket {
     bucket_id: [u8; 32],
-    bucket: String,
+    bucket_id_hex: String,
     chain_bucket: ChainBucketRecord,
 }
 
@@ -181,7 +180,7 @@ pub async fn handle(
     validate_common_request(&request).map_err(RouteError::into_response)?;
     let action = CiphertextGatewayAction::parse(request.action.as_str())
         .map_err(RouteError::into_response)?;
-    let authorized = authorize_trustless_bucket(&state, &principal, &request.bucket)
+    let authorized = authorize_trustless_bucket(&state, &principal, &request.bucket_id_hex)
         .await
         .map_err(RouteError::into_response)?;
 
@@ -200,9 +199,9 @@ pub async fn handle(
 async fn authorize_trustless_bucket(
     state: &AppState,
     principal: &AwsPrincipal,
-    bucket: &str,
+    bucket_id_hex: &str,
 ) -> Result<AuthorizedTrustlessBucket, RouteError> {
-    let bucket_id = bucket_name_hash(&principal.owner, bucket);
+    let bucket_id = decode_bucket_id_hex(bucket_id_hex)?;
     let chain_bucket = state
         .registry_client
         .fetch_bucket(bucket_id)
@@ -226,7 +225,7 @@ async fn authorize_trustless_bucket(
 
     Ok(AuthorizedTrustlessBucket {
         bucket_id,
-        bucket: bucket.to_string(),
+        bucket_id_hex: hex::encode(bucket_id),
         chain_bucket,
     })
 }
@@ -497,9 +496,9 @@ async fn write_encrypted_manifest_with_anchor(
         orphan_journal,
         AnchorAttemptEvent {
             action: journal_action,
-            bucket: authorized.bucket.clone(),
+            bucket: authorized.bucket_id_hex.clone(),
             owner_hex: hex::encode(authorized.chain_bucket.owner),
-            bucket_id_hex: hex::encode(authorized.bucket_id),
+            bucket_id_hex: authorized.bucket_id_hex.clone(),
             bucket_type: JournalBucketType::TrustlessPrivate,
             expected_bucket_manifest_root_hex: expected_root.clone(),
             new_bucket_manifest_root_hex: put.reference.clone(),
@@ -590,9 +589,7 @@ fn validate_common_request(request: &CiphertextGatewayRequest) -> Result<(), Rou
         ));
     }
 
-    if request.bucket.trim().is_empty() {
-        return Err(RouteError::bad_request("bucket is required"));
-    }
+    decode_bucket_id_hex(&request.bucket_id_hex)?;
 
     if request.gateway_plaintext_access.unwrap_or(false) {
         return Err(RouteError::bad_request(
@@ -715,6 +712,13 @@ fn decode_required_reference(
         .ok_or_else(|| RouteError::bad_request(required_reference_message(field_name)))
 }
 
+fn decode_bucket_id_hex(value: &str) -> Result<[u8; 32], RouteError> {
+    let bytes = decode_required_reference(Some(value), "bucket_id_hex")?;
+    bytes
+        .try_into()
+        .map_err(|_| RouteError::bad_request(invalid_reference_message("bucket_id_hex")))
+}
+
 fn required_hex_message(field_name: &'static str) -> &'static str {
     match field_name {
         "ciphertext_hex" => "ciphertext_hex is required",
@@ -725,6 +729,7 @@ fn required_hex_message(field_name: &'static str) -> &'static str {
 
 fn required_reference_message(field_name: &'static str) -> &'static str {
     match field_name {
+        "bucket_id_hex" => "bucket_id_hex is required",
         "ciphertext_reference_hex" => "ciphertext_reference_hex is required",
         "expected_manifest_reference_hex" => "expected_manifest_reference_hex is required",
         _ => "reference is required",
@@ -741,6 +746,7 @@ fn invalid_hex_message(field_name: &'static str) -> &'static str {
 
 fn invalid_reference_message(field_name: &'static str) -> &'static str {
     match field_name {
+        "bucket_id_hex" => "bucket_id_hex must be a 32-byte hex reference",
         "ciphertext_reference_hex" => "ciphertext_reference_hex must be a 32-byte hex reference",
         "expected_manifest_reference_hex" => {
             "expected_manifest_reference_hex must be a 32-byte hex reference"
@@ -757,7 +763,7 @@ mod tests {
         CiphertextGatewayRequest {
             version: WIRE_VERSION,
             action: action.to_string(),
-            bucket: "bucket-a".to_string(),
+            bucket_id_hex: hex::encode([7u8; 32]),
             ciphertext_hex: None,
             ciphertext_reference_hex: None,
             encrypted_manifest_hex: None,
@@ -771,7 +777,7 @@ mod tests {
         let bucket_id = [7u8; 32];
         AuthorizedTrustlessBucket {
             bucket_id,
-            bucket: "bucket-a".to_string(),
+            bucket_id_hex: hex::encode(bucket_id),
             chain_bucket: ChainBucketRecord {
                 owner: [9u8; 32],
                 is_private: true,
@@ -830,6 +836,26 @@ mod tests {
     }
 
     #[test]
+    fn rejects_missing_or_malformed_bucket_id_hex() {
+        let mut missing_id_request = request("get_ciphertext_object");
+        missing_id_request.bucket_id_hex = " ".to_owned();
+
+        let error = validate_common_request(&missing_id_request).unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.message, "bucket_id_hex is required");
+
+        let mut malformed_id_request = request("get_ciphertext_object");
+        malformed_id_request.bucket_id_hex = "not-hex".to_owned();
+
+        let error = validate_common_request(&malformed_id_request).unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.message,
+            "bucket_id_hex must be a 32-byte hex reference"
+        );
+    }
+
+    #[test]
     fn rejects_unknown_action() {
         let error = CiphertextGatewayAction::parse("unsupported_remote_action").unwrap_err();
 
@@ -842,13 +868,27 @@ mod tests {
         let err = serde_json::from_value::<CiphertextGatewayRequest>(serde_json::json!({
             "version": WIRE_VERSION,
             "action": "put_ciphertext_object",
-            "bucket": "bucket-a",
+            "bucket_id_hex": hex::encode([7u8; 32]),
             "key": "private/object.txt",
             "ciphertext_hex": hex::encode(b"ciphertext")
         }))
         .unwrap_err();
 
         assert!(err.to_string().contains("unknown field `key`"));
+    }
+
+    #[test]
+    fn rejects_legacy_plaintext_bucket_wire_field() {
+        let err = serde_json::from_value::<CiphertextGatewayRequest>(serde_json::json!({
+            "version": WIRE_VERSION,
+            "action": "get_ciphertext_object",
+            "bucket": "bucket-a",
+            "bucket_id_hex": hex::encode([7u8; 32]),
+            "ciphertext_reference_hex": "ab".repeat(32)
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("unknown field `bucket`"));
     }
 
     #[test]
