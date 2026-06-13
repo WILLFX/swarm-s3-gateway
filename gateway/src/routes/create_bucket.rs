@@ -15,6 +15,7 @@ use crate::{
 const OWNER_SIGNATURE_HEADER: &str = "x-s3gw-owner-signature";
 const BUCKET_VISIBILITY_HEADER: &str = "x-s3gw-bucket-visibility";
 const BUCKET_TYPE_HEADER: &str = "x-s3gw-bucket-type";
+const TRUSTLESS_BUCKET_ID_HEADER: &str = "x-s3w-bucket-id";
 const EXPECTED_OWNER_CATALOG_ROOT_HEADER: &str = "x-s3gw-expected-owner-catalog-root";
 const OWNER_CATALOG_ROOT_HEADER: &str = "x-s3gw-owner-catalog-root";
 
@@ -41,7 +42,25 @@ pub async fn handle(
         }
     };
 
-    let bucket_id = bucket_name_hash(&principal.owner, &bucket);
+    let mode = match parse_bucket_create_mode(&headers) {
+        Ok(value) => value,
+        Err(message) => {
+            return S3ErrorResponse::new(S3ErrorKind::InvalidRequest)
+                .with_message(message)
+                .with_resource(format!("/{bucket}"))
+                .into_response();
+        }
+    };
+
+    let bucket_id = match bucket_id_for_create_mode(&headers, &mode, &principal.owner, &bucket) {
+        Ok(value) => value,
+        Err(message) => {
+            return S3ErrorResponse::new(S3ErrorKind::InvalidRequest)
+                .with_message(message)
+                .with_resource(format!("/{bucket}"))
+                .into_response();
+        }
+    };
 
     match state.registry_client.fetch_bucket(bucket_id).await {
         Ok(Some(_)) => {
@@ -52,16 +71,6 @@ pub async fn handle(
         Ok(None) => {}
         Err(err) => return chain_error_response(err),
     }
-
-    let mode = match parse_bucket_create_mode(&headers) {
-        Ok(value) => value,
-        Err(message) => {
-            return S3ErrorResponse::new(S3ErrorKind::InvalidRequest)
-                .with_message(message)
-                .with_resource(format!("/{bucket}"))
-                .into_response();
-        }
-    };
 
     match mode {
         CreateBucketMode::Legacy { is_private } => {
@@ -124,6 +133,48 @@ pub async fn handle(
 enum CreateBucketMode {
     Legacy { is_private: bool },
     TrustlessPrivate,
+}
+
+fn bucket_id_for_create_mode(
+    headers: &HeaderMap,
+    mode: &CreateBucketMode,
+    owner: &common::types::SubstrateAddress32,
+    bucket: &str,
+) -> Result<[u8; 32], String> {
+    match mode {
+        CreateBucketMode::Legacy { .. } => Ok(bucket_name_hash(owner, bucket)),
+        CreateBucketMode::TrustlessPrivate => parse_trustless_bucket_id_header(headers),
+    }
+}
+
+fn parse_trustless_bucket_id_header(headers: &HeaderMap) -> Result<[u8; 32], String> {
+    let value = headers
+        .get(TRUSTLESS_BUCKET_ID_HEADER)
+        .ok_or_else(|| format!("missing required header: {TRUSTLESS_BUCKET_ID_HEADER}"))?
+        .to_str()
+        .map_err(|_| format!("{TRUSTLESS_BUCKET_ID_HEADER} must be valid ASCII hex"))?
+        .trim();
+
+    if value.is_empty() {
+        return Err(format!(
+            "{TRUSTLESS_BUCKET_ID_HEADER} must be a 32-byte hex bucket id"
+        ));
+    }
+
+    let trimmed = value.trim_start_matches("0x");
+    let bytes = hex::decode(trimmed)
+        .map_err(|err| format!("{TRUSTLESS_BUCKET_ID_HEADER} must be hex: {err}"))?;
+
+    if bytes.len() != 32 {
+        return Err(format!(
+            "{TRUSTLESS_BUCKET_ID_HEADER} must decode to exactly 32 bytes, got {}",
+            bytes.len()
+        ));
+    }
+
+    bytes
+        .try_into()
+        .map_err(|_| format!("{TRUSTLESS_BUCKET_ID_HEADER} must be a 32-byte hex bucket id"))
 }
 
 struct TrustlessOwnerCatalogRoots {

@@ -11,6 +11,10 @@ required_source = [
     "CiphertextGatewayRequest",
     "CiphertextGatewayResponse",
     "CiphertextGatewayBoundaryError",
+    "bucket_id_hex",
+    "require_bucket_id_hex",
+    "MissingBucketId",
+    "InvalidBucketId",
     "put_ciphertext_request",
     "get_ciphertext_request",
     "head_ciphertext_request",
@@ -51,6 +55,7 @@ for token in required_source:
 
 for forbidden in [
     "plaintext_payload: Vec",
+    "pub bucket: String",
     "send_plaintext",
     "decrypt_at_gateway",
     "gateway_plaintext_payload",
@@ -67,6 +72,7 @@ if not request_struct:
     raise SystemExit("FAILED: missing CiphertextGatewayRequest struct body")
 
 for forbidden in [
+    "bucket:",
     "object_key",
     "objectKey",
     "object_key_id",

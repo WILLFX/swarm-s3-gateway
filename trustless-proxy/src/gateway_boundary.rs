@@ -5,7 +5,7 @@ use crate::planner::{RemoteGatewayAction, TrustlessRoutePlan};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CiphertextGatewayRequest {
-    pub bucket: String,
+    pub bucket_id_hex: String,
     pub action: RemoteGatewayAction,
     pub ciphertext_payload: Option<Vec<u8>>,
     pub encrypted_manifest_payload: Option<Vec<u8>>,
@@ -27,8 +27,11 @@ pub struct CiphertextGatewayResponse {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CiphertextGatewayBoundaryError {
-    #[error("bucket name is required")]
-    MissingBucket,
+    #[error("bucket id is required")]
+    MissingBucketId,
+
+    #[error("bucket id must be a 32-byte hex value")]
+    InvalidBucketId,
 
     #[error("object key is required for object gateway action")]
     MissingObjectKey,
@@ -63,10 +66,12 @@ pub struct CiphertextGatewayBoundary;
 impl CiphertextGatewayBoundary {
     pub fn put_ciphertext_request(
         route_plan: &TrustlessRoutePlan,
+        bucket_id_hex: &str,
         encrypted: TrustlessEncryptResult,
     ) -> Result<CiphertextGatewayRequest, CiphertextGatewayBoundaryError> {
         validate_route(route_plan)?;
         require_object_key(route_plan)?;
+        let bucket_id_hex = require_bucket_id_hex(bucket_id_hex)?;
 
         if encrypted.ciphertext.is_empty() {
             return Err(CiphertextGatewayBoundaryError::MissingCiphertextPayload);
@@ -77,7 +82,7 @@ impl CiphertextGatewayBoundary {
         }
 
         Ok(CiphertextGatewayRequest {
-            bucket: require_bucket(&route_plan.bucket)?,
+            bucket_id_hex,
             action: RemoteGatewayAction::PutCiphertextObject,
             ciphertext_payload: Some(encrypted.ciphertext),
             encrypted_manifest_payload: None,
@@ -89,14 +94,16 @@ impl CiphertextGatewayBoundary {
 
     pub fn get_ciphertext_request(
         route_plan: &TrustlessRoutePlan,
+        bucket_id_hex: &str,
         ciphertext_reference_hex: Option<String>,
     ) -> Result<CiphertextGatewayRequest, CiphertextGatewayBoundaryError> {
         validate_route(route_plan)?;
         require_object_key(route_plan)?;
+        let bucket_id_hex = require_bucket_id_hex(bucket_id_hex)?;
         let ciphertext_reference_hex = require_ciphertext_reference(ciphertext_reference_hex)?;
 
         Ok(CiphertextGatewayRequest {
-            bucket: require_bucket(&route_plan.bucket)?,
+            bucket_id_hex,
             action: RemoteGatewayAction::GetCiphertextObject,
             ciphertext_payload: None,
             encrypted_manifest_payload: None,
@@ -108,14 +115,16 @@ impl CiphertextGatewayBoundary {
 
     pub fn head_ciphertext_request(
         route_plan: &TrustlessRoutePlan,
+        bucket_id_hex: &str,
         ciphertext_reference_hex: Option<String>,
     ) -> Result<CiphertextGatewayRequest, CiphertextGatewayBoundaryError> {
         validate_route(route_plan)?;
         require_object_key(route_plan)?;
+        let bucket_id_hex = require_bucket_id_hex(bucket_id_hex)?;
         let ciphertext_reference_hex = require_ciphertext_reference(ciphertext_reference_hex)?;
 
         Ok(CiphertextGatewayRequest {
-            bucket: require_bucket(&route_plan.bucket)?,
+            bucket_id_hex,
             action: RemoteGatewayAction::HeadCiphertextObject,
             ciphertext_payload: None,
             encrypted_manifest_payload: None,
@@ -127,11 +136,13 @@ impl CiphertextGatewayBoundary {
 
     pub fn list_encrypted_manifest_request(
         route_plan: &TrustlessRoutePlan,
+        bucket_id_hex: &str,
     ) -> Result<CiphertextGatewayRequest, CiphertextGatewayBoundaryError> {
         validate_route(route_plan)?;
+        let bucket_id_hex = require_bucket_id_hex(bucket_id_hex)?;
 
         Ok(CiphertextGatewayRequest {
-            bucket: require_bucket(&route_plan.bucket)?,
+            bucket_id_hex,
             action: RemoteGatewayAction::ListCiphertextManifest,
             ciphertext_payload: None,
             encrypted_manifest_payload: None,
@@ -142,18 +153,18 @@ impl CiphertextGatewayBoundary {
     }
 
     pub fn put_encrypted_manifest_request(
-        bucket: impl Into<String>,
+        bucket_id_hex: impl Into<String>,
         encrypted_manifest_payload: Vec<u8>,
         expected_manifest_reference_hex: Option<String>,
     ) -> Result<CiphertextGatewayRequest, CiphertextGatewayBoundaryError> {
-        let bucket = require_bucket(&bucket.into())?;
+        let bucket_id_hex = require_bucket_id_hex(&bucket_id_hex.into())?;
 
         if encrypted_manifest_payload.is_empty() {
             return Err(CiphertextGatewayBoundaryError::MissingEncryptedManifestPayload);
         }
 
         Ok(CiphertextGatewayRequest {
-            bucket,
+            bucket_id_hex,
             action: RemoteGatewayAction::PutEncryptedManifest,
             ciphertext_payload: None,
             encrypted_manifest_payload: Some(encrypted_manifest_payload),
@@ -165,11 +176,13 @@ impl CiphertextGatewayBoundary {
 
     pub fn delete_ciphertext_request(
         route_plan: &TrustlessRoutePlan,
+        bucket_id_hex: &str,
         encrypted_manifest_payload: Vec<u8>,
         expected_manifest_reference_hex: Option<String>,
     ) -> Result<CiphertextGatewayRequest, CiphertextGatewayBoundaryError> {
         validate_route(route_plan)?;
         require_object_key(route_plan)?;
+        let bucket_id_hex = require_bucket_id_hex(bucket_id_hex)?;
 
         if encrypted_manifest_payload.is_empty() {
             return Err(CiphertextGatewayBoundaryError::MissingEncryptedManifestPayload);
@@ -179,7 +192,7 @@ impl CiphertextGatewayBoundary {
             require_expected_manifest_reference(expected_manifest_reference_hex)?;
 
         Ok(CiphertextGatewayRequest {
-            bucket: require_bucket(&route_plan.bucket)?,
+            bucket_id_hex,
             action: RemoteGatewayAction::DeleteCiphertextObject,
             ciphertext_payload: None,
             encrypted_manifest_payload: Some(encrypted_manifest_payload),
@@ -212,14 +225,22 @@ fn validate_route(route_plan: &TrustlessRoutePlan) -> Result<(), CiphertextGatew
     Ok(())
 }
 
-fn require_bucket(bucket: &str) -> Result<String, CiphertextGatewayBoundaryError> {
-    let bucket = bucket.trim().to_owned();
+fn require_bucket_id_hex(bucket_id_hex: &str) -> Result<String, CiphertextGatewayBoundaryError> {
+    let bucket_id_hex = bucket_id_hex.trim().trim_start_matches("0x").to_owned();
 
-    if bucket.is_empty() {
-        return Err(CiphertextGatewayBoundaryError::MissingBucket);
+    if bucket_id_hex.is_empty() {
+        return Err(CiphertextGatewayBoundaryError::MissingBucketId);
     }
 
-    Ok(bucket)
+    let Ok(bytes) = hex::decode(&bucket_id_hex) else {
+        return Err(CiphertextGatewayBoundaryError::InvalidBucketId);
+    };
+
+    if bytes.len() != 32 {
+        return Err(CiphertextGatewayBoundaryError::InvalidBucketId);
+    }
+
+    Ok(bucket_id_hex)
 }
 
 fn require_ciphertext_reference(
@@ -270,6 +291,10 @@ mod tests {
         }
     }
 
+    fn bucket_id_hex() -> String {
+        hex::encode([1u8; 32])
+    }
+
     fn make_route_plan(
         operation: TrustlessProxyOperation,
         action: RemoteGatewayAction,
@@ -302,10 +327,14 @@ mod tests {
             RemoteGatewayAction::PutCiphertextObject,
         );
 
-        let request =
-            CiphertextGatewayBoundary::put_ciphertext_request(&route_plan, encrypted_result())
-                .unwrap();
+        let request = CiphertextGatewayBoundary::put_ciphertext_request(
+            &route_plan,
+            &bucket_id_hex(),
+            encrypted_result(),
+        )
+        .unwrap();
 
+        assert_eq!(request.bucket_id_hex, bucket_id_hex());
         assert_eq!(request.action, RemoteGatewayAction::PutCiphertextObject);
         assert_eq!(request.ciphertext_payload, Some(b"ciphertext".to_vec()));
         assert!(request.encrypted_manifest_payload.is_none());
@@ -321,10 +350,14 @@ mod tests {
             RemoteGatewayAction::GetCiphertextObject,
         );
 
-        let get_request =
-            CiphertextGatewayBoundary::get_ciphertext_request(&get_plan, Some("ab".repeat(32)))
-                .unwrap();
+        let get_request = CiphertextGatewayBoundary::get_ciphertext_request(
+            &get_plan,
+            &bucket_id_hex(),
+            Some("ab".repeat(32)),
+        )
+        .unwrap();
 
+        assert_eq!(get_request.bucket_id_hex, bucket_id_hex());
         assert_eq!(get_request.action, RemoteGatewayAction::GetCiphertextObject);
         assert!(get_request.ciphertext_payload.is_none());
         assert_eq!(get_request.ciphertext_reference_hex, Some("ab".repeat(32)));
@@ -336,10 +369,14 @@ mod tests {
             RemoteGatewayAction::HeadCiphertextObject,
         );
 
-        let head_request =
-            CiphertextGatewayBoundary::head_ciphertext_request(&head_plan, Some("cd".repeat(32)))
-                .unwrap();
+        let head_request = CiphertextGatewayBoundary::head_ciphertext_request(
+            &head_plan,
+            &bucket_id_hex(),
+            Some("cd".repeat(32)),
+        )
+        .unwrap();
 
+        assert_eq!(head_request.bucket_id_hex, bucket_id_hex());
         assert_eq!(
             head_request.action,
             RemoteGatewayAction::HeadCiphertextObject
@@ -357,7 +394,9 @@ mod tests {
             RemoteGatewayAction::GetCiphertextObject,
         );
 
-        let err = CiphertextGatewayBoundary::get_ciphertext_request(&get_plan, None).unwrap_err();
+        let err =
+            CiphertextGatewayBoundary::get_ciphertext_request(&get_plan, &bucket_id_hex(), None)
+                .unwrap_err();
 
         assert_eq!(
             err,
@@ -369,9 +408,12 @@ mod tests {
             RemoteGatewayAction::HeadCiphertextObject,
         );
 
-        let err =
-            CiphertextGatewayBoundary::head_ciphertext_request(&head_plan, Some(" ".to_owned()))
-                .unwrap_err();
+        let err = CiphertextGatewayBoundary::head_ciphertext_request(
+            &head_plan,
+            &bucket_id_hex(),
+            Some(" ".to_owned()),
+        )
+        .unwrap_err();
 
         assert_eq!(
             err,
@@ -386,9 +428,12 @@ mod tests {
             RemoteGatewayAction::GetCiphertextObject,
         );
 
-        let get_request =
-            CiphertextGatewayBoundary::get_ciphertext_request(&get_plan, Some("ab".repeat(32)))
-                .unwrap();
+        let get_request = CiphertextGatewayBoundary::get_ciphertext_request(
+            &get_plan,
+            &bucket_id_hex(),
+            Some("ab".repeat(32)),
+        )
+        .unwrap();
 
         assert_eq!(get_request.ciphertext_reference_hex, Some("ab".repeat(32)));
         assert!(get_request.expected_manifest_reference_hex.is_none());
@@ -398,9 +443,12 @@ mod tests {
             RemoteGatewayAction::HeadCiphertextObject,
         );
 
-        let head_request =
-            CiphertextGatewayBoundary::head_ciphertext_request(&head_plan, Some("cd".repeat(32)))
-                .unwrap();
+        let head_request = CiphertextGatewayBoundary::head_ciphertext_request(
+            &head_plan,
+            &bucket_id_hex(),
+            Some("cd".repeat(32)),
+        )
+        .unwrap();
 
         assert_eq!(head_request.ciphertext_reference_hex, Some("cd".repeat(32)));
         assert!(head_request.expected_manifest_reference_hex.is_none());
@@ -414,9 +462,13 @@ mod tests {
         );
         route_plan.key = None;
 
-        let request =
-            CiphertextGatewayBoundary::list_encrypted_manifest_request(&route_plan).unwrap();
+        let request = CiphertextGatewayBoundary::list_encrypted_manifest_request(
+            &route_plan,
+            &bucket_id_hex(),
+        )
+        .unwrap();
 
+        assert_eq!(request.bucket_id_hex, bucket_id_hex());
         assert_eq!(request.action, RemoteGatewayAction::ListCiphertextManifest);
         assert!(request.ciphertext_payload.is_none());
         assert!(request.encrypted_manifest_payload.is_none());
@@ -428,13 +480,13 @@ mod tests {
     #[test]
     fn put_encrypted_manifest_request_forwards_only_encrypted_manifest_payload() {
         let request = CiphertextGatewayBoundary::put_encrypted_manifest_request(
-            "bucket",
+            bucket_id_hex(),
             b"encrypted-manifest".to_vec(),
             Some("01".repeat(32)),
         )
         .unwrap();
 
-        assert_eq!(request.bucket, "bucket");
+        assert_eq!(request.bucket_id_hex, bucket_id_hex());
         assert_eq!(request.action, RemoteGatewayAction::PutEncryptedManifest);
         assert_eq!(
             request.encrypted_manifest_payload,
@@ -458,11 +510,13 @@ mod tests {
 
         let request = CiphertextGatewayBoundary::delete_ciphertext_request(
             &route_plan,
+            &bucket_id_hex(),
             b"manifest".to_vec(),
             Some("02".repeat(32)),
         )
         .unwrap();
 
+        assert_eq!(request.bucket_id_hex, bucket_id_hex());
         assert_eq!(request.action, RemoteGatewayAction::DeleteCiphertextObject);
         assert_eq!(
             request.encrypted_manifest_payload,
@@ -486,6 +540,7 @@ mod tests {
 
         let err = CiphertextGatewayBoundary::delete_ciphertext_request(
             &route_plan,
+            &bucket_id_hex(),
             b"manifest".to_vec(),
             None,
         )
@@ -506,6 +561,7 @@ mod tests {
 
         let err = CiphertextGatewayBoundary::put_ciphertext_request(
             &route_plan,
+            &bucket_id_hex(),
             TrustlessEncryptResult {
                 ciphertext: Vec::new(),
                 ..encrypted_result()
@@ -523,9 +579,13 @@ mod tests {
             RemoteGatewayAction::DeleteCiphertextObject,
         );
 
-        let err =
-            CiphertextGatewayBoundary::delete_ciphertext_request(&route_plan, Vec::new(), None)
-                .unwrap_err();
+        let err = CiphertextGatewayBoundary::delete_ciphertext_request(
+            &route_plan,
+            &bucket_id_hex(),
+            Vec::new(),
+            None,
+        )
+        .unwrap_err();
 
         assert_eq!(
             err,
@@ -541,9 +601,12 @@ mod tests {
         );
         route_plan.ciphertext_only_remote = false;
 
-        let err =
-            CiphertextGatewayBoundary::put_ciphertext_request(&route_plan, encrypted_result())
-                .unwrap_err();
+        let err = CiphertextGatewayBoundary::put_ciphertext_request(
+            &route_plan,
+            &bucket_id_hex(),
+            encrypted_result(),
+        )
+        .unwrap_err();
 
         assert_eq!(
             err,
@@ -556,14 +619,45 @@ mod tests {
         );
         route_plan.gateway_plaintext_access = true;
 
-        let err =
-            CiphertextGatewayBoundary::put_ciphertext_request(&route_plan, encrypted_result())
-                .unwrap_err();
+        let err = CiphertextGatewayBoundary::put_ciphertext_request(
+            &route_plan,
+            &bucket_id_hex(),
+            encrypted_result(),
+        )
+        .unwrap_err();
 
         assert_eq!(
             err,
             CiphertextGatewayBoundaryError::RouteAllowsGatewayPlaintextAccess
         );
+    }
+
+    #[test]
+    fn boundary_rejects_missing_or_malformed_bucket_id_hex() {
+        let route_plan = make_route_plan(
+            TrustlessProxyOperation::PutObject,
+            RemoteGatewayAction::PutCiphertextObject,
+        );
+
+        let err =
+            CiphertextGatewayBoundary::put_ciphertext_request(&route_plan, " ", encrypted_result())
+                .unwrap_err();
+        assert_eq!(err, CiphertextGatewayBoundaryError::MissingBucketId);
+
+        let err = CiphertextGatewayBoundary::put_ciphertext_request(
+            &route_plan,
+            "not-hex",
+            encrypted_result(),
+        )
+        .unwrap_err();
+        assert_eq!(err, CiphertextGatewayBoundaryError::InvalidBucketId);
+
+        let err = CiphertextGatewayBoundary::list_encrypted_manifest_request(
+            &route_plan,
+            &"01".repeat(8),
+        )
+        .unwrap_err();
+        assert_eq!(err, CiphertextGatewayBoundaryError::InvalidBucketId);
     }
 
     #[test]

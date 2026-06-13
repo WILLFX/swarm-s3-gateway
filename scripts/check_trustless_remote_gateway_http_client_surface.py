@@ -16,12 +16,15 @@ required_source = [
     "TrustlessRemoteGatewayClient for RemoteGatewayHttpClient",
     "CiphertextGatewayRequest",
     "CiphertextGatewayResponse",
+    "bucket_id_hex",
     "ciphertext_hex",
     "encrypted_manifest_hex",
     "ciphertext_reference_hex",
     "encrypted_manifest_reference_hex",
     "expected_manifest_reference_hex",
     "PlaintextPayloadRejected",
+    "MissingBucketId",
+    "InvalidBucketId",
     "GatewayPlaintextAccessRejected",
     "UnexpectedCiphertextReference",
     "UnexpectedExpectedManifestReference",
@@ -45,6 +48,7 @@ required_tests = [
     "http_client_fetches_get_ciphertext_response",
     "http_client_fetches_encrypted_manifest_response",
     "http_client_sends_direct_ciphertext_reference_for_read",
+    "http_client_rejects_missing_or_malformed_bucket_id_before_transport",
     "http_client_sends_delete_encrypted_manifest_only",
     "http_client_rejects_references_on_wrong_actions_before_transport",
     "http_timeout_parser_defaults_or_accepts_positive_seconds",
@@ -60,6 +64,7 @@ required_tests = [
     "http_client_sends_x_amz_content_sha256_matching_body",
     "http_client_sends_sigv4_authorization_when_credentials_configured",
     "assert_remote_body_excludes_object_keys_and_ids",
+    '"bucket"',
 ]
 
 required_lib = [
@@ -96,6 +101,7 @@ if not request_envelope:
     raise SystemExit("FAILED: missing RemoteGatewayHttpRequestEnvelope struct body")
 
 for forbidden in [
+    "bucket:",
     "object_key",
     "objectKey",
     "object_key_id",

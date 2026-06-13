@@ -20,7 +20,7 @@ The bucket contract intentionally exposes public state metadata:
 | Surface | Exposed value | Privacy impact |
 |---|---|---|
 | Owner account | Account that owns or updates bucket state | Reveals that an account uses the system |
-| Bucket hash | `bucket_name_hash` | Hides plaintext bucket name, but may be guessable if the bucket name is low entropy |
+| Bucket identifier | `bucket_name_hash` for legacy buckets, opaque `bucket_id_hex` for trustless bucket create flows | Legacy hashes hide plaintext names but may be guessable if the bucket name is low entropy; trustless privacy depends on opaque IDs |
 | Visibility flag | `is_private` | Reveals whether a bucket is marked private |
 | Bucket generation | `bucket_generation` | Reveals delete/recreate incarnation changes for the same bucket hash |
 | Bucket state epoch | `bucket_state_epoch` | Reveals bucket-level semantic changes such as encryption-version updates |
@@ -76,7 +76,9 @@ Examples of low-entropy names:
 - invoices
 - client-files
 
-A future stronger design could derive bucket IDs from a secret salt/key rather than only public owner plus bucket name.
+Trustless bucket-name privacy depends on opaque bucket IDs. Trustless bucket creation supplies `x-s3w-bucket-id`, and that value should be random or derived from a high-entropy secret/salt unavailable to the remote gateway.
+
+A deterministic low-entropy hash of owner plus bucket name is dictionary-guessable. Do not claim trustless bucket-name privacy for deployments that choose deterministic public bucket IDs.
 
 ### Timing analysis
 

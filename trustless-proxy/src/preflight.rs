@@ -24,6 +24,7 @@ pub struct TrustlessPreflightRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustlessPutPreflight {
+    pub bucket_id: String,
     pub route_plan: TrustlessRoutePlan,
     pub envelope_context: RecipientEnvelopeContext,
     pub local_private_key: LocalPrivateKeySelection,
@@ -31,6 +32,7 @@ pub struct TrustlessPutPreflight {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustlessLocalDecryptPreflight {
+    pub bucket_id: String,
     pub route_plan: TrustlessRoutePlan,
     pub local_private_key: LocalPrivateKeySelection,
 }
@@ -96,9 +98,10 @@ where
         let object_key_id = require_object_key_id(request.object_key_id.clone())?;
 
         let local_private_key = self.select_local_private_key(&request)?;
+        let bucket_id = request.bucket_id.clone();
 
         let envelope_context = self.recipient_keys.build_context(RecipientKeyRequest {
-            bucket_id: request.bucket_id,
+            bucket_id: bucket_id.clone(),
             object_key_id,
             policy_version: request.policy_version,
             recipients: request.recipients,
@@ -108,6 +111,7 @@ where
             TrustlessRoutePlanner::plan_put_object(request.bucket, key, Some(&envelope_context))?;
 
         Ok(TrustlessPutPreflight {
+            bucket_id,
             route_plan,
             envelope_context,
             local_private_key,
@@ -123,6 +127,7 @@ where
         let route_plan = TrustlessRoutePlanner::plan_get_object(request.bucket, key)?;
 
         Ok(TrustlessLocalDecryptPreflight {
+            bucket_id: request.bucket_id,
             route_plan,
             local_private_key,
         })
@@ -136,6 +141,7 @@ where
         let route_plan = TrustlessRoutePlanner::plan_list_objects_v2(request.bucket)?;
 
         Ok(TrustlessLocalDecryptPreflight {
+            bucket_id: request.bucket_id,
             route_plan,
             local_private_key,
         })
@@ -150,6 +156,7 @@ where
         let route_plan = TrustlessRoutePlanner::plan_delete_object(request.bucket, key)?;
 
         Ok(TrustlessLocalDecryptPreflight {
+            bucket_id: request.bucket_id,
             route_plan,
             local_private_key,
         })
@@ -287,8 +294,9 @@ mod tests {
         }
     }
 
-    fn builder()
-    -> TrustlessOperationPreflightBuilder<MockRecipientKeyResolver, MockLocalKeystoreResolver> {
+    fn builder(
+    ) -> TrustlessOperationPreflightBuilder<MockRecipientKeyResolver, MockLocalKeystoreResolver>
+    {
         TrustlessOperationPreflightBuilder::new(
             MockRecipientKeyResolver::default()
                 .with_record(recipient_record("alice"))
@@ -309,12 +317,10 @@ mod tests {
         assert!(!preflight.route_plan.gateway_plaintext_access);
         assert_eq!(preflight.envelope_context.recipients.len(), 2);
         assert_eq!(preflight.local_private_key.key_version, 7);
-        assert!(
-            preflight
-                .route_plan
-                .local_steps
-                .contains(&LocalTrustlessStep::EncryptPayloadLocally)
-        );
+        assert!(preflight
+            .route_plan
+            .local_steps
+            .contains(&LocalTrustlessStep::EncryptPayloadLocally));
     }
 
     #[test]
@@ -347,12 +353,10 @@ mod tests {
         assert!(preflight.route_plan.ciphertext_only_remote);
         assert!(!preflight.route_plan.gateway_plaintext_access);
         assert_eq!(preflight.local_private_key.key_version, 7);
-        assert!(
-            preflight
-                .route_plan
-                .local_steps
-                .contains(&LocalTrustlessStep::DecryptPayloadLocally)
-        );
+        assert!(preflight
+            .route_plan
+            .local_steps
+            .contains(&LocalTrustlessStep::DecryptPayloadLocally));
     }
 
     #[test]
@@ -364,12 +368,10 @@ mod tests {
             RemoteGatewayAction::ListCiphertextManifest
         );
         assert_eq!(preflight.local_private_key.key_version, 7);
-        assert!(
-            preflight
-                .route_plan
-                .local_steps
-                .contains(&LocalTrustlessStep::DecryptBucketManifestLocally)
-        );
+        assert!(preflight
+            .route_plan
+            .local_steps
+            .contains(&LocalTrustlessStep::DecryptBucketManifestLocally));
     }
 
     #[test]
@@ -381,12 +383,10 @@ mod tests {
             RemoteGatewayAction::DeleteCiphertextObject
         );
         assert_eq!(preflight.local_private_key.key_version, 7);
-        assert!(
-            preflight
-                .route_plan
-                .local_steps
-                .contains(&LocalTrustlessStep::UpdateBucketManifestLocally)
-        );
+        assert!(preflight
+            .route_plan
+            .local_steps
+            .contains(&LocalTrustlessStep::UpdateBucketManifestLocally));
     }
 
     #[test]

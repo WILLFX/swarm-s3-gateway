@@ -173,6 +173,14 @@ The remote gateway may return encrypted owner catalog and bucket manifest cipher
 
 The remote gateway must not require plaintext private object names or caller-supplied object key IDs to serve trustless private list operations.
 
+## Bucket identity privacy
+
+Remote trustless ciphertext requests carry `bucket_id_hex`, not plaintext bucket names.
+
+Trustless bucket IDs must be random or secret-salted opaque 32-byte identifiers. A trustless bucket create request supplies that identifier through `x-s3w-bucket-id`; the gateway rejects trustless-private creation without it instead of falling back to `bucket_name_hash(owner, bucket)`.
+
+Legacy remote JSON fields such as `bucket`, `key`, and `object_key_id` are rejected. The plaintext S3 bucket name remains local-proxy input so the proxy can provide S3-compatible routing and decrypt the local owner catalog, but it is not serialized into the remote ciphertext gateway envelope.
+
 ## Delegation boundary and future flow
 
 The remote trustless gateway is owner-only in the current implementation.

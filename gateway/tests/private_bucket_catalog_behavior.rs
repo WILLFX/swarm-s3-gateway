@@ -30,6 +30,7 @@ use std::{
 const OWNER_SIGNATURE_HEADER: &str = "x-s3gw-owner-signature";
 const BUCKET_VISIBILITY_HEADER: &str = "x-s3gw-bucket-visibility";
 const BUCKET_TYPE_HEADER: &str = "x-s3gw-bucket-type";
+const TRUSTLESS_BUCKET_ID_HEADER: &str = "x-s3w-bucket-id";
 const EXPECTED_OWNER_CATALOG_ROOT_HEADER: &str = "x-s3gw-expected-owner-catalog-root";
 const OWNER_CATALOG_ROOT_HEADER: &str = "x-s3gw-owner-catalog-root";
 
@@ -327,6 +328,10 @@ fn trustless_create_headers(
         HeaderValue::from_static("trustless-private"),
     );
     headers.insert(
+        TRUSTLESS_BUCKET_ID_HEADER,
+        HeaderValue::from_str(&hex::encode(trustless_bucket_id())).unwrap(),
+    );
+    headers.insert(
         EXPECTED_OWNER_CATALOG_ROOT_HEADER,
         HeaderValue::from_str(expected_owner_catalog_root).unwrap(),
     );
@@ -335,6 +340,10 @@ fn trustless_create_headers(
         HeaderValue::from_str(owner_catalog_root).unwrap(),
     );
     headers
+}
+
+fn trustless_bucket_id() -> [u8; 32] {
+    [13u8; 32]
 }
 
 fn build_state(
@@ -528,10 +537,7 @@ async fn trustless_create_bucket_uses_client_supplied_catalog_roots_without_bee_
         .expect("trustless bucket create must call create_trustless_bucket_anchor");
 
     assert_eq!(trustless_anchor.owner, owner);
-    assert_eq!(
-        trustless_anchor.bucket_id,
-        bucket_name_hash(&owner, &bucket)
-    );
+    assert_eq!(trustless_anchor.bucket_id, trustless_bucket_id());
     assert_eq!(trustless_anchor.owner_signature, owner_signature());
     assert_eq!(
         trustless_anchor.expected_owner_catalog_root,
@@ -546,6 +552,48 @@ async fn trustless_create_bucket_uses_client_supplied_catalog_roots_without_bee_
     assert!(
         bee.put_calls().is_empty(),
         "trustless create must not write/encrypt an owner catalog through the gateway"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn trustless_create_bucket_requires_client_supplied_opaque_bucket_id() -> Result<()> {
+    let master_service_key = [42u8; 32];
+    let owner = [7u8; 32];
+    let bucket = "trustless-bucket".to_string();
+    let expected_owner_catalog_root = hex::encode([11u8; 32]);
+    let owner_catalog_root = hex::encode([12u8; 32]);
+
+    let bee = Arc::new(MockBeeStorage::default());
+    let anchor = Arc::new(RecordingAnchorClient::default());
+
+    let state = build_state(
+        bee,
+        anchor.clone(),
+        MockRegistryClient {
+            bucket: None,
+            bucket_type: None,
+            owner_catalog_root: vec![11u8; 32],
+        },
+        master_service_key,
+    );
+
+    let principal = AwsPrincipal {
+        access_key_id: "test-access-key".to_string(),
+        owner,
+    };
+
+    let mut headers = trustless_create_headers(&expected_owner_catalog_root, &owner_catalog_root);
+    headers.remove(TRUSTLESS_BUCKET_ID_HEADER);
+
+    let response =
+        create_bucket::handle(Path(bucket), Extension(principal), State(state), headers).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        anchor.trustless_create_call().is_none(),
+        "trustless create must fail before anchoring when opaque bucket id is missing"
     );
 
     Ok(())

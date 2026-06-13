@@ -111,7 +111,7 @@ impl RemoteGatewaySigV4AuthConfig {
 struct RemoteGatewayHttpRequestEnvelope {
     version: u32,
     action: String,
-    bucket: String,
+    bucket_id_hex: String,
     ciphertext_hex: Option<String>,
     encrypted_manifest_hex: Option<String>,
     ciphertext_reference_hex: Option<String>,
@@ -143,6 +143,12 @@ pub enum RemoteGatewayHttpClientError {
 
     #[error("plaintext payload must never be sent to the remote gateway")]
     PlaintextPayloadRejected,
+
+    #[error("bucket id is required")]
+    MissingBucketId,
+
+    #[error("bucket id must be a 32-byte hex value")]
+    InvalidBucketId,
 
     #[error("ciphertext payload is required for PUT ciphertext object")]
     MissingCiphertextPayload,
@@ -193,6 +199,12 @@ pub enum RemoteGatewayHttpClientError {
 impl From<RemoteGatewayHttpClientError> for RemoteGatewayClientError {
     fn from(error: RemoteGatewayHttpClientError) -> Self {
         match error {
+            RemoteGatewayHttpClientError::MissingBucketId => {
+                RemoteGatewayClientError::MissingBucketId
+            }
+            RemoteGatewayHttpClientError::InvalidBucketId => {
+                RemoteGatewayClientError::InvalidBucketId
+            }
             RemoteGatewayHttpClientError::PlaintextPayloadRejected => {
                 RemoteGatewayClientError::PlaintextPayloadRejected
             }
@@ -546,6 +558,8 @@ fn parse_remote_gateway_http_timeout_secs(raw: Option<&str>) -> Duration {
 fn request_to_http_envelope(
     request: CiphertextGatewayRequest,
 ) -> Result<RemoteGatewayHttpRequestEnvelope, RemoteGatewayHttpClientError> {
+    let bucket_id_hex = validate_bucket_id_hex(&request.bucket_id_hex)?;
+
     if request.plaintext_payload_present {
         return Err(RemoteGatewayHttpClientError::PlaintextPayloadRejected);
     }
@@ -675,12 +689,27 @@ fn request_to_http_envelope(
     Ok(RemoteGatewayHttpRequestEnvelope {
         version: WIRE_VERSION,
         action: action_to_wire(request.action).to_owned(),
-        bucket: request.bucket,
+        bucket_id_hex,
         ciphertext_hex: request.ciphertext_payload.map(hex::encode),
         encrypted_manifest_hex: request.encrypted_manifest_payload.map(hex::encode),
         ciphertext_reference_hex: request.ciphertext_reference_hex,
         expected_manifest_reference_hex: request.expected_manifest_reference_hex,
     })
+}
+
+fn validate_bucket_id_hex(bucket_id_hex: &str) -> Result<String, RemoteGatewayHttpClientError> {
+    let bucket_id_hex = bucket_id_hex.trim().trim_start_matches("0x").to_owned();
+    if bucket_id_hex.is_empty() {
+        return Err(RemoteGatewayHttpClientError::MissingBucketId);
+    }
+
+    let bytes =
+        hex::decode(&bucket_id_hex).map_err(|_| RemoteGatewayHttpClientError::InvalidBucketId)?;
+    if bytes.len() != 32 {
+        return Err(RemoteGatewayHttpClientError::InvalidBucketId);
+    }
+
+    Ok(bucket_id_hex)
 }
 
 fn http_envelope_to_response(
@@ -848,7 +877,7 @@ mod tests {
 
     fn request(action: RemoteGatewayAction) -> CiphertextGatewayRequest {
         CiphertextGatewayRequest {
-            bucket: "bucket".to_owned(),
+            bucket_id_hex: hex::encode([1u8; 32]),
             action,
             ciphertext_payload: None,
             encrypted_manifest_payload: None,
@@ -874,6 +903,7 @@ mod tests {
     fn assert_remote_body_excludes_object_keys_and_ids(body: &serde_json::Value) {
         let object = body.as_object().unwrap();
         for forbidden in [
+            "bucket",
             "object_key",
             "objectKey",
             "object_key_id",
@@ -961,11 +991,11 @@ mod tests {
         let client = RemoteGatewayHttpClient::from_env(base_url).unwrap();
         let executor = TrustlessRemoteGatewayExecutor::new(client);
 
-        let bucket = format!("trustless-http-sigv4-live-{}", std::process::id());
+        let bucket_id_hex = hex::encode([std::process::id() as u8; 32]);
         let ciphertext = b"rust remote gateway http sigv4 ciphertext".to_vec();
 
         let mut put = request(RemoteGatewayAction::PutCiphertextObject);
-        put.bucket = bucket.clone();
+        put.bucket_id_hex = bucket_id_hex.clone();
         put.ciphertext_payload = Some(ciphertext.clone());
 
         let put_result = executor.execute(put).unwrap();
@@ -978,7 +1008,7 @@ mod tests {
         assert!(put_result.ciphertext_reference_hex.is_some());
 
         let mut get = request(RemoteGatewayAction::GetCiphertextObject);
-        get.bucket = bucket;
+        get.bucket_id_hex = bucket_id_hex;
         get.ciphertext_reference_hex = put_result.ciphertext_reference_hex;
 
         let get_result = executor.execute(get).unwrap();
@@ -1122,7 +1152,7 @@ mod tests {
         assert_remote_body_excludes_object_keys_and_ids(&body);
         assert_eq!(body["version"], WIRE_VERSION);
         assert_eq!(body["action"], "put_ciphertext_object");
-        assert_eq!(body["bucket"], "bucket");
+        assert_eq!(body["bucket_id_hex"], hex::encode([1u8; 32]));
         assert_eq!(body["ciphertext_hex"], hex::encode(b"ciphertext"));
         assert!(body["ciphertext_reference_hex"].is_null());
         assert!(body["expected_manifest_reference_hex"].is_null());
@@ -1218,6 +1248,33 @@ mod tests {
         let err = client.execute_ciphertext_request(request).unwrap_err();
 
         assert_eq!(err, RemoteGatewayClientError::MissingCiphertextReference);
+        assert!(transport.no_body_was_sent());
+    }
+
+    #[test]
+    fn http_client_rejects_missing_or_malformed_bucket_id_before_transport() {
+        let (client, transport) =
+            client_with_transport(response(RemoteGatewayAction::GetCiphertextObject));
+
+        let mut request = request(RemoteGatewayAction::GetCiphertextObject);
+        request.bucket_id_hex = " ".to_owned();
+        request.ciphertext_reference_hex = Some("ab".repeat(32));
+
+        let err = client.execute_ciphertext_request(request).unwrap_err();
+
+        assert_eq!(err, RemoteGatewayClientError::MissingBucketId);
+        assert!(transport.no_body_was_sent());
+
+        let (client, transport) =
+            client_with_transport(response(RemoteGatewayAction::GetCiphertextObject));
+
+        let mut request = request(RemoteGatewayAction::GetCiphertextObject);
+        request.bucket_id_hex = "not-hex".to_owned();
+        request.ciphertext_reference_hex = Some("ab".repeat(32));
+
+        let err = client.execute_ciphertext_request(request).unwrap_err();
+
+        assert_eq!(err, RemoteGatewayClientError::InvalidBucketId);
         assert!(transport.no_body_was_sent());
     }
 
@@ -1591,7 +1648,7 @@ mod tests {
 
             let response = client
                 .execute_ciphertext_request(CiphertextGatewayRequest {
-                    bucket: "bucket-a".to_owned(),
+                    bucket_id_hex: hex::encode([3u8; 32]),
                     action,
                     ciphertext_payload: ciphertext_payload.clone(),
                     encrypted_manifest_payload: encrypted_manifest_payload.clone(),
@@ -1614,7 +1671,7 @@ mod tests {
             assert_eq!(object.len(), 7);
             assert!(object.contains_key("version"));
             assert!(object.contains_key("action"));
-            assert!(object.contains_key("bucket"));
+            assert!(object.contains_key("bucket_id_hex"));
             assert!(object.contains_key("ciphertext_hex"));
             assert!(object.contains_key("encrypted_manifest_hex"));
             assert!(object.contains_key("ciphertext_reference_hex"));
@@ -1622,7 +1679,7 @@ mod tests {
 
             assert_eq!(body["version"], WIRE_VERSION);
             assert_eq!(body["action"], expected_wire_action);
-            assert_eq!(body["bucket"], "bucket-a");
+            assert_eq!(body["bucket_id_hex"], hex::encode([3u8; 32]));
 
             match ciphertext_payload {
                 Some(expected_payload) => {
